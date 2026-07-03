@@ -1,0 +1,349 @@
+//@version=6
+// =============================================================================
+// APEX TREND CONTINUATION SYSTEM (ATCS) v1
+// -----------------------------------------------------------------------------
+// Author        : Quant research build (independent design)
+// Type          : Strategy (backtesting-first). Can be ported to an indicator.
+// Model         : Trend-following PULLBACK CONTINUATION with multi-filter gating
+// Markets       : Indices, Forex, Metals (XAU), Crypto
+// Timeframes    : 15m / 1H / 4H (primary), works on higher TFs too
+//
+// DESIGN THESIS
+// -----------------------------------------------------------------------------
+// The single most robust, cross-asset edge that survives out-of-sample is
+// "trade WITH an established trend, but only enter on a pullback that resets
+// momentum, and only when the market is actually trending (not chopping)."
+// Breakouts and mean-reversion each work in only one regime; pullback
+// continuation inside a filtered trend has the best balance of hit-rate and
+// realistic R multiple across many instruments.
+//
+// Every gate below removes a *known* failure mode of a naive MA-cross system:
+//   1. EMA50/EMA200 stack  -> only trade in the direction of the dominant trend
+//   2. ADX (DMI) regime    -> refuse to trade in chop (the #1 killer of trend systems)
+//   3. Pullback + reclaim   -> buy the dip / sell the rip, not the extension top
+//   4. RSI momentum reset   -> confirm buyers/sellers are actually stepping back in
+//   5. Swing-structure (HH/HL, LH/LL) via CONFIRMED pivots -> real market structure
+//   6. ATR volatility floor -> skip dead, untradeable markets
+//   7. Session filter       -> avoid illiquid hours (optional)
+//   8. Optional HTF bias    -> non-repainting higher-timeframe agreement
+//
+// RISK MODEL
+// -----------------------------------------------------------------------------
+//   Stop  = ATR * multiplier from entry (volatility-adaptive, asset-agnostic)
+//   TP1   = 1R  -> take 50%, then move stop to BREAKEVEN (this lifts win-rate)
+//   TP2   = 2R  -> honours the mandatory minimum 1:2 reward-to-risk
+//   TP3   = 3R  -> optional runner for the remainder
+//
+// NON-REPAINTING GUARANTEES
+// -----------------------------------------------------------------------------
+//   * calc_on_every_tick = false  -> logic evaluates ONLY on bar close
+//   * No future-referencing / no negative-offset historical reads
+//   * Pivots are used only AFTER they are confirmed (right-bars elapsed)
+//   * Optional HTF data pulled with lookahead_off and referenced [1]
+//     (previous, fully-closed HTF bar) so it can never repaint
+//   * Entries execute on the NEXT bar open after a confirmed signal
+// =============================================================================
+
+strategy(
+     title              = "Apex Trend Continuation System (ATCS) v1",
+     shorttitle         = "ATCS v1",
+     overlay            = true,
+     calc_on_every_tick = false,
+     pyramiding         = 0,
+     initial_capital    = 10000,
+     default_qty_type   = strategy.percent_of_equity,
+     default_qty_value  = 100,
+     commission_type    = strategy.commission.percent,
+     commission_value   = 0.02,
+     slippage           = 1,
+     process_orders_on_close = false)
+
+// =============================================================================
+// INPUTS
+// =============================================================================
+gTrend   = "1) Trend Filter"
+emaFastLen = input.int(50,  "Fast Trend EMA",  minval=5,  group=gTrend, tooltip="Medium trend. Fast>Slow = bullish stack.")
+emaSlowLen = input.int(200, "Slow Trend EMA",  minval=20, group=gTrend, tooltip="Dominant trend. Price must be on the correct side.")
+pullbackLen= input.int(20,  "Pullback EMA",    minval=3,  group=gTrend, tooltip="The dynamic level price pulls back to and reclaims.")
+
+gRegime  = "2) Regime / Chop Filter (ADX)"
+useADX     = input.bool(true, "Enable ADX regime filter", group=gRegime)
+adxLen     = input.int(14, "DI Length",       minval=1, group=gRegime)
+adxSmooth  = input.int(14, "ADX Smoothing",   minval=1, group=gRegime)
+adxThresh  = input.float(20.0, "ADX Trending Threshold", minval=5, step=0.5, group=gRegime, tooltip="Below this the market is treated as chop and trades are blocked.")
+
+gMom     = "3) Momentum (RSI)"
+rsiLen     = input.int(14, "RSI Length", minval=2, group=gMom)
+rsiMid     = input.float(50.0, "RSI Momentum Pivot", minval=1, maxval=99, group=gMom, tooltip="Longs need RSI above this and rising; shorts below and falling.")
+
+gStruct  = "4) Market Structure (Pivots)"
+useStruct  = input.bool(true, "Require HH/HL (long) & LH/LL (short)", group=gStruct)
+pivotLeft  = input.int(5, "Pivot Left Bars",  minval=1, group=gStruct)
+pivotRight = input.int(3, "Pivot Right Bars", minval=1, group=gStruct, tooltip="Pivots confirm this many bars later => non-repainting but slightly delayed.")
+
+gVol     = "5) Volatility Filter (ATR)"
+atrLen     = input.int(14, "ATR Length", minval=1, group=gVol)
+minAtrPct  = input.float(0.05, "Min ATR % of Price", minval=0.0, step=0.01, group=gVol, tooltip="Blocks dead/flat markets. Raise it to demand more movement.")
+
+gSess    = "6) Session Filter"
+useSession = input.bool(false, "Enable session filter", group=gSess)
+sessInput  = input.session("0700-2000", "Trading Session", group=gSess)
+sessTz     = input.string("GMT", "Session Timezone", group=gSess)
+
+gHTF     = "7) Higher-Timeframe Bias (optional, non-repainting)"
+useHTF     = input.bool(false, "Require HTF trend agreement", group=gHTF)
+htfTf      = input.timeframe("240", "HTF Timeframe", group=gHTF, tooltip="Uses the PREVIOUS closed HTF bar only -> cannot repaint.")
+
+gRisk    = "8) Risk & Targets"
+slMult     = input.float(1.5, "Stop = ATR ×", minval=0.1, step=0.1, group=gRisk)
+tp1R       = input.float(1.0, "TP1 (R multiple)", minval=0.1, step=0.1, group=gRisk)
+tp2R       = input.float(2.0, "TP2 (R multiple)", minval=0.2, step=0.1, group=gRisk, tooltip="Keep >= 2.0 to honour the minimum 1:2 RR.")
+tp3R       = input.float(3.0, "TP3 Runner (R multiple)", minval=0.3, step=0.1, group=gRisk)
+useRunner  = input.bool(true, "Use TP3 runner for the remainder", group=gRisk)
+moveBE     = input.bool(true, "Move stop to breakeven after TP1", group=gRisk)
+
+gView    = "9) Display"
+showSignals = input.bool(true, "Show entry arrows", group=gView)
+showLevels  = input.bool(true, "Show SL/TP lines",  group=gView)
+showDash    = input.bool(true, "Show dashboard",     group=gView)
+allowLong   = input.bool(true, "Allow long trades",  group=gView)
+allowShort  = input.bool(true, "Allow short trades", group=gView)
+
+// =============================================================================
+// CORE CALCULATIONS  (all evaluated on the closed bar -> no repaint)
+// =============================================================================
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaPull = ta.ema(close, pullbackLen)
+rsi     = ta.rsi(close, rsiLen)
+atr     = ta.atr(atrLen)
+[diPlus, diMinus, adx] = ta.dmi(adxLen, adxSmooth)
+
+// --- Trend context ----------------------------------------------------------
+upTrend   = emaFast > emaSlow and close > emaFast
+downTrend = emaFast < emaSlow and close < emaFast
+
+// --- Regime / chop + directional agreement (DI+ vs DI-) ---------------------
+regimeOK   = not useADX or adx > adxThresh
+diBullOK   = not useADX or diPlus >= diMinus     // buyers in control
+diBearOK   = not useADX or diMinus >= diPlus     // sellers in control
+
+// --- Volatility floor -------------------------------------------------------
+atrPct    = close != 0 ? atr / close * 100.0 : 0.0
+volOK     = atrPct >= minAtrPct
+
+// --- Session ----------------------------------------------------------------
+inSession = not na(time(timeframe.period, sessInput, sessTz))
+sessOK    = not useSession or inSession
+
+// --- Higher-timeframe bias (non-repainting: previous closed HTF bar) --------
+htfClose = request.security(syminfo.tickerid, htfTf, close[1],                lookahead=barmerge.lookahead_off)
+htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaSlowLen)[1], lookahead=barmerge.lookahead_off)
+htfUp    = htfClose > htfEma
+htfDown  = htfClose < htfEma
+htfLongOK  = not useHTF or htfUp
+htfShortOK = not useHTF or htfDown
+
+// --- Market structure via CONFIRMED pivots (HH/HL, LH/LL) -------------------
+pl = ta.pivotlow(pivotLeft, pivotRight)
+ph = ta.pivothigh(pivotLeft, pivotRight)
+var float lastPL = na
+var float prevPL = na
+var float lastPH = na
+var float prevPH = na
+if not na(pl)
+    prevPL := lastPL
+    lastPL := pl
+if not na(ph)
+    prevPH := lastPH
+    lastPH := ph
+higherLows = not na(lastPL) and not na(prevPL) and lastPL > prevPL   // bullish structure
+lowerHighs = not na(lastPH) and not na(prevPH) and lastPH < prevPH   // bearish structure
+structLongOK  = not useStruct or higherLows
+structShortOK = not useStruct or lowerHighs
+
+// =============================================================================
+// ENTRY LOGIC
+// -----------------------------------------------------------------------------
+//  LONG  : bullish trend + trending regime + price pulled back to EMA(pull)
+//          then RECLAIMS it on this close, RSI back above the momentum pivot
+//          and rising, valid HH/HL structure, volatility/session/HTF pass.
+//  SHORT : exact mirror.
+// =============================================================================
+pulledBackLong  = ta.lowest(low,  pullbackLen) <= emaPull      // recent dip to the dynamic support
+pulledBackShort = ta.highest(high, pullbackLen) >= emaPull     // recent rally to the dynamic resistance
+
+reclaimLong  = ta.crossover(close, emaPull)                    // fresh reclaim on this closed bar
+reclaimShort = ta.crossunder(close, emaPull)
+
+momoLong  = rsi >= rsiMid and rsi > rsi[1]
+momoShort = rsi <= rsiMid and rsi < rsi[1]
+
+longSignal  = allowLong  and upTrend   and regimeOK and diBullOK and volOK and sessOK and htfLongOK  and structLongOK  and pulledBackLong  and reclaimLong  and momoLong
+shortSignal = allowShort and downTrend and regimeOK and diBearOK and volOK and sessOK and htfShortOK and structShortOK and pulledBackShort and reclaimShort and momoShort
+
+// =============================================================================
+// POSITION & LEVEL MANAGEMENT
+// =============================================================================
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+flat    = strategy.position_size == 0
+
+var float entryPx = na
+var float stopPx  = na
+var float tp1Px   = na
+var float tp2Px   = na
+var float tp3Px   = na
+var int   tradeDir = 0
+var bool  tp1Done  = false
+
+// --- Entries (only when flat; fills next bar open -> non-repaint) -----------
+if flat and longSignal
+    strategy.entry("Long", strategy.long)
+if flat and shortSignal
+    strategy.entry("Short", strategy.short)
+
+// --- Initialise levels the moment a new position appears --------------------
+newLong  = inLong  and tradeDir != 1
+newShort = inShort and tradeDir != -1
+if newLong
+    entryPx  := strategy.position_avg_price
+    stopPx   := entryPx - atr * slMult
+    r        = entryPx - stopPx
+    tp1Px    := entryPx + r * tp1R
+    tp2Px    := entryPx + r * tp2R
+    tp3Px    := entryPx + r * tp3R
+    tradeDir := 1
+    tp1Done  := false
+if newShort
+    entryPx  := strategy.position_avg_price
+    stopPx   := entryPx + atr * slMult
+    r        = stopPx - entryPx
+    tp1Px    := entryPx - r * tp1R
+    tp2Px    := entryPx - r * tp2R
+    tp3Px    := entryPx - r * tp3R
+    tradeDir := -1
+    tp1Done  := false
+
+// --- TP1 tag + optional breakeven management --------------------------------
+if inLong and not tp1Done and high >= tp1Px
+    tp1Done := true
+    if moveBE
+        stopPx := math.max(stopPx, entryPx)
+if inShort and not tp1Done and low <= tp1Px
+    tp1Done := true
+    if moveBE
+        stopPx := math.min(stopPx, entryPx)
+
+// --- Working exit orders (re-issued each bar so BE stop updates) ------------
+// qty_percent is applied to the CURRENT position at fill time. Because TP1 is
+// nearest it fills first (50%); TP2 then closes 50% of what remains (runner on)
+// or 100% (runner off); TP3 closes whatever is left. Stops on every leg net
+// the position flat if price hits the stop before any target.
+if inLong
+    strategy.exit("L-TP1", from_entry="Long", qty_percent=50, limit=tp1Px, stop=stopPx)
+    if useRunner
+        strategy.exit("L-TP2", from_entry="Long", qty_percent=50, limit=tp2Px, stop=stopPx)
+        strategy.exit("L-TP3", from_entry="Long",                 limit=tp3Px, stop=stopPx)
+    else
+        strategy.exit("L-TP2", from_entry="Long",                 limit=tp2Px, stop=stopPx)
+if inShort
+    strategy.exit("S-TP1", from_entry="Short", qty_percent=50, limit=tp1Px, stop=stopPx)
+    if useRunner
+        strategy.exit("S-TP2", from_entry="Short", qty_percent=50, limit=tp2Px, stop=stopPx)
+        strategy.exit("S-TP3", from_entry="Short",                 limit=tp3Px, stop=stopPx)
+    else
+        strategy.exit("S-TP2", from_entry="Short",                 limit=tp2Px, stop=stopPx)
+
+// --- Closed-trade / exit events (for alerts) computed before reset ----------
+exitedLong  = tradeDir == 1  and flat
+exitedShort = tradeDir == -1 and flat
+tp1JustHit  = tp1Done and not tp1Done[1]
+
+// --- Reset state when flat --------------------------------------------------
+if flat
+    tradeDir := 0
+    entryPx  := na
+    stopPx   := na
+    tp1Px    := na
+    tp2Px    := na
+    tp3Px    := na
+    tp1Done  := false
+
+// =============================================================================
+// VISUALS
+// =============================================================================
+plot(emaFast, "EMA Fast", color=color.new(color.orange, 0), linewidth=1)
+plot(emaSlow, "EMA Slow", color=color.new(color.blue,   0), linewidth=2)
+plot(emaPull, "EMA Pullback", color=color.new(color.gray, 30), linewidth=1)
+
+plotshape(showSignals and longSignal,  title="Long",  location=location.belowbar,
+     style=shape.triangleup,   color=color.new(color.green, 0), size=size.small, text="LONG")
+plotshape(showSignals and shortSignal, title="Short", location=location.abovebar,
+     style=shape.triangledown, color=color.new(color.red, 0),   size=size.small, text="SHORT")
+
+plot(showLevels and tradeDir != 0 ? stopPx : na, "Stop Loss", color=color.new(color.red, 0),
+     style=plot.style_linebr, linewidth=2)
+plot(showLevels and tradeDir != 0 ? tp1Px : na, "TP1", color=color.new(color.teal, 0),
+     style=plot.style_linebr, linewidth=1)
+plot(showLevels and tradeDir != 0 ? tp2Px : na, "TP2", color=color.new(color.green, 0),
+     style=plot.style_linebr, linewidth=1)
+plot(showLevels and useRunner and tradeDir != 0 ? tp3Px : na, "TP3", color=color.new(color.lime, 0),
+     style=plot.style_linebr, linewidth=1)
+
+bgcolor(useSession and not inSession ? color.new(color.gray, 90) : na, title="Out of session")
+
+// =============================================================================
+// DASHBOARD + WIN/LOSS STATISTICS
+// =============================================================================
+f_pf() =>
+    strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
+winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100.0 : 0.0
+
+var table dash = table.new(position.top_right, 2, 18, border_width=1,
+     frame_color=color.new(color.gray, 60), frame_width=1)
+
+f_row(int r, string k, string v, color vc) =>
+    table.cell(dash, 0, r, k, text_color=color.new(color.white, 0), text_size=size.small,
+         text_halign=text.align_left,  bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 1, r, v, text_color=vc, text_size=size.small,
+         text_halign=text.align_right, bgcolor=color.new(color.gray, 85))
+
+if showDash and barstate.islast
+    trendTxt = upTrend ? "BULL" : downTrend ? "BEAR" : "MIXED"
+    trendCol = upTrend ? color.lime : downTrend ? color.red : color.gray
+    posTxt   = tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : "FLAT"
+    posCol   = tradeDir == 1 ? color.lime : tradeDir == -1 ? color.red : color.gray
+
+    table.cell(dash, 0, 0, "APEX  ATCS v1", text_color=color.white, text_size=size.normal,
+         bgcolor=color.new(color.blue, 40))
+    table.cell(dash, 1, 0, syminfo.ticker + "  " + timeframe.period, text_color=color.white,
+         text_size=size.small, bgcolor=color.new(color.blue, 40))
+
+    f_row(1,  "Trend",        trendTxt,                                      trendCol)
+    f_row(2,  "ADX",          str.tostring(adx, "#.#") + (regimeOK ? "  ✓" : "  chop"), regimeOK ? color.lime : color.orange)
+    f_row(3,  "RSI",          str.tostring(rsi, "#.#"),                      rsi >= rsiMid ? color.lime : color.red)
+    f_row(4,  "ATR %",        str.tostring(atrPct, "#.##"),                  volOK ? color.white : color.orange)
+    f_row(5,  "Session",      useSession ? (inSession ? "OPEN" : "CLOSED") : "OFF", inSession or not useSession ? color.white : color.orange)
+    f_row(6,  "HTF Bias",     not useHTF ? "OFF" : (htfUp ? "UP" : htfDown ? "DOWN" : "-"), htfUp ? color.lime : htfDown ? color.red : color.gray)
+    f_row(7,  "Position",     posTxt,                                        posCol)
+    f_row(8,  "Entry",        na(entryPx) ? "-" : str.tostring(entryPx, format.mintick), color.white)
+    f_row(9,  "Stop",         na(stopPx)  ? "-" : str.tostring(stopPx,  format.mintick), color.red)
+    f_row(10, "TP1 (1R)",     na(tp1Px)   ? "-" : str.tostring(tp1Px,   format.mintick), color.teal)
+    f_row(11, "TP2 (2R)",     na(tp2Px)   ? "-" : str.tostring(tp2Px,   format.mintick), color.green)
+    f_row(12, "TP3 (3R)",     not useRunner or na(tp3Px) ? "-" : str.tostring(tp3Px, format.mintick), color.lime)
+    f_row(13, "── Stats ──",  "",                                           color.gray)
+    f_row(14, "Trades",       str.tostring(strategy.closedtrades),          color.white)
+    f_row(15, "Win Rate %",   str.tostring(winRate, "#.#"),                 winRate >= 50 ? color.lime : color.orange)
+    f_row(16, "Profit Factor",na(f_pf()) ? "-" : str.tostring(f_pf(), "#.##"), (f_pf() > 1) ? color.lime : color.red)
+    f_row(17, "Net Profit",   str.tostring(strategy.netprofit, "#.##"),     strategy.netprofit >= 0 ? color.lime : color.red)
+
+// =============================================================================
+// ALERTS
+// =============================================================================
+alertcondition(longSignal,  "ATCS Long Entry",  "ATCS LONG signal on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSignal, "ATCS Short Entry", "ATCS SHORT signal on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(tp1JustHit,  "ATCS TP1 Hit",     "ATCS TP1 reached on {{ticker}} {{interval}} - move stop to breakeven")
+alertcondition(exitedLong,  "ATCS Long Closed", "ATCS long position closed on {{ticker}} {{interval}}")
+alertcondition(exitedShort, "ATCS Short Closed","ATCS short position closed on {{ticker}} {{interval}}")
+alertcondition(longSignal or shortSignal, "ATCS Any Entry", "ATCS entry signal on {{ticker}} {{interval}}")
