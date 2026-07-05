@@ -1,52 +1,31 @@
 //@version=6
 // =============================================================================
-// APEX TREND CONTINUATION SYSTEM (ATCS) v1
+// LIQUIDITY DRAW & DISPLACEMENT SYSTEM (LDX) v2
 // -----------------------------------------------------------------------------
-// Author        : Quant research build (independent design)
-// Type          : Strategy (backtesting-first). Can be ported to an indicator.
-// Model         : Trend-following PULLBACK CONTINUATION with multi-filter gating
-// Markets       : Indices, Forex, Metals (XAU), Crypto
-// Timeframes    : 15m / 1H / 4H (primary), works on higher TFs too
+// A price-action / order-flow strategy. The EDGE is NOT an indicator — it is the
+// sequence institutions leave behind:
 //
-// DESIGN THESIS
-// -----------------------------------------------------------------------------
-// The single most robust, cross-asset edge that survives out-of-sample is
-// "trade WITH an established trend, but only enter on a pullback that resets
-// momentum, and only when the market is actually trending (not chopping)."
-// Breakouts and mean-reversion each work in only one regime; pullback
-// continuation inside a filtered trend has the best balance of hit-rate and
-// realistic R multiple across many instruments.
+//   liquidity resting  ->  raid (stop hunt)  ->  displacement + imbalance (FVG)
+//   ->  market-structure shift (MSS)  ->  entry on the retrace into the FVG
+//   ->  stop beyond the raid  ->  target = the NEXT draw on liquidity
 //
-// Every gate below removes a *known* failure mode of a naive MA-cross system:
-//   1. EMA50/EMA200 stack  -> only trade in the direction of the dominant trend
-//   2. ADX (DMI) regime    -> refuse to trade in chop (the #1 killer of trend systems)
-//   3. Pullback + reclaim   -> buy the dip / sell the rip, not the extension top
-//   4. RSI momentum reset   -> confirm buyers/sellers are actually stepping back in
-//   5. Swing-structure (HH/HL, LH/LL) via CONFIRMED pivots -> real market structure
-//   6. ATR volatility floor -> skip dead, untradeable markets
-//   7. Session filter       -> avoid illiquid hours (optional)
-//   8. Optional HTF bias    -> non-repainting higher-timeframe agreement
+// The system answers one question: "Where are stops resting, which pool is price
+// drawing toward, and where is the highest-probability entry AFTER the raid?"
 //
-// RISK MODEL
-// -----------------------------------------------------------------------------
-//   Stop  = ATR * multiplier from entry (volatility-adaptive, asset-agnostic)
-//   TP1   = 1R  -> take 50%, then move stop to BREAKEVEN (this lifts win-rate)
-//   TP2   = 2R  -> honours the mandatory minimum 1:2 reward-to-risk
-//   TP3   = 3R  -> optional runner for the remainder
+// EMA is used ONLY as an optional higher-timeframe background bias. It is never
+// the trigger. Every entry is built from structure, liquidity and displacement.
 //
-// NON-REPAINTING GUARANTEES
-// -----------------------------------------------------------------------------
-//   * calc_on_every_tick = false  -> logic evaluates ONLY on bar close
-//   * No future-referencing / no negative-offset historical reads
-//   * Pivots are used only AFTER they are confirmed (right-bars elapsed)
-//   * Optional HTF data pulled with lookahead_off and referenced [1]
-//     (previous, fully-closed HTF bar) so it can never repaint
-//   * Entries execute on the NEXT bar open after a confirmed signal
+// NON-REPAINTING
+//   * calc_on_every_tick=false  -> logic only finalises on bar close
+//   * Swing pivots are consumed only AFTER they confirm (right bars elapsed)
+//   * Prior day/week levels use request.security(..., [1], lookahead_off)
+//     => always the PREVIOUS, fully-closed period. Cannot repaint.
+//   * Entries are limit/market orders that fill on later bars, never in the past
 // =============================================================================
 
 strategy(
-     title              = "Apex Trend Continuation System (ATCS) v1",
-     shorttitle         = "ATCS v1",
+     title              = "Liquidity Draw & Displacement System (LDX) v2",
+     shorttitle         = "LDX v2",
      overlay            = true,
      calc_on_every_tick = false,
      pyramiding         = 0,
@@ -56,294 +35,601 @@ strategy(
      commission_type    = strategy.commission.percent,
      commission_value   = 0.02,
      slippage           = 1,
-     process_orders_on_close = false)
+     max_lines_count    = 200,
+     max_labels_count   = 300,
+     max_boxes_count    = 200)
 
 // =============================================================================
 // INPUTS
 // =============================================================================
-gTrend   = "1) Trend Filter"
-emaFastLen = input.int(50,  "Fast Trend EMA",  minval=5,  group=gTrend, tooltip="Medium trend. Fast>Slow = bullish stack.")
-emaSlowLen = input.int(200, "Slow Trend EMA",  minval=20, group=gTrend, tooltip="Dominant trend. Price must be on the correct side.")
-pullbackLen= input.int(20,  "Pullback EMA",    minval=3,  group=gTrend, tooltip="The dynamic level price pulls back to and reclaims.")
+gStruct = "Structure"
+swLen    = input.int(10, "External swing length", minval=2, group=gStruct, tooltip="Pivot legs for MAJOR swings (dealing range / external liquidity).")
+intLen   = input.int(4,  "Internal swing length", minval=1, group=gStruct, tooltip="Pivot legs for MINOR swings (internal liquidity / MSS trigger).")
+rangeLook= input.int(120,"Dealing-range lookback", minval=20, group=gStruct, tooltip="Bars used to define the active premium/discount range.")
 
-gRegime  = "2) Regime / Chop Filter (ADX)"
-useADX     = input.bool(true, "Enable ADX regime filter", group=gRegime)
-adxLen     = input.int(14, "DI Length",       minval=1, group=gRegime)
-adxSmooth  = input.int(14, "ADX Smoothing",   minval=1, group=gRegime)
-adxThresh  = input.float(20.0, "ADX Trending Threshold", minval=5, step=0.5, group=gRegime, tooltip="Below this the market is treated as chop and trades are blocked.")
+gLiq = "Liquidity Engine"
+eqTol    = input.float(0.10, "Equal H/L tolerance (× ATR)", minval=0.0, step=0.05, group=gLiq, tooltip="Two swings within this distance = equal highs/lows (a stop pool).")
+swWindow = input.int(12, "Setup window after raid (bars)", minval=2, group=gLiq, tooltip="How long after a liquidity raid the displacement+MSS must appear.")
+showLiq  = input.bool(true, "Plot liquidity levels", group=gLiq)
 
-gMom     = "3) Momentum (RSI)"
-rsiLen     = input.int(14, "RSI Length", minval=2, group=gMom)
-rsiMid     = input.float(50.0, "RSI Momentum Pivot", minval=1, maxval=99, group=gMom, tooltip="Longs need RSI above this and rising; shorts below and falling.")
+gDisp = "Displacement / Imbalance"
+minFvg   = input.float(0.5, "Min FVG size (× ATR)", minval=0.05, step=0.05, group=gDisp, tooltip="An imbalance bigger than this counts as DISPLACEMENT.")
+atrLen   = input.int(14, "ATR length", minval=1, group=gDisp)
 
-gStruct  = "4) Market Structure (Pivots)"
-useStruct  = input.bool(true, "Require HH/HL (long) & LH/LL (short)", group=gStruct)
-pivotLeft  = input.int(5, "Pivot Left Bars",  minval=1, group=gStruct)
-pivotRight = input.int(3, "Pivot Right Bars", minval=1, group=gStruct, tooltip="Pivots confirm this many bars later => non-repainting but slightly delayed.")
+gEntry = "Entry / Risk"
+useFVGEntry = input.bool(true, "Enter on FVG retrace (limit)", group=gEntry, tooltip="ON = limit into the imbalance (better RR). OFF = market on MSS close.")
+slBuf    = input.float(0.25, "Stop buffer beyond raid (× ATR)", minval=0.0, step=0.05, group=gEntry)
+minRR    = input.float(2.0, "Minimum RR to the draw", minval=1.0, step=0.1, group=gEntry, tooltip="No signal is allowed unless the target draw is at least this many R away.")
+tp1R     = input.float(1.0, "TP1 (R)", minval=0.2, step=0.1, group=gEntry)
+tp3R     = input.float(3.0, "TP3 runner (R)", minval=0.5, step=0.1, group=gEntry)
+useRunner= input.bool(true, "Use TP3 runner", group=gEntry)
+moveBE   = input.bool(true, "Move stop to breakeven after TP1", group=gEntry)
+entryValid = input.int(10, "Cancel unfilled entry after (bars)", minval=1, group=gEntry)
 
-gVol     = "5) Volatility Filter (ATR)"
-atrLen     = input.int(14, "ATR Length", minval=1, group=gVol)
-minAtrPct  = input.float(0.05, "Min ATR % of Price", minval=0.0, step=0.01, group=gVol, tooltip="Blocks dead/flat markets. Raise it to demand more movement.")
+gScore = "Signal Quality"
+aPlusMin = input.int(75, "A+ minimum score", minval=0, maxval=100, group=gScore)
+bMin     = input.int(55, "B minimum score",  minval=0, maxval=100, group=gScore)
+allowB   = input.bool(true, "Allow B-tier setups", group=gScore, tooltip="OFF = trade only A+ setups (fewer, higher confidence).")
 
-gSess    = "6) Session Filter"
-useSession = input.bool(false, "Enable session filter", group=gSess)
-sessInput  = input.session("0700-2000", "Trading Session", group=gSess)
-sessTz     = input.string("GMT", "Session Timezone", group=gSess)
+gHTF = "HTF Background Bias (optional filter only)"
+useHTF   = input.bool(true, "Use HTF EMA bias as a filter", group=gHTF)
+htfTf    = input.timeframe("240", "HTF timeframe", group=gHTF)
+htfEmaLen= input.int(50, "HTF EMA length", minval=5, group=gHTF)
+htfHard  = input.bool(false, "Make HTF bias a HARD filter", group=gHTF, tooltip="ON = block counter-bias trades. OFF = it only affects the score.")
 
-gHTF     = "7) Higher-Timeframe Bias (optional, non-repainting)"
-useHTF     = input.bool(false, "Require HTF trend agreement", group=gHTF)
-htfTf      = input.timeframe("240", "HTF Timeframe", group=gHTF, tooltip="Uses the PREVIOUS closed HTF bar only -> cannot repaint.")
+gSess = "Sessions (exchange timezone by default)"
+tz       = input.string("GMT", "Session timezone", group=gSess)
+asiaSess = input.session("0000-0700", "Asia range",     group=gSess)
+lonSess  = input.session("0700-1000", "London killzone",group=gSess)
+nySess   = input.session("1200-1500", "New York killzone", group=gSess)
+useKZ    = input.bool(false, "Only trade inside killzones", group=gSess)
 
-gRisk    = "8) Risk & Targets"
-slMult     = input.float(1.5, "Stop = ATR ×", minval=0.1, step=0.1, group=gRisk)
-tp1R       = input.float(1.0, "TP1 (R multiple)", minval=0.1, step=0.1, group=gRisk)
-tp2R       = input.float(2.0, "TP2 (R multiple)", minval=0.2, step=0.1, group=gRisk, tooltip="Keep >= 2.0 to honour the minimum 1:2 RR.")
-tp3R       = input.float(3.0, "TP3 Runner (R multiple)", minval=0.3, step=0.1, group=gRisk)
-useRunner  = input.bool(true, "Use TP3 runner for the remainder", group=gRisk)
-moveBE     = input.bool(true, "Move stop to breakeven after TP1", group=gRisk)
+gRisk = "Risk Controls"
+maxTrades   = input.int(3, "Max trades per day", minval=1, group=gRisk)
+dailyLossCap= input.float(3.0, "Daily loss cap (% of day-start equity)", minval=0.1, step=0.1, group=gRisk)
+cooldownBars= input.int(3, "Cooldown after a trade (bars)", minval=0, group=gRisk)
 
-gView    = "9) Display"
-showSignals = input.bool(true, "Show entry arrows", group=gView)
-showLevels  = input.bool(true, "Show SL/TP lines",  group=gView)
-showDash    = input.bool(true, "Show dashboard",     group=gView)
-allowLong   = input.bool(true, "Allow long trades",  group=gView)
-allowShort  = input.bool(true, "Allow short trades", group=gView)
+gView = "Display"
+showSignals = input.bool(true, "Show signal arrows + labels", group=gView)
+showFVG     = input.bool(true, "Show entry FVG box", group=gView)
+showDash    = input.bool(true, "Show dashboard", group=gView)
+allowLong   = input.bool(true, "Allow longs",  group=gView)
+allowShort  = input.bool(true, "Allow shorts", group=gView)
 
 // =============================================================================
-// CORE CALCULATIONS  (all evaluated on the closed bar -> no repaint)
+// CORE SERIES
 // =============================================================================
-emaFast = ta.ema(close, emaFastLen)
-emaSlow = ta.ema(close, emaSlowLen)
-emaPull = ta.ema(close, pullbackLen)
-rsi     = ta.rsi(close, rsiLen)
-atr     = ta.atr(atrLen)
-[diPlus, diMinus, adx] = ta.dmi(adxLen, adxSmooth)
+atr = ta.atr(atrLen)
 
-// --- Trend context ----------------------------------------------------------
-upTrend   = emaFast > emaSlow and close > emaFast
-downTrend = emaFast < emaSlow and close < emaFast
-
-// --- Regime / chop + directional agreement (DI+ vs DI-) ---------------------
-regimeOK   = not useADX or adx > adxThresh
-diBullOK   = not useADX or diPlus >= diMinus     // buyers in control
-diBearOK   = not useADX or diMinus >= diPlus     // sellers in control
-
-// --- Volatility floor -------------------------------------------------------
-atrPct    = close != 0 ? atr / close * 100.0 : 0.0
-volOK     = atrPct >= minAtrPct
-
-// --- Session ----------------------------------------------------------------
-inSession = not na(time(timeframe.period, sessInput, sessTz))
-sessOK    = not useSession or inSession
-
-// --- Higher-timeframe bias (non-repainting: previous closed HTF bar) --------
-htfClose = request.security(syminfo.tickerid, htfTf, close[1],                lookahead=barmerge.lookahead_off)
-htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, emaSlowLen)[1], lookahead=barmerge.lookahead_off)
+// --- HTF background bias (non-repainting: previous closed HTF bar) -----------
+htfEma   = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfEmaLen)[1], lookahead=barmerge.lookahead_off)
+htfClose = request.security(syminfo.tickerid, htfTf, close[1],                    lookahead=barmerge.lookahead_off)
 htfUp    = htfClose > htfEma
 htfDown  = htfClose < htfEma
-htfLongOK  = not useHTF or htfUp
-htfShortOK = not useHTF or htfDown
 
-// --- Market structure via CONFIRMED pivots (HH/HL, LH/LL) -------------------
-pl = ta.pivotlow(pivotLeft, pivotRight)
-ph = ta.pivothigh(pivotLeft, pivotRight)
-var float lastPL = na
-var float prevPL = na
-var float lastPH = na
-var float prevPH = na
-if not na(pl)
-    prevPL := lastPL
-    lastPL := pl
-if not na(ph)
-    prevPH := lastPH
-    lastPH := ph
-higherLows = not na(lastPL) and not na(prevPL) and lastPL > prevPL   // bullish structure
-lowerHighs = not na(lastPH) and not na(prevPH) and lastPH < prevPH   // bearish structure
-structLongOK  = not useStruct or higherLows
-structShortOK = not useStruct or lowerHighs
+// --- Prior day / week liquidity (previous CLOSED period => no repaint) -------
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_off)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead=barmerge.lookahead_off)
+pwh = request.security(syminfo.tickerid, "W", high[1], lookahead=barmerge.lookahead_off)
+pwl = request.security(syminfo.tickerid, "W", low[1],  lookahead=barmerge.lookahead_off)
+
+// --- New-day detection & daily bookkeeping ----------------------------------
+newDay = ta.change(time("D")) != 0
 
 // =============================================================================
-// ENTRY LOGIC
-// -----------------------------------------------------------------------------
-//  LONG  : bullish trend + trending regime + price pulled back to EMA(pull)
-//          then RECLAIMS it on this close, RSI back above the momentum pivot
-//          and rising, valid HH/HL structure, volatility/session/HTF pass.
-//  SHORT : exact mirror.
+// SESSION HIGH / LOW ENGINE (Asia range = the London draw)
 // =============================================================================
-pulledBackLong  = ta.lowest(low,  pullbackLen) <= emaPull      // recent dip to the dynamic support
-pulledBackShort = ta.highest(high, pullbackLen) >= emaPull     // recent rally to the dynamic resistance
+inAsia = not na(time(timeframe.period, asiaSess, tz))
+inLon  = not na(time(timeframe.period, lonSess,  tz))
+inNY   = not na(time(timeframe.period, nySess,   tz))
+inKZ   = inLon or inNY
 
-reclaimLong  = ta.crossover(close, emaPull)                    // fresh reclaim on this closed bar
-reclaimShort = ta.crossunder(close, emaPull)
-
-momoLong  = rsi >= rsiMid and rsi > rsi[1]
-momoShort = rsi <= rsiMid and rsi < rsi[1]
-
-longSignal  = allowLong  and upTrend   and regimeOK and diBullOK and volOK and sessOK and htfLongOK  and structLongOK  and pulledBackLong  and reclaimLong  and momoLong
-shortSignal = allowShort and downTrend and regimeOK and diBearOK and volOK and sessOK and htfShortOK and structShortOK and pulledBackShort and reclaimShort and momoShort
+// Running Asia range, frozen once the session ends -> acts as resting liquidity
+var float asiaHi = na
+var float asiaLo = na
+asiaStart = inAsia and not inAsia[1]
+if asiaStart
+    asiaHi := high
+    asiaLo := low
+else if inAsia
+    asiaHi := math.max(nz(asiaHi, high), high)
+    asiaLo := math.min(nz(asiaLo, low),  low)
 
 // =============================================================================
-// POSITION & LEVEL MANAGEMENT
+// SWINGS & DEALING RANGE (premium / discount / equilibrium)
+// =============================================================================
+swHi = ta.pivothigh(swLen, swLen)   // confirmed major swing high
+swLo = ta.pivotlow(swLen, swLen)    // confirmed major swing low
+inHi = ta.pivothigh(intLen, intLen) // confirmed minor swing high (internal)
+inLo = ta.pivotlow(intLen, intLen)  // confirmed minor swing low (internal)
+
+var float lastSwingHi = na
+var float prevSwingHi = na
+var float lastSwingLo = na
+var float prevSwingLo = na
+if not na(swHi)
+    prevSwingHi := lastSwingHi
+    lastSwingHi := swHi
+if not na(swLo)
+    prevSwingLo := lastSwingLo
+    lastSwingLo := swLo
+
+var float lastIntHi = na
+var float lastIntLo = na
+if not na(inHi)
+    lastIntHi := inHi
+if not na(inLo)
+    lastIntLo := inLo
+
+// Dealing range = extreme high/low over the lookback (external boundaries)
+rangeHigh = ta.highest(high, rangeLook)
+rangeLow  = ta.lowest(low,  rangeLook)
+eq        = (rangeHigh + rangeLow) / 2.0
+premium   = close > eq        // expensive -> favour shorts
+discount  = close < eq        // cheap     -> favour longs
+
+// =============================================================================
+// EQUAL HIGHS / LOWS (clean stop pools)
+// =============================================================================
+var float eqHigh = na
+var float eqLow  = na
+if not na(lastSwingHi) and not na(prevSwingHi) and math.abs(lastSwingHi - prevSwingHi) <= eqTol * atr
+    eqHigh := math.max(lastSwingHi, prevSwingHi)
+if not na(lastSwingLo) and not na(prevSwingLo) and math.abs(lastSwingLo - prevSwingLo) <= eqTol * atr
+    eqLow := math.min(lastSwingLo, prevSwingLo)
+
+// =============================================================================
+// "TAKEN" FLAGS for the key external pools (drives clean visuals + draw logic)
+// =============================================================================
+var bool pdhTaken = false
+var bool pdlTaken = false
+var bool pwhTaken = false
+var bool pwlTaken = false
+var bool asiaHiTaken = false
+var bool asiaLoTaken = false
+if newDay
+    pdhTaken := false
+    pdlTaken := false
+    asiaHiTaken := false
+    asiaLoTaken := false
+if not na(pdh) and high > pdh
+    pdhTaken := true
+if not na(pdl) and low  < pdl
+    pdlTaken := true
+if not na(pwh) and high > pwh
+    pwhTaken := true
+if not na(pwl) and low  < pwl
+    pwlTaken := true
+if not na(asiaHi) and not inAsia and high > asiaHi
+    asiaHiTaken := true
+if not na(asiaLo) and not inAsia and low  < asiaLo
+    asiaLoTaken := true
+
+// =============================================================================
+// LIQUIDITY MAPS  (arrays rebuilt each bar; used for sweeps + nearest draw)
+// =============================================================================
+f_push(array<float> a, float v) =>
+    if not na(v)
+        array.push(a, v)
+
+buySide  = array.new_float()   // resting liquidity ABOVE (sell stops of shorts)
+sellSide = array.new_float()   // resting liquidity BELOW (buy stops of longs)
+f_push(buySide,  pdh)
+f_push(buySide,  pwh)
+f_push(buySide,  asiaHi)
+f_push(buySide,  lastSwingHi)
+f_push(buySide,  eqHigh)
+f_push(sellSide, pdl)
+f_push(sellSide, pwl)
+f_push(sellSide, asiaLo)
+f_push(sellSide, lastSwingLo)
+f_push(sellSide, eqLow)
+
+f_nearestAbove(array<float> a, float px) =>
+    float best = na
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            v = array.get(a, i)
+            if not na(v) and v > px and (na(best) or v < best)
+                best := v
+    best
+f_nearestBelow(array<float> a, float px) =>
+    float best = na
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            v = array.get(a, i)
+            if not na(v) and v < px and (na(best) or v > best)
+                best := v
+    best
+// smallest level >= floor  (nearest valid target that clears the RR requirement)
+f_targetAbove(array<float> a, float floorPx) =>
+    float best = na
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            v = array.get(a, i)
+            if not na(v) and v >= floorPx and (na(best) or v < best)
+                best := v
+    best
+f_targetBelow(array<float> a, float capPx) =>
+    float best = na
+    if array.size(a) > 0
+        for i = 0 to array.size(a) - 1
+            v = array.get(a, i)
+            if not na(v) and v <= capPx and (na(best) or v > best)
+                best := v
+    best
+
+nearBuy  = f_nearestAbove(buySide,  close)
+nearSell = f_nearestBelow(sellSide, close)
+
+// --- Draw-on-liquidity direction: which pool is closer / structure-implied ---
+drawDir = na(nearBuy) and na(nearSell) ? 0 :
+         na(nearBuy) ? -1 :
+         na(nearSell) ? 1 :
+         (nearBuy - close) < (close - nearSell) ? 1 : -1   // nearer pool = likely draw
+
+// =============================================================================
+// LIQUIDITY RAID DETECTION  (wick sweep + close back inside = failed sweep)
+// =============================================================================
+// Sell-side raid (bullish implication): price dips below a sell-side pool then
+// closes back ABOVE it -> stops taken, likely draw back up.
+sweptSell = false
+if array.size(sellSide) > 0
+    for i = 0 to array.size(sellSide) - 1
+        lv = array.get(sellSide, i)
+        if not na(lv) and low < lv and close > lv
+            sweptSell := true
+// external quality: a raid of PDL/PWL/Asia is higher grade than an internal swing
+sweptSellExt = (not na(pdl) and low < pdl and close > pdl) or (not na(pwl) and low < pwl and close > pwl) or (not na(asiaLo) and low < asiaLo and close > asiaLo)
+
+sweptBuy = false
+if array.size(buySide) > 0
+    for i = 0 to array.size(buySide) - 1
+        lv = array.get(buySide, i)
+        if not na(lv) and high > lv and close < lv
+            sweptBuy := true
+sweptBuyExt = (not na(pdh) and high > pdh and close < pdh) or (not na(pwh) and high > pwh and close < pwh) or (not na(asiaHi) and high > asiaHi and close < asiaHi)
+
+// =============================================================================
+// DISPLACEMENT + FAIR VALUE GAP (imbalance)
+// =============================================================================
+// Bullish FVG: gap between high[2] and current low (unfilled) => up displacement
+fvgUpSize = low - high[2]
+fvgDnSize = low[2] - high
+bullDisp  = fvgUpSize > minFvg * atr
+bearDisp  = fvgDnSize > minFvg * atr
+// Imbalance zone (proximal = nearest edge to current price)
+bullFvgTop = low          // top edge of bullish FVG (buy-limit proximal)
+bullFvgBot = high[2]      // bottom edge
+bearFvgBot = high         // bottom edge of bearish FVG (sell-limit proximal)
+bearFvgTop = low[2]       // top edge
+
+// =============================================================================
+// MARKET-STRUCTURE SHIFT (MSS) — the trigger
+// =============================================================================
+mssUp   = not na(lastIntHi) and close > lastIntHi and close[1] <= lastIntHi
+mssDown = not na(lastIntLo) and close < lastIntLo and close[1] >= lastIntLo
+
+// =============================================================================
+// SEQUENCE STATE MACHINE  (raid -> displacement -> MSS)
+// =============================================================================
+var bool  longRaidActive = false
+var int   longRaidBar    = na
+var float longRaidLow    = na
+var bool  longRaidExt    = false
+var bool  longDispSeen   = false
+var float longFvgTop     = na
+var float longFvgBot     = na
+
+var bool  shortRaidActive= false
+var int   shortRaidBar   = na
+var float shortRaidHigh  = na
+var bool  shortRaidExt   = false
+var bool  shortDispSeen  = false
+var float shortFvgTop    = na
+var float shortFvgBot    = na
+
+// register a fresh sell-side raid
+if sweptSell
+    longRaidActive := true
+    longRaidBar    := bar_index
+    longRaidLow    := low
+    longRaidExt    := sweptSellExt
+    longDispSeen   := false
+if longRaidActive and bar_index - longRaidBar > swWindow
+    longRaidActive := false
+// capture displacement that occurs while the raid is active
+if longRaidActive and bullDisp
+    longDispSeen := true
+    longFvgTop   := bullFvgTop
+    longFvgBot   := bullFvgBot
+
+if sweptBuy
+    shortRaidActive := true
+    shortRaidBar    := bar_index
+    shortRaidHigh   := high
+    shortRaidExt    := sweptBuyExt
+    shortDispSeen   := false
+if shortRaidActive and bar_index - shortRaidBar > swWindow
+    shortRaidActive := false
+if shortRaidActive and bearDisp
+    shortDispSeen := true
+    shortFvgTop   := bearFvgTop
+    shortFvgBot   := bearFvgBot
+
+// =============================================================================
+// DAILY RISK BOOKKEEPING
+// =============================================================================
+var float dayStartEq = na
+var int   tradesToday = 0
+var int   setupsToday = 0
+var bool  dailyLossHit = false
+var int   cooldownUntil = 0
+if newDay
+    dayStartEq   := strategy.equity
+    tradesToday  := 0
+    setupsToday  := 0
+    dailyLossHit := false
+dayPnlPct = na(dayStartEq) or dayStartEq == 0 ? 0.0 : (strategy.equity - dayStartEq) / dayStartEq * 100.0
+if dayPnlPct <= -dailyLossCap
+    dailyLossHit := true
+
+riskOK = tradesToday < maxTrades and not dailyLossHit and bar_index >= cooldownUntil and (not useKZ or inKZ)
+
+// =============================================================================
+// SETUP QUALIFICATION + SCORING (0-100)
+// =============================================================================
+flat = strategy.position_size == 0
+
+// candidate triggers: raid active + displacement seen + MSS now
+longTrigger  = allowLong  and longRaidActive  and longDispSeen  and mssUp
+shortTrigger = allowShort and shortRaidActive and shortDispSeen and mssDown
+
+// ---- LONG assembly ----
+var int    pendDir   = 0
+var float  pendEntry = na
+var float  pendSL    = na
+var float  pendTP1   = na
+var float  pendTP2   = na
+var float  pendTP3   = na
+var int    pendExp   = na
+var float  pendScore = 0.0
+var string pendReason= ""
+var string pendTier  = ""
+
+// signal-fired flags (true only on the exact bar a setup is created)
+bool sigLong  = false
+bool sigShort = false
+
+f_score(bool ext, float fvgSize, bool pdOK, bool htfOK, float rr) =>
+    float s = 0.0
+    s += 20.0                                   // MSS confirmed (required)
+    s += ext ? 20.0 : 10.0                      // external vs internal raid
+    s += math.min(25.0, fvgSize / atr * 12.5)   // displacement strength
+    s += pdOK ? 15.0 : 5.0                       // premium/discount alignment
+    s += htfOK ? 10.0 : 0.0                      // HTF background bias
+    s += rr >= 3.0 ? 10.0 : rr >= 2.5 ? 7.0 : 5.0
+    math.round(math.min(100.0, s))
+
+if flat and pendDir == 0 and riskOK and longTrigger
+    entry = useFVGEntry and not na(longFvgTop) ? longFvgTop : close
+    sl    = longRaidLow - slBuf * atr
+    risk  = entry - sl
+    if risk > 0
+        floorTP = entry + minRR * risk
+        tgt = f_targetAbove(buySide, floorTP)          // real draw giving >= minRR
+        tp2 = na(tgt) ? na : tgt
+        if not na(tp2)
+            rr = (tp2 - entry) / risk
+            htfOK = htfUp
+            sc = f_score(longRaidExt, math.abs(longFvgTop - longFvgBot), discount, htfOK, rr)
+            passTier = sc >= aPlusMin or (allowB and sc >= bMin)
+            hardOK = not (useHTF and htfHard) or htfUp
+            if passTier and hardOK
+                pendDir   := 1
+                pendEntry := entry
+                pendSL    := sl
+                pendTP1   := entry + risk * tp1R
+                pendTP2   := tp2
+                pendTP3   := useRunner ? entry + risk * tp3R : na
+                pendExp   := bar_index + entryValid
+                pendScore := sc
+                pendTier  := sc >= aPlusMin ? "A+" : "B"
+                pendReason:= "LONG: sell-side liquidity swept + bullish displacement + MSS -> draw = buy-side @ " + str.tostring(tp2, format.mintick)
+                setupsToday += 1
+                sigLong    := true
+                longRaidActive := false   // consume -> no duplicate signals in this move
+                if useFVGEntry
+                    strategy.entry("Long", strategy.long, limit=entry)
+                else
+                    strategy.entry("Long", strategy.long)
+
+if flat and pendDir == 0 and riskOK and shortTrigger
+    entry = useFVGEntry and not na(shortFvgBot) ? shortFvgBot : close
+    sl    = shortRaidHigh + slBuf * atr
+    risk  = sl - entry
+    if risk > 0
+        floorTP = entry - minRR * risk
+        tgt = f_targetBelow(sellSide, floorTP)
+        tp2 = na(tgt) ? na : tgt
+        if not na(tp2)
+            rr = (entry - tp2) / risk
+            htfOK = htfDown
+            sc = f_score(shortRaidExt, math.abs(shortFvgTop - shortFvgBot), premium, htfOK, rr)
+            passTier = sc >= aPlusMin or (allowB and sc >= bMin)
+            hardOK = not (useHTF and htfHard) or htfDown
+            if passTier and hardOK
+                pendDir   := -1
+                pendEntry := entry
+                pendSL    := sl
+                pendTP1   := entry - risk * tp1R
+                pendTP2   := tp2
+                pendTP3   := useRunner ? entry - risk * tp3R : na
+                pendExp   := bar_index + entryValid
+                pendScore := sc
+                pendTier  := sc >= aPlusMin ? "A+" : "B"
+                pendReason:= "SHORT: buy-side liquidity swept + bearish displacement + MSS -> draw = sell-side @ " + str.tostring(tp2, format.mintick)
+                setupsToday += 1
+                sigShort   := true
+                shortRaidActive := false
+                if useFVGEntry
+                    strategy.entry("Short", strategy.short, limit=entry)
+                else
+                    strategy.entry("Short", strategy.short)
+
+// =============================================================================
+// ORDER / POSITION MANAGEMENT
 // =============================================================================
 inLong  = strategy.position_size > 0
 inShort = strategy.position_size < 0
-flat    = strategy.position_size == 0
+var int  tradeDir = 0
+var bool tp1Done  = false
 
-var float entryPx = na
-var float stopPx  = na
-var float tp1Px   = na
-var float tp2Px   = na
-var float tp3Px   = na
-var int   tradeDir = 0
-var bool  tp1Done  = false
-
-// --- Entries (only when flat; fills next bar open -> non-repaint) -----------
-if flat and longSignal
-    strategy.entry("Long", strategy.long)
-if flat and shortSignal
-    strategy.entry("Short", strategy.short)
-
-// --- Initialise levels the moment a new position appears --------------------
-newLong  = inLong  and tradeDir != 1
-newShort = inShort and tradeDir != -1
-if newLong
-    entryPx  := strategy.position_avg_price
-    stopPx   := entryPx - atr * slMult
-    r        = entryPx - stopPx
-    tp1Px    := entryPx + r * tp1R
-    tp2Px    := entryPx + r * tp2R
-    tp3Px    := entryPx + r * tp3R
+// mark that a real position opened
+newLongPos  = inLong  and tradeDir != 1
+newShortPos = inShort and tradeDir != -1
+if newLongPos
     tradeDir := 1
     tp1Done  := false
-if newShort
-    entryPx  := strategy.position_avg_price
-    stopPx   := entryPx + atr * slMult
-    r        = stopPx - entryPx
-    tp1Px    := entryPx - r * tp1R
-    tp2Px    := entryPx - r * tp2R
-    tp3Px    := entryPx - r * tp3R
+    tradesToday += 1
+if newShortPos
     tradeDir := -1
     tp1Done  := false
+    tradesToday += 1
 
-// --- TP1 tag + optional breakeven management --------------------------------
-if inLong and not tp1Done and high >= tp1Px
+// breakeven after TP1 tag
+if inLong and not tp1Done and not na(pendTP1) and high >= pendTP1
     tp1Done := true
     if moveBE
-        stopPx := math.max(stopPx, entryPx)
-if inShort and not tp1Done and low <= tp1Px
+        pendSL := math.max(pendSL, pendEntry)
+if inShort and not tp1Done and not na(pendTP1) and low <= pendTP1
     tp1Done := true
     if moveBE
-        stopPx := math.min(stopPx, entryPx)
+        pendSL := math.min(pendSL, pendEntry)
 
-// --- Working exit orders (re-issued each bar so BE stop updates) ------------
-// qty_percent is applied to the CURRENT position at fill time. Because TP1 is
-// nearest it fills first (50%); TP2 then closes 50% of what remains (runner on)
-// or 100% (runner off); TP3 closes whatever is left. Stops on every leg net
-// the position flat if price hits the stop before any target.
+// working exits (re-issued each bar so the BE stop updates)
 if inLong
-    strategy.exit("L-TP1", from_entry="Long", qty_percent=50, limit=tp1Px, stop=stopPx)
-    if useRunner
-        strategy.exit("L-TP2", from_entry="Long", qty_percent=50, limit=tp2Px, stop=stopPx)
-        strategy.exit("L-TP3", from_entry="Long",                 limit=tp3Px, stop=stopPx)
+    strategy.exit("L-TP1", from_entry="Long", qty_percent=50, limit=pendTP1, stop=pendSL)
+    if useRunner and not na(pendTP3)
+        strategy.exit("L-TP2", from_entry="Long", qty_percent=50, limit=pendTP2, stop=pendSL)
+        strategy.exit("L-TP3", from_entry="Long",                 limit=pendTP3, stop=pendSL)
     else
-        strategy.exit("L-TP2", from_entry="Long",                 limit=tp2Px, stop=stopPx)
+        strategy.exit("L-TP2", from_entry="Long",                 limit=pendTP2, stop=pendSL)
 if inShort
-    strategy.exit("S-TP1", from_entry="Short", qty_percent=50, limit=tp1Px, stop=stopPx)
-    if useRunner
-        strategy.exit("S-TP2", from_entry="Short", qty_percent=50, limit=tp2Px, stop=stopPx)
-        strategy.exit("S-TP3", from_entry="Short",                 limit=tp3Px, stop=stopPx)
+    strategy.exit("S-TP1", from_entry="Short", qty_percent=50, limit=pendTP1, stop=pendSL)
+    if useRunner and not na(pendTP3)
+        strategy.exit("S-TP2", from_entry="Short", qty_percent=50, limit=pendTP2, stop=pendSL)
+        strategy.exit("S-TP3", from_entry="Short",                 limit=pendTP3, stop=pendSL)
     else
-        strategy.exit("S-TP2", from_entry="Short",                 limit=tp2Px, stop=stopPx)
+        strategy.exit("S-TP2", from_entry="Short",                 limit=pendTP2, stop=pendSL)
 
-// --- Closed-trade / exit events (for alerts) computed before reset ----------
+// cancel an unfilled pending entry once it expires OR the raid invalidates
+longInvalid  = pendDir == 1  and flat and (bar_index > pendExp or low  < pendSL)
+shortInvalid = pendDir == -1 and flat and (bar_index > pendExp or high > pendSL)
+if longInvalid
+    strategy.cancel("Long")
+if shortInvalid
+    strategy.cancel("Short")
+
+// exit / close events (before reset) for alerts
 exitedLong  = tradeDir == 1  and flat
 exitedShort = tradeDir == -1 and flat
-tp1JustHit  = tp1Done and not tp1Done[1]
 
-// --- Reset state when flat --------------------------------------------------
-if flat
+// reset when flat (position closed or entry cancelled)
+if flat and (exitedLong or exitedShort or longInvalid or shortInvalid)
+    if exitedLong or exitedShort
+        cooldownUntil := bar_index + cooldownBars
+    pendDir  := 0
+    pendEntry:= na
+    pendSL   := na
+    pendTP1  := na
+    pendTP2  := na
+    pendTP3  := na
+    pendExp  := na
     tradeDir := 0
-    entryPx  := na
-    stopPx   := na
-    tp1Px    := na
-    tp2Px    := na
-    tp3Px    := na
     tp1Done  := false
 
 // =============================================================================
-// VISUALS
+// VISUALS  (clean: levels disappear once taken; only active setup drawn)
 // =============================================================================
-plot(emaFast, "EMA Fast", color=color.new(color.orange, 0), linewidth=1)
-plot(emaSlow, "EMA Slow", color=color.new(color.blue,   0), linewidth=2)
-plot(emaPull, "EMA Pullback", color=color.new(color.gray, 30), linewidth=1)
+plot(showLiq and not pdhTaken ? pdh : na, "PDH", color=color.new(color.red, 30),   style=plot.style_linebr, linewidth=1)
+plot(showLiq and not pdlTaken ? pdl : na, "PDL", color=color.new(color.green, 30), style=plot.style_linebr, linewidth=1)
+plot(showLiq and not pwhTaken ? pwh : na, "PWH", color=color.new(color.maroon, 20),style=plot.style_linebr, linewidth=2)
+plot(showLiq and not pwlTaken ? pwl : na, "PWL", color=color.new(color.teal, 20),  style=plot.style_linebr, linewidth=2)
+plot(showLiq and not asiaHiTaken ? asiaHi : na, "Asia H", color=color.new(color.orange, 40), style=plot.style_linebr, linewidth=1)
+plot(showLiq and not asiaLoTaken ? asiaLo : na, "Asia L", color=color.new(color.orange, 40), style=plot.style_linebr, linewidth=1)
+plot(showLiq and not na(eqHigh) ? eqHigh : na, "EQH", color=color.new(color.fuchsia, 20), style=plot.style_linebr, linewidth=1)
+plot(showLiq and not na(eqLow)  ? eqLow  : na, "EQL", color=color.new(color.fuchsia, 20), style=plot.style_linebr, linewidth=1)
+plot(showLiq ? eq : na, "Equilibrium", color=color.new(color.gray, 55), style=plot.style_linebr, linewidth=1)
 
-plotshape(showSignals and longSignal,  title="Long",  location=location.belowbar,
-     style=shape.triangleup,   color=color.new(color.green, 0), size=size.small, text="LONG")
-plotshape(showSignals and shortSignal, title="Short", location=location.abovebar,
-     style=shape.triangledown, color=color.new(color.red, 0),   size=size.small, text="SHORT")
+// active trade levels
+plot(tradeDir != 0 ? pendSL  : na, "SL",  color=color.new(color.red, 0),   style=plot.style_linebr, linewidth=2)
+plot(tradeDir != 0 ? pendTP1 : na, "TP1", color=color.new(color.teal, 0),  style=plot.style_linebr, linewidth=1)
+plot(tradeDir != 0 ? pendTP2 : na, "TP2", color=color.new(color.green, 0), style=plot.style_linebr, linewidth=1)
+plot(tradeDir != 0 and useRunner ? pendTP3 : na, "TP3", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=1)
 
-plot(showLevels and tradeDir != 0 ? stopPx : na, "Stop Loss", color=color.new(color.red, 0),
-     style=plot.style_linebr, linewidth=2)
-plot(showLevels and tradeDir != 0 ? tp1Px : na, "TP1", color=color.new(color.teal, 0),
-     style=plot.style_linebr, linewidth=1)
-plot(showLevels and tradeDir != 0 ? tp2Px : na, "TP2", color=color.new(color.green, 0),
-     style=plot.style_linebr, linewidth=1)
-plot(showLevels and useRunner and tradeDir != 0 ? tp3Px : na, "TP3", color=color.new(color.lime, 0),
-     style=plot.style_linebr, linewidth=1)
+// entry FVG box for the pending setup
+var box fvgBox = na
+if showFVG and pendDir != 0 and na(fvgBox)
+    topB = pendDir == 1 ? longFvgTop : shortFvgTop
+    botB = pendDir == 1 ? longFvgBot : shortFvgBot
+    if not na(topB) and not na(botB)
+        fvgBox := box.new(bar_index, math.max(topB, botB), bar_index + entryValid, math.min(topB, botB), border_color=color.new(color.blue, 40), bgcolor=color.new(color.blue, 85))
+if pendDir == 0 and not na(fvgBox)
+    box.delete(fvgBox)
+    fvgBox := na
 
-bgcolor(useSession and not inSession ? color.new(color.gray, 90) : na, title="Out of session")
+// signal arrows + reason labels (printed on the confirmed trigger bar)
+plotshape(showSignals and sigLong,  title="Long Signal",  location=location.belowbar, style=shape.triangleup,   color=color.new(color.green, 0), size=size.small)
+plotshape(showSignals and sigShort, title="Short Signal", location=location.abovebar, style=shape.triangledown, color=color.new(color.red, 0),   size=size.small)
+if showSignals and (sigLong or sigShort)
+    label.new(bar_index, sigLong ? low : high, (pendTier + " " + str.tostring(pendScore, "#") + "/100\n" + pendReason),
+         yloc  = sigLong ? yloc.belowbar : yloc.abovebar,
+         style = sigLong ? label.style_label_up : label.style_label_down,
+         color = sigLong ? color.new(color.green, 20) : color.new(color.red, 20),
+         textcolor = color.white, size = size.small)
 
 // =============================================================================
-// DASHBOARD + WIN/LOSS STATISTICS
+// DASHBOARD
 // =============================================================================
-f_pf() =>
-    strategy.grossloss != 0 ? strategy.grossprofit / strategy.grossloss : na
-winRate = strategy.closedtrades > 0 ? strategy.wintrades / strategy.closedtrades * 100.0 : 0.0
+structTxt = close > eq and htfUp ? "BULLISH" : close < eq and htfDown ? "BEARISH" : "RANGING"
+structCol = structTxt == "BULLISH" ? color.lime : structTxt == "BEARISH" ? color.red : color.gray
+drawTxt   = drawDir == 1 ? "BUY-SIDE" : drawDir == -1 ? "SELL-SIDE" : "NEUTRAL"
+drawCol   = drawDir == 1 ? color.lime : drawDir == -1 ? color.red : color.gray
+pdTxt     = premium ? "PREMIUM" : discount ? "DISCOUNT" : "EQ"
+sessTxt   = inLon ? "LONDON KZ" : inNY ? "NEW YORK KZ" : inAsia ? "ASIA" : "OFF-KZ"
+takenTxt  = (pdhTaken?"PDH ":"") + (pdlTaken?"PDL ":"") + (asiaHiTaken?"AsiaH ":"") + (asiaLoTaken?"AsiaL ":"")
+takenTxt  := takenTxt == "" ? "none" : takenTxt
+posTxt    = tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : pendDir != 0 ? "PENDING" : "FLAT"
+posCol    = tradeDir == 1 ? color.lime : tradeDir == -1 ? color.red : pendDir != 0 ? color.orange : color.gray
+liveRR    = pendDir == 1  and not na(pendTP2) and (pendEntry - pendSL) > 0 ? (pendTP2 - pendEntry) / (pendEntry - pendSL) : pendDir == -1 and not na(pendTP2) and (pendSL - pendEntry) > 0 ? (pendEntry - pendTP2) / (pendSL - pendEntry) : na
 
-var table dash = table.new(position.top_right, 2, 18, border_width=1,
-     frame_color=color.new(color.gray, 60), frame_width=1)
-
+var table dash = table.new(position.top_right, 2, 14, border_width=1, frame_color=color.new(color.gray, 60), frame_width=1)
 f_row(int r, string k, string v, color vc) =>
-    table.cell(dash, 0, r, k, text_color=color.new(color.white, 0), text_size=size.small,
-         text_halign=text.align_left,  bgcolor=color.new(color.gray, 85))
-    table.cell(dash, 1, r, v, text_color=vc, text_size=size.small,
-         text_halign=text.align_right, bgcolor=color.new(color.gray, 85))
-
+    table.cell(dash, 0, r, k, text_color=color.new(color.white, 0), text_size=size.small, text_halign=text.align_left,  bgcolor=color.new(color.gray, 85))
+    table.cell(dash, 1, r, v, text_color=vc, text_size=size.small, text_halign=text.align_right, bgcolor=color.new(color.gray, 85))
 if showDash and barstate.islast
-    trendTxt = upTrend ? "BULL" : downTrend ? "BEAR" : "MIXED"
-    trendCol = upTrend ? color.lime : downTrend ? color.red : color.gray
-    posTxt   = tradeDir == 1 ? "LONG" : tradeDir == -1 ? "SHORT" : "FLAT"
-    posCol   = tradeDir == 1 ? color.lime : tradeDir == -1 ? color.red : color.gray
-
-    table.cell(dash, 0, 0, "APEX  ATCS v1", text_color=color.white, text_size=size.normal,
-         bgcolor=color.new(color.blue, 40))
-    table.cell(dash, 1, 0, syminfo.ticker + "  " + timeframe.period, text_color=color.white,
-         text_size=size.small, bgcolor=color.new(color.blue, 40))
-
-    f_row(1,  "Trend",        trendTxt,                                      trendCol)
-    f_row(2,  "ADX",          str.tostring(adx, "#.#") + (regimeOK ? "  ✓" : "  chop"), regimeOK ? color.lime : color.orange)
-    f_row(3,  "RSI",          str.tostring(rsi, "#.#"),                      rsi >= rsiMid ? color.lime : color.red)
-    f_row(4,  "ATR %",        str.tostring(atrPct, "#.##"),                  volOK ? color.white : color.orange)
-    f_row(5,  "Session",      useSession ? (inSession ? "OPEN" : "CLOSED") : "OFF", inSession or not useSession ? color.white : color.orange)
-    f_row(6,  "HTF Bias",     not useHTF ? "OFF" : (htfUp ? "UP" : htfDown ? "DOWN" : "-"), htfUp ? color.lime : htfDown ? color.red : color.gray)
-    f_row(7,  "Position",     posTxt,                                        posCol)
-    f_row(8,  "Entry",        na(entryPx) ? "-" : str.tostring(entryPx, format.mintick), color.white)
-    f_row(9,  "Stop",         na(stopPx)  ? "-" : str.tostring(stopPx,  format.mintick), color.red)
-    f_row(10, "TP1 (1R)",     na(tp1Px)   ? "-" : str.tostring(tp1Px,   format.mintick), color.teal)
-    f_row(11, "TP2 (2R)",     na(tp2Px)   ? "-" : str.tostring(tp2Px,   format.mintick), color.green)
-    f_row(12, "TP3 (3R)",     not useRunner or na(tp3Px) ? "-" : str.tostring(tp3Px, format.mintick), color.lime)
-    f_row(13, "── Stats ──",  "",                                           color.gray)
-    f_row(14, "Trades",       str.tostring(strategy.closedtrades),          color.white)
-    f_row(15, "Win Rate %",   str.tostring(winRate, "#.#"),                 winRate >= 50 ? color.lime : color.orange)
-    f_row(16, "Profit Factor",na(f_pf()) ? "-" : str.tostring(f_pf(), "#.##"), (f_pf() > 1) ? color.lime : color.red)
-    f_row(17, "Net Profit",   str.tostring(strategy.netprofit, "#.##"),     strategy.netprofit >= 0 ? color.lime : color.red)
+    table.cell(dash, 0, 0, "LDX v2", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 40))
+    table.cell(dash, 1, 0, syminfo.ticker + " " + timeframe.period, text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 40))
+    f_row(1,  "Structure",      structTxt, structCol)
+    f_row(2,  "Draw on Liq",    drawTxt,   drawCol)
+    f_row(3,  "Nearest BSL",    na(nearBuy)  ? "-" : str.tostring(nearBuy,  format.mintick), color.red)
+    f_row(4,  "Nearest SSL",    na(nearSell) ? "-" : str.tostring(nearSell, format.mintick), color.green)
+    f_row(5,  "Liq taken today",takenTxt, color.orange)
+    f_row(6,  "Dealing range",  str.tostring(rangeLow, format.mintick) + " - " + str.tostring(rangeHigh, format.mintick), color.white)
+    f_row(7,  "Premium/Disc",   pdTxt, premium ? color.red : discount ? color.lime : color.gray)
+    f_row(8,  "Session",        sessTxt, inKZ ? color.lime : color.gray)
+    f_row(9,  "Setup quality",  pendDir != 0 ? (pendTier + " " + str.tostring(pendScore, "#")) : "-", pendScore >= aPlusMin ? color.lime : pendScore >= bMin ? color.orange : color.gray)
+    f_row(10, "Expected RR",    na(liveRR) ? "-" : str.tostring(liveRR, "#.##"), na(liveRR) ? color.gray : liveRR >= minRR ? color.lime : color.red)
+    f_row(11, "Position",       posTxt, posCol)
+    f_row(12, "Trades today",   str.tostring(tradesToday) + "/" + str.tostring(maxTrades) + (dailyLossHit ? "  (LOSS CAP)" : ""), dailyLossHit ? color.red : color.white)
+    f_row(13, "Win rate %",     strategy.closedtrades > 0 ? str.tostring(strategy.wintrades / strategy.closedtrades * 100.0, "#.#") : "-", color.white)
 
 // =============================================================================
 // ALERTS
 // =============================================================================
-alertcondition(longSignal,  "ATCS Long Entry",  "ATCS LONG signal on {{ticker}} {{interval}} @ {{close}}")
-alertcondition(shortSignal, "ATCS Short Entry", "ATCS SHORT signal on {{ticker}} {{interval}} @ {{close}}")
-alertcondition(tp1JustHit,  "ATCS TP1 Hit",     "ATCS TP1 reached on {{ticker}} {{interval}} - move stop to breakeven")
-alertcondition(exitedLong,  "ATCS Long Closed", "ATCS long position closed on {{ticker}} {{interval}}")
-alertcondition(exitedShort, "ATCS Short Closed","ATCS short position closed on {{ticker}} {{interval}}")
-alertcondition(longSignal or shortSignal, "ATCS Any Entry", "ATCS entry signal on {{ticker}} {{interval}}")
+alertcondition(sigLong,  "LDX Long Setup",  "LDX LONG on {{ticker}} {{interval}}: sell-side raid + displacement + MSS -> buy-side draw")
+alertcondition(sigShort, "LDX Short Setup", "LDX SHORT on {{ticker}} {{interval}}: buy-side raid + displacement + MSS -> sell-side draw")
+alertcondition(exitedLong,  "LDX Long Closed",  "LDX long closed on {{ticker}} {{interval}}")
+alertcondition(exitedShort, "LDX Short Closed", "LDX short closed on {{ticker}} {{interval}}")
+alertcondition(sigLong or sigShort, "LDX Any Setup", "LDX setup on {{ticker}} {{interval}}")
