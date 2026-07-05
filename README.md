@@ -1,176 +1,104 @@
-# Liquidity Draw & Displacement System (LDX) v2
+# Liquidity Market-State Engine (LMX) v3
 
-A serious, price-action / order-flow **Pine Script v6 strategy** for TradingView.
-The edge is **not** an indicator — it is the institutional footprint:
+A price-action / liquidity / market-structure **Pine Script v6 strategy** for
+TradingView. **No** EMA/RSI/MACD/ADX/Supertrend as the entry engine. ATR is used
+only for volatility normalisation and stop padding — never for direction.
 
-> **liquidity rests → it gets raided (stop hunt) → price displaces away leaving an
-> imbalance (FVG) → market structure shifts (MSS) → you enter on the retrace into
-> the FVG → stop beyond the raid → target the next draw on liquidity.**
+> **HONESTY (this is not optional).** This code is **manually reviewed, NOT
+> machine-compiled here, and NOT Strategy-Tester validated.** It describes
+> *expected behaviour only*. I make **no** claim that it is profitable, no win-rate
+> claim, nothing "institutional-grade." SMC/liquidity systems frequently still fail
+> to beat costs. You must compile it and validate it in the Strategy Tester before
+> trusting it. If TradingView shows an error, paste it back and it gets fixed.
 
-Moving averages appear **only** as an optional higher-timeframe background bias.
-They never generate a signal.
-
-> **Honest disclaimer.** No win rate is promised or fabricated. The numbers you
-> care about (win %, profit factor, drawdown) only become real when *you* run the
-> Strategy Tester and forward-test on demo. This is a research tool, not financial
-> advice. **I could not compile it in a live TradingView environment from here — it
-> is hand-audited against the v6 spec. Paste it into the Pine Editor; if the
-> compiler flags anything, send me the exact text and I'll fix it immediately.**
-
-File: [`ATCS_strategy.pine`](./ATCS_strategy.pine) *(kept as the repo's script filename)*
+File: [`ATCS_strategy.pine`](./ATCS_strategy.pine)
 
 ---
 
-## 1. The core question it answers
-*"Where are stops resting, which pool is price drawing toward, and where is the
-highest-probability entry **after** liquidity is taken?"*
+## What was removed from the failed v2 (and why)
+v2 (profit factor 0.537, 20% win rate on XAU 1H) took **every** sell-side sweep as
+a long and every buy-side sweep as a short — **regardless of premium/discount
+location or market structure.** On trending days that is literally *fading the
+trend*: a 20% win rate is the signature of that mistake. It was removed entirely.
 
-## 2. The Draw-on-Liquidity engine
-**Buy-side liquidity (above):** previous day high (PDH), previous week high (PWH),
-frozen Asia-session high, latest major swing high, and **equal highs** (a swing
-within a tolerance of the prior swing = a clean stop pool).
-**Sell-side liquidity (below):** PDL, PWL, Asia low, latest major swing low, **equal
-lows**.
-**Nearest BSL / SSL** and the implied **draw direction** (which pool is closer) are
-computed every bar and shown on the dashboard. Levels are **plotted only until they
-are taken**, then they disappear — keeping the chart clean and showing exactly what
-liquidity has already been consumed today.
+## Why v3 is different (the one change that matters)
+Direction is now **gated by structure and location**:
+- **Longs only** when: structure is **bullish** (a BOS/CHoCH up has occurred) **and**
+  price is in **discount** (below equilibrium) **and** sell-side liquidity was just
+  **swept & rejected** **and** there is unswept **buy-side** liquidity to target.
+- **Shorts** are the exact mirror (bearish structure, premium, buy-side swept).
 
-**Liquidity taken** is classified as: *wick sweep + close back inside* (a failed
-sweep / raid — the tradable event) vs *full-body break* (continuation, marks the
-pool "taken").
+Trade **with** the draw, from the **correct half** of the range. Everything else is
+a filter on top of that.
 
-## 3. The exact trade sequence (built into the state machine)
-1. **Dealing range** = highest high / lowest low over the lookback.
-2. **Premium / discount / equilibrium** = position vs the range midpoint.
-3. **External liquidity targets** = PDH/PDL, PWH/PWL, Asia H/L, major swings.
-4. **Internal liquidity** = minor swing highs/lows (short-term stop pools).
-5. **Raid** — price sweeps a pool and closes back inside (`longRaidActive`).
-6. **Displacement** — a Fair Value Gap larger than `minFvg × ATR` forms in the
-   reversal direction (`longDispSeen`, stores the FVG for entry).
-7. **MSS** — price breaks the most recent internal swing (the trigger).
-8. **Entry** — limit order into the FVG (better RR) or market on the MSS close.
-9. **Stop** — beyond the raid extreme + an ATR buffer.
-10. **Target** — the **next draw on liquidity** in the trade direction.
-11. **RR gate** — the signal is rejected unless that draw is **≥ 2R** away.
+## The 18 modules (best Pine approximation of each; limitations marked)
+1. **Dealing range** — highest/lowest over lookback → premium / discount / equilibrium + % position.
+2. **Liquidity map** — PDH/PDL, PWH/PWL, Asia/London/NY frozen H/L, recent swings, equal H/L; nearest BSL/SSL. *(Approximation: "nearest 3 pools" is rendered as the key named pools + nearest swing rather than an arbitrary top-3 list, to keep the chart clean.)*
+3. **Draw on liquidity** — structure-first, then proximity → buy-side / sell-side / neutral, with level, distance, RR, internal/external.
+4. **Sweep engine** — wick beyond a pool + close back inside + rejection candle. External raids (PD/PW/session) graded higher.
+5. **Displacement engine** — body ≥ 60% of range, close in top/bottom 25%, body > 1.3× avg(10) body, **and** breaks an internal swing (this doubles as the MSS).
+6. **Structure engine** — swings, **BOS**, **CHoCH**, protected high/low, structure invalidation when the protected level breaks. *(Approximation: BOS/CHoCH from confirmed pivots; internal vs external is length-based.)*
+7. **Entry engine** — full sequence enforced; entry = **50% of the displacement leg** (a valid ICT retrace entry), placed as a limit with a validity window.
+8. **Target engine** — nearest **unswept liquidity pool** within [minRR, maxRR]; if none is ≥ 2R and reachable, **the trade is rejected**.
+9. **Stop engine** — structural: beyond the **sweep wick** + a small ATR pad (not an arbitrary ATR stop).
+10. **Quality score 0–100** — sweep 20 / draw 20 / displacement 20 / MSS 15 / P-D location 10 / session 10 / RR 5. Tiers: **A+ ≥85, A ≥75, B ≥65**, below 65 = no trade.
+11. **Frequency control** — tier selector (`A+ only` / `A and above` / `B and above`). Loosen to trade more.
+12. **Duplicate control** — a raid is **consumed** when it fires; one position at a time; state resets only when flat.
+13. **Session engine** — Asia/London/NY frozen H/L, killzone-only option, session shown on dashboard. *(Approximation: London-sweep-of-Asia and NY-continuation logic is expressed through the liquidity pools + premium/discount rather than as hard-coded narratives.)*
+14. **Prop-firm protection** — max trades/day, max/session, daily loss %, daily target lockout, max consecutive losses, cooldown after a loss, restricted window, Friday cutoff, skip-Monday.
+15. **Dashboard** — structure, draw (+ level/distance), nearest BSL/SSL, swept-today, range, premium/discount %, session, setup tier+score, expected RR, position, trades D/S, day PnL % (+lock), win% / PF, consecutive losses.
+16. **Visuals** — key pools (hidden once swept), sweep + displacement + CHoCH markers, entry-zone box, SL/TP for the active trade only, arrows + one reason label per signal.
+17. **Alerts** — long/short entry, SSL/BSL swept, bull/bear displacement, long/short closed, daily lockout, any entry.
+18. **Backtest honesty** — see the disclaimer at the top; nothing is claimed as verified.
 
-## 4. No duplicate signals / only A+ (and optional B)
-- A raid is **consumed** the moment it produces a signal, so the same move cannot
-  fire twice.
-- MSS is a one-bar cross, and a **cooldown** plus **one-position** rule prevent
-  clustering.
-- Every candidate gets a **0–100 quality score**: MSS (20) + external-vs-internal
-  raid (10/20) + displacement strength (≤25) + premium/discount alignment (5/15) +
-  HTF bias (0/10) + RR bonus (5/7/10).
-- **A+ ≥ 75**, **B ≥ 55** (both configurable). Turn B off to trade only A+.
+## Signal labels explain themselves
+> `LONG A: SSL swept + bullish displacement + MSS + discount → draw BSL @ 4512.50`
 
-## 5. Signal labels explain themselves
-Example printed on the chart and sent to alerts:
-> `A+ 82/100 — LONG: sell-side liquidity swept + bullish displacement + MSS → draw
-> = buy-side @ 4512.50`
+## Inputs & how to tune them
+- **Frequency too low?** → set *Trade which tiers* = `B and above`, lower *Body vs avg body ×* (1.3→1.15), lower *External swing length* (8→6), raise *Setup window*.
+- **Too many weak trades?** → `A+ only`, raise *Body ×*, raise *Min body/range*, keep *Only trade in London/NY* = on.
+- **Getting wicked out?** → raise *Stop pad*. **Targets never hit?** → lower *Maximum RR*.
+- **Prop account?** → set *Max daily loss %*, *Daily target %*, *Max consecutive losses*, *Max trades/day & /session* to your firm's rules.
+- **Sessions wrong?** → set *Timezone* to your instrument's exchange tz and adjust the three session windows.
 
-## 6. Sessions
-Asia range (the London draw), London killzone, New York killzone, PDH/PDL, PWH/PWL,
-frozen session highs/lows. Optional **"only trade inside killzones"** switch. The
-dashboard shows the live session.
+## What each visual means
+Red/green dashed = nearest buy/sell liquidity & PDH/PDL; thick maroon/teal = weekly
+H/L; grey = equilibrium. Blue ▲ / orange ▼ = a liquidity sweep. Green ▲ / red ▼ =
+displacement. Aqua/fuchsia **C** = CHoCH. Blue box = the entry zone (50% of the
+displacement leg). Solid red/teal/green/lime lines appear only while a trade is
+live = SL / TP1 / TP2 / TP3.
 
-## 7. Risk controls
-- **Min 1:2 RR** enforced *before* a signal is allowed.
-- **Max trades per day** (default 3).
-- **Daily loss cap** (% of day-start equity) → blocks new entries once hit.
-- **Cooldown** after each trade.
-- **TP1 (1R, 50% off) → stop to breakeven → TP2 = the liquidity draw → optional TP3
-  runner (3R).**
-- Invalidation: unfilled limit entries are cancelled after N bars or if the raid
-  low/high is violated.
+## Alert setup
+Create Alert → condition **LMX v3** → pick the event → **"Once per bar close"**. Add
+a second alert on the strategy set to **"Order fills only"** for exact fills.
 
-## 8. Dashboard (top-right)
-Structure (bull/bear/ranging) · draw on liquidity · nearest BSL · nearest SSL ·
-liquidity taken today · dealing range · premium/discount · session · **setup
-quality score & tier** · **expected RR to draw** · position · **trades today /
-max (+ loss-cap flag)** · win rate.
-
----
-
-## How to use it
-1. Pine Editor → paste `ATCS_strategy.pine` → **Add to chart**.
-2. Use **15m or 1H** on indices or gold (see below).
-3. Read the dashboard. Wait for a **LONG/SHORT arrow + label** — it prints only on a
-   closed bar and is never redrawn.
-4. The strategy places the entry, stop, TP1/TP2/TP3 and manages breakeven for you.
-5. Alerts: **Create Alert → LDX v2 → LDX Long/Short/Any Setup → "Once per bar
-   close"**. Add a second **"Order fills only"** alert for exact fills.
-
-## How to backtest it
-1. Open **Strategy Tester**. Keep realistic **commission (0.02%) and slippage (1
-   tick)** — already set.
-2. Judge on **100+ trades**: % profitable, **profit factor**, max drawdown, avg
-   trade. Ignore samples < 30 trades.
-3. **In-sample vs out-of-sample:** tune on older data, confirm on untouched recent
-   data. If the edge dies out-of-sample, it was curve-fit.
-4. **Reality check:** TradingView fills limits/stops against OHLC assumptions and is
-   optimistic on gaps and on *which* touched first (stop vs target) within a bar.
-   Treat backtest stats as an **upper bound**, then **forward-test on demo**.
-5. **Multi-instrument robustness:** a real liquidity edge should show *positive
-   expectancy on several* correlated instruments (e.g. US500 **and** NAS100), not
-   one cherry-picked symbol.
-
-## How to optimize it
-Tune a few at a time, out-of-sample, preferring **wide plateaus** over sharp peaks:
-
-| Input | Range | Effect |
-|---|---|---|
-| External swing length | 6–20 | Larger = higher-grade liquidity/structure, fewer setups |
-| Internal swing length | 3–7 | Smaller = more MSS triggers (more frequency) |
-| Dealing-range lookback | 60–200 | Defines premium/discount context |
-| Min FVG size (× ATR) | 0.3–1.0 | Higher = only strong displacement counts |
-| Setup window after raid | 6–20 | Longer = catches slower reversals |
-| Stop buffer (× ATR) | 0.1–0.5 | Wider = fewer wick-outs, worse RR |
-| A+ / B thresholds | 70–85 / 50–60 | Raise to cut frequency, lower to add it |
-| Killzone-only | on/off | On = fewer, cleaner; Off = more frequency |
-
-**Frequency tuning:** if you get too few signals, lower `Internal swing length`,
-lower `Min FVG size`, enable **B setups**, and widen `Setup window`. If too many,
-do the opposite or set **Killzone-only = on**.
+## Backtest setup & validation
+1. Add to chart → **Strategy Tester**. Keep the built-in commission (0.02%) & slippage (1 tick).
+2. Need **100+ trades** before any opinion; ignore < 30.
+3. **In-sample vs out-of-sample** — tune on old data, confirm on untouched recent data.
+4. Test on **several instruments** (XAU, NAS100, US30, US500, EURUSD, GBPUSD, BTC, ETH) — a real edge generalises; a curve-fit one doesn't.
+5. Treat tester stats as an **upper bound** (intrabar stop-vs-target order is assumed), then **forward-test on demo**.
 
 ## Best markets & timeframes
-- **Indices** (US500, NAS100, GER40): **15m–1H** — cleanest liquidity runs.
-- **Gold** (XAUUSD): **15m–1H** — textbook London/NY raids; ATR stop self-adapts.
-- **Forex majors**: **15m–1H** with killzones on.
-- **Crypto** (BTC/ETH): **15m–1H**, killzones off (24/7), sessions less meaningful.
+Indices (US500, NAS100, US30) and gold on **15m–1H**; FX majors 15m–1H with
+killzones on; crypto 15m–1H with sessions off.
 
-## Weaknesses (be honest)
-- **FVG-limit entries don't always fill** — a clean move with no retrace is skipped
-  (switch to "market on MSS close" for more fills at worse RR).
-- **Pivots confirm late** (`right` bars), so structure/MSS is slightly delayed — the
-  price of not repainting.
-- **Backtest fill realism**: intrabar stop-vs-target ordering is assumed, not known.
-- **Equal-H/L detection is tolerance-based** — noisy instruments create loose pools.
-- **Sessions are timezone-sensitive**: set the correct `tz` for your instrument.
-- **Not every raid reverses** — continuation through liquidity will stop you out;
-  that's why the RR gate and daily loss cap exist.
+## Known weaknesses
+- **50% limit entries don't always fill** — clean one-way moves get skipped.
+- **Pivot-confirmed structure lags** by `swLen`/`intLen` bars (the price of no repaint).
+- **`nearest-3 pools` and `London-sweep/NY-continuation` are approximated**, not literal.
+- **Consecutive-loss counter** is measured entry→flat equity, so a scratch after TP1 counts as a small win.
+- **Backtest fill realism** (intrabar ordering) still applies.
+- **May be too strict OR still unprofitable** — only the Strategy Tester will tell you.
 
-## Version 3 upgrade ideas
-- **HTF liquidity & HTF FVG** (draw from 4H/Daily arrays, not just an EMA bias).
-- **Order-block entries** (last down-candle before displacement) as an alternative
-  to raw FVG.
-- **Breaker blocks & inversion FVGs** for continuation setups.
-- **Partial-fill-aware position sizing** (fixed-fractional risk per trade for prop
-  rules) + per-session trade caps.
-- **SMT divergence** between correlated pairs (ES/NQ, EURUSD/DXY) as a confluence.
-- **Adaptive `minFvg`** scaled to realized volatility regime.
+## Version 4 ideas
+True top-3 pool ranking with per-pool line objects; HTF (4H/D) liquidity & FVG
+arrays; order-block / breaker entries alongside the 50% entry; SMT divergence
+between correlated pairs; explicit London-sweep→NY-continuation state machine;
+fixed-fractional risk-per-trade sizing.
 
-## Final audit — non-repainting / no future leakage / compilation
-**Non-repainting:** `calc_on_every_tick=false` (bar-close logic); pivots consumed
-only after they confirm; PDH/PDL/PWH/PWL and HTF bias read the **previous closed**
-period via `request.security(..., [1], lookahead_off)`; signal flags (`sigLong`/
-`sigShort`) are set on the confirmed trigger bar and never rewritten; entries are
-limit/market orders that fill on **later** bars.
-**No future data:** no negative-offset reads, no `lookahead_on`, no forming-bar
-security pulls.
-**No after-the-move signals:** the trigger is the *first* MSS immediately after a
-fresh raid + displacement — the start of the leg, not a lagging confirmation.
-**Compilation (hand-reviewed):** fixed undefined-function, comma-`var`, float→int,
-and day-rollover signal-misfire bugs during the build; removed unused variables to
-avoid warnings. Scale-out math nets the position flat in both target-ladder and
-stop scenarios. ⚠️ Not machine-compiled here — please verify in the Pine Editor.
+## Final self-review
+- Direction is now structure- and location-gated (the v2 killer is gone).
+- Sequence sweep→displacement→MSS→retrace→RR-gate is enforced before any signal.
+- Non-repainting: bar-close logic, confirmed pivots, previous-period security reads, later-bar fills.
+- **Not compiled or tester-validated here** — hand-reviewed against the v6 spec; fixed comma-chained statements, empty-array loop bounds, unused vars, and per-setup loss tracking during the build. Compile it in TradingView and send any error back.
