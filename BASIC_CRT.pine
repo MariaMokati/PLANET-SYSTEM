@@ -2,8 +2,9 @@
 // =============================================================================
 // BASIC CRT  —  Candle Range Theory marker + optional HTF confluence layers
 // -----------------------------------------------------------------------------
-// CORE (always on): High / Low / 50% EQ of each closed candle on a chosen TF,
-// optionally drawn as a closed-left box with adjustable internal shading.
+// CORE (always on): High / Low / 50% EQ of each closed candle on a chosen TF.
+// The range is left open; optional internal shading (with adjustable opacity and
+// depth) highlights it without a hard left edge.
 //
 // OPTIONAL LAYERS (all default OFF — the core stays simple when unused):
 //   1. Daily & Weekly CRT ranges + premium/discount (broker or NY-17:00 anchor)
@@ -32,9 +33,9 @@ curCol   = input.color(color.new(#2962FF, 0),  "Current range", group=gCol)
 prevCol  = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
 histCol  = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
 lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
-closeLeft= input.bool(true, "Close the left side of the range (box)", group=gCol)
-showShade= input.bool(false, "Shade inside the range", group=gCol)
-shadeCol = input.color(color.new(#2962FF, 90), "Shade colour", group=gCol)
+showShade= input.bool(true, "Shade inside the range", group=gCol)
+shadeCol = input.color(#2962FF, "Shade colour", group=gCol)
+shadeOpacity = input.int(90, "Shade opacity (0 = solid, 100 = invisible)", minval=0, maxval=100, group=gCol, tooltip="Higher = lighter / less vibrant than the range lines. The left side of the range stays open; the shading highlights it.")
 shadeDepth = input.float(1.0, "Shade depth (0 = none, 1 = full range)", minval=0, maxval=1, step=0.05, group=gCol)
 
 gLab   = "CRT High / Low labels"
@@ -279,7 +280,6 @@ tfMs   = timeframe.in_seconds(tfIn) * 1000
 var array<line> hiA   = array.new<line>()
 var array<line> loA   = array.new<line>()
 var array<line> eqA   = array.new<line>()
-var array<line> leftA = array.new<line>()
 var array<box>  shA   = array.new<box>()
 var label labHi = na
 var label labLo = na
@@ -297,12 +297,11 @@ if newClosed
     lh = line.new(startT, cHigh, endT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw)
     ll = line.new(startT, cLow,  endT, cLow,  xloc=xloc.bar_time, color=curCol, width=lw)
     le = showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle)) : na
-    lft = closeLeft ? line.new(startT, cLow, startT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw) : na
-    sh  = showShade and shadeDepth > 0 ? box.new(startT, cHigh, startT + int(shadeDepth * (endT - startT)), cLow, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=shadeCol) : na
+    shBg = color.new(shadeCol, shadeOpacity)
+    sh  = showShade and shadeDepth > 0 ? box.new(startT, cHigh, startT + int(shadeDepth * (endT - startT)), cLow, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=shBg) : na
     array.push(hiA, lh)
     array.push(loA, ll)
     array.push(eqA, le)
-    array.push(leftA, lft)
     array.push(shA, sh)
 
     hiName = shortHL ? "CRT H" : "CRT High"
@@ -336,12 +335,10 @@ if newClosed
         lex = array.get(eqA, i)
         if not na(lex)
             line.set_color(lex, age == 0 ? eqLnCol : col)
-        lftx = array.get(leftA, i)
-        if not na(lftx)
-            line.set_color(lftx, col)
         shx = array.get(shA, i)
         if not na(shx)
-            box.set_bgcolor(shx, age == 0 ? shadeCol : (age == 1 ? (showPrev ? shadeCol : HIDE) : (showHist ? shadeCol : HIDE)))
+            shBgv = color.new(shadeCol, shadeOpacity)
+            box.set_bgcolor(shx, age == 0 ? shBgv : (age == 1 ? (showPrev ? shBgv : HIDE) : (showHist ? shBgv : HIDE)))
 
     while array.size(hiA) > maxHist + 2
         line.delete(array.shift(hiA))
@@ -349,9 +346,6 @@ if newClosed
         led = array.shift(eqA)
         if not na(led)
             line.delete(led)
-        lfd = array.shift(leftA)
-        if not na(lfd)
-            line.delete(lfd)
         shd = array.shift(shA)
         if not na(shd)
             box.delete(shd)
