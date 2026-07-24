@@ -80,8 +80,8 @@ setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
 setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSet)
-setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSet)
-setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSet)
+setupTpC   = input.color(color.new(color.green, 0),  "Take-profit dot", group=gSet)
+setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss dot", group=gSet)
 setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 
 // ===================== EQUILIBRIUM (all ranges) ==============================
@@ -324,7 +324,6 @@ var array<line> loA   = array.new<line>()
 var array<line> eqA   = array.new<line>()
 var array<box>  shA   = array.new<box>()
 var array<label> swLbA  = array.new<label>()
-var array<line>  setLnA = array.new<line>()
 var array<label> setLbA = array.new<label>()
 
 // draw one sweep marker (design-aware) at a bar-time, pruning the shared store
@@ -461,18 +460,17 @@ if newClosed and showSetup and not na(aHi) and not na(aLo) and not na(bClose)
         rr    = risk > 0 ? rew / risk : 0.0
         if rr >= setupMinRR and tp != entry and ((swLong and tp > entry) or (swShort and tp < entry))
             dirC = swLong ? setupLongC : setupShortC
-            lnE = line.new(bStart, entry, bEnd, entry, xloc=xloc.bar_time, color=dirC, width=1, style=line.style_dotted)
-            lnS = line.new(bStart, sl,    bEnd, sl,    xloc=xloc.bar_time, color=setupSlC, width=1)
-            lnT = line.new(bStart, tp,    bEnd, tp,    xloc=xloc.bar_time, color=setupTpC, width=1)
-            array.push(setLnA, lnE)
-            array.push(setLnA, lnS)
-            array.push(setLnA, lnT)
+            // minimal: one dot at entry, one at TP, one at SL (no lines)
+            dE = label.new(bStart, entry, "", xloc=xloc.bar_time, style=label.style_circle, color=dirC,     size=size.tiny)
+            dT = label.new(bStart, tp,    "", xloc=xloc.bar_time, style=label.style_circle, color=setupTpC, size=size.tiny)
+            dS = label.new(bStart, sl,    "", xloc=xloc.bar_time, style=label.style_circle, color=setupSlC, size=size.tiny)
             txt = (swLong ? "CRT Long " : "CRT Short ") + str.tostring(rr, "#.0") + "R"
             lbS = mkLabel(bEnd, entry, txt, labDesign, dirC, labTxtCol, labSz)
+            array.push(setLbA, dE)
+            array.push(setLbA, dT)
+            array.push(setLbA, dS)
             array.push(setLbA, lbS)
-            while array.size(setLnA) > setKeep * 3
-                line.delete(array.shift(setLnA))
-            while array.size(setLbA) > setKeep
+            while array.size(setLbA) > setKeep * 4
                 label.delete(array.shift(setLbA))
 
 // ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
