@@ -47,6 +47,27 @@ labSz     = input.string("Small", "Label size", options=["Tiny","Small","Normal"
 hlLabCol  = input.color(color.new(#2962FF, 0), "Label colour", group=gLab)
 labTxtCol = input.color(color.white, "Text colour (Filled)", group=gLab)
 
+// ===================== SWEEPS & CRT SETUPS (optional) ========================
+// CRT 2-candle logic on the range TF: candle A = range, candle B = manipulation.
+// A sweep = B wicks beyond A's high/low but CLOSES back inside A's range.
+//   - swept the LOW  -> bullish (sell-side liquidity taken)  -> draw is the high
+//   - swept the HIGH -> bearish (buy-side liquidity taken)   -> draw is the low
+// Non-repainting: evaluated only on CLOSED range-TF candles via request.security.
+gSwp = "Sweeps & CRT setups  (optional)"
+showSweep  = input.bool(false, "Show liquidity sweeps", group=gSwp)
+sweepLbl   = input.bool(true,  "Label sweeps ('Sweep')", group=gSwp)
+sweepSz    = input.string("Tiny", "Sweep marker size", options=["Tiny","Small","Normal"], group=gSwp)
+sweepUpC   = input.color(color.new(color.lime, 0), "Bullish sweep (swept lows)", group=gSwp)
+sweepDnC   = input.color(color.new(color.red, 0),  "Bearish sweep (swept highs)", group=gSwp)
+showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSwp, tooltip="Mechanical CRT sweep-reversal: entry at the manipulation close, SL beyond the sweep wick, TP at the opposite range extreme (the draw). Marks the setup only — NOT financial advice, must be validated.")
+setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSwp)
+slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSwp)
+setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSwp)
+setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSwp)
+setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSwp)
+setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSwp)
+swKeep     = input.int(8, "Keep last N sweeps / setups", minval=1, maxval=50, group=gSwp)
+
 // ===================== EQUILIBRIUM (all ranges) ==============================
 gEQ = "Equilibrium (all ranges)"
 showEqLn  = input.bool(true, "Show equilibrium line", group=gEQ)
@@ -71,6 +92,7 @@ nyAnchor = input.bool(false, "Anchor D/W to New York 17:00", group=gDW, tooltip=
 showPD   = input.bool(true,  "Premium / discount shading", group=gDW)
 htfProj  = input.int(1, "Project ranges N periods right", minval=1, maxval=5, group=gDW)
 showHtfLbl = input.bool(true, "Label D / W ranges", group=gDW)
+showHtfPx  = input.bool(false, "Include price in D / W labels", group=gDW, tooltip="Off = just 'D High' / 'W Low'. On = adds the price.")
 dwLabSz  = input.string("Small", "D / W label size", options=["Tiny","Small","Normal"], group=gDW)
 dCol     = input.color(color.new(#787B86, 0), "Daily line", group=gDW)
 wCol     = input.color(color.new(#5D606B, 0), "Weekly line", group=gDW)
@@ -181,8 +203,10 @@ f_drawHTF(float hi, float lo, int st, int projMs, color lc, string tag) =>
             array.push(dwB, box.new(st, hi,  en, eqy, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(premC, 92)))
             array.push(dwB, box.new(st, eqy, en, lo,  xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(discC, 92)))
         if showHtfLbl
-            array.push(dwLab, mkLabel(en, hi, tag + " High " + str.tostring(hi, format.mintick), labDesign, lc, labTxtCol, dwLabSz))
-            array.push(dwLab, mkLabel(en, lo, tag + " Low "  + str.tostring(lo, format.mintick), labDesign, lc, labTxtCol, dwLabSz))
+            hiTag = tag + " High" + (showHtfPx ? " " + str.tostring(hi, format.mintick) : "")
+            loTag = tag + " Low"  + (showHtfPx ? " " + str.tostring(lo, format.mintick) : "")
+            array.push(dwLab, mkLabel(en, hi, hiTag, labDesign, lc, labTxtCol, dwLabSz))
+            array.push(dwLab, mkLabel(en, lo, loTag, labDesign, lc, labTxtCol, dwLabSz))
 
 // ---- PD array (FVG/OB): box stores + parallel 50% EQ midline stores ----
 var array<box>  fvgU  = array.new<box>()
@@ -276,11 +300,16 @@ cHigh  = request.security(sym, tfIn, high[1], lookahead=barmerge.lookahead_off)
 cLow   = request.security(sym, tfIn, low[1],  lookahead=barmerge.lookahead_off)
 cOpenT = request.security(sym, tfIn, time[1], lookahead=barmerge.lookahead_off)
 tfMs   = timeframe.in_seconds(tfIn) * 1000
+// candle A (range) = high[2]/low[2]; candle B (manipulation) close + range-TF ATR
+[aHi, aLo, bClose, atrTf] = request.security(sym, tfIn, [high[2], low[2], close[1], ta.atr(14)[1]], lookahead=barmerge.lookahead_off)
 
 var array<line> hiA   = array.new<line>()
 var array<line> loA   = array.new<line>()
 var array<line> eqA   = array.new<line>()
 var array<box>  shA   = array.new<box>()
+var array<label> swLbA  = array.new<label>()
+var array<line>  setLnA = array.new<line>()
+var array<label> setLbA = array.new<label>()
 var label labHi = na
 var label labLo = na
 var label labEq = na
@@ -337,8 +366,8 @@ if newClosed
             line.set_color(lex, age == 0 ? eqLnCol : col)
         shx = array.get(shA, i)
         if not na(shx)
-            shBgv = color.new(shadeCol, shadeOpacity)
-            box.set_bgcolor(shx, age == 0 ? shBgv : (age == 1 ? (showPrev ? shBgv : HIDE) : (showHist ? shBgv : HIDE)))
+            // shading only ever fills the CURRENT range; older ranges are line-only
+            box.set_bgcolor(shx, age == 0 ? color.new(shadeCol, shadeOpacity) : HIDE)
 
     while array.size(hiA) > maxHist + 2
         line.delete(array.shift(hiA))
@@ -349,6 +378,48 @@ if newClosed
         shd = array.shift(shA)
         if not na(shd)
             box.delete(shd)
+
+// ===================== OPTIONAL: Sweeps & CRT setups ==========================
+// Evaluate once per newly-closed range candle B, against the prior candle A.
+if newClosed and (showSweep or showSetup) and not na(aHi) and not na(aLo) and not na(bClose)
+    swLong  = cLow  < aLo and bClose > aLo   // wick below range low, closed back inside
+    swShort = cHigh > aHi and bClose < aHi   // wick above range high, closed back inside
+    if swLong or swShort
+        bStart = cOpenT
+        bEnd   = cOpenT + liveN * tfMs
+        pad    = slPadAtr * nz(atrTf, 0)
+        // --- sweep marker at the swept extreme ---
+        if showSweep
+            swY   = swLong ? cLow : cHigh
+            swCol = swLong ? sweepUpC : sweepDnC
+            swStyle = swLong ? label.style_label_up : label.style_label_down
+            lb = label.new(bStart, swY, sweepLbl ? "Sweep" : "", xloc=xloc.bar_time, style=swStyle, color=color.new(swCol, 20), textcolor=chart.bg_color, size=f_lsz(sweepSz))
+            array.push(swLbA, lb)
+            while array.size(swLbA) > swKeep
+                label.delete(array.shift(swLbA))
+        // --- CRT setup (entry / SL / TP + RR), gated by RR ---
+        if showSetup
+            entry = bClose
+            sl    = swLong ? cLow - pad : cHigh + pad
+            tp    = swLong ? aHi : aLo
+            risk  = math.abs(entry - sl)
+            rew   = math.abs(tp - entry)
+            rr    = risk > 0 ? rew / risk : 0.0
+            if rr >= setupMinRR and tp != entry and ((swLong and tp > entry) or (swShort and tp < entry))
+                dirC = swLong ? setupLongC : setupShortC
+                lnE = line.new(bStart, entry, bEnd, entry, xloc=xloc.bar_time, color=dirC, width=1, style=line.style_dotted)
+                lnS = line.new(bStart, sl,    bEnd, sl,    xloc=xloc.bar_time, color=setupSlC, width=1)
+                lnT = line.new(bStart, tp,    bEnd, tp,    xloc=xloc.bar_time, color=setupTpC, width=1)
+                array.push(setLnA, lnE)
+                array.push(setLnA, lnS)
+                array.push(setLnA, lnT)
+                txt = (swLong ? "CRT Long " : "CRT Short ") + str.tostring(rr, "#.0") + "R"
+                lbS = mkLabel(bEnd, entry, txt, labDesign, dirC, labTxtCol, labSz)
+                array.push(setLbA, lbS)
+                while array.size(setLnA) > swKeep * 3
+                    line.delete(array.shift(setLnA))
+                while array.size(setLbA) > swKeep
+                    label.delete(array.shift(setLbA))
 
 // ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
 ndHi = request.security(sym, "1D", high[1], lookahead=barmerge.lookahead_off)
