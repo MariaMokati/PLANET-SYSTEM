@@ -2,16 +2,16 @@
 // =============================================================================
 // BASIC CRT  —  Candle Range Theory marker + optional HTF confluence layers
 // -----------------------------------------------------------------------------
-// CORE (always on): High / Low / 50% EQ of each closed candle on a chosen TF.
+// CORE (always on): High / Low / 50% EQ of each closed candle on a chosen TF,
+// optionally drawn as a closed-left box with adjustable internal shading.
 //
 // OPTIONAL LAYERS (all default OFF — the core stays simple when unused):
 //   1. Daily & Weekly CRT ranges + premium/discount (broker or NY-17:00 anchor)
-//   2. Multi-timeframe FVGs & Order Blocks (1H/2H/3H/4H/6H/8H), each with its
-//      own 50% EQ line, mitigation, and a current-vs-historical toggle
-//   3. Swing High/Low support & resistance + equal highs/lows
-//   4. Supply / demand zones at recent swings
-// Every element has its own on/off switch AND its own label size, so the chart
-// only shows what you pick, styled how you like.
+//   2. FVGs & Order Blocks across 5m/15m/30m/1H/2H/4H/8H/D/W, each titled with
+//      its timeframe, with a 50% EQ line, mitigation, and historical toggle
+//   3. Swing High/Low support & resistance + equal highs/lows (own source TF)
+//   4. Supply / demand zones at recent swings (own source TF)
+// Every element has its own on/off switch, colours, and label size.
 //
 // Non-repainting: HTF data via request.security(closed bars, lookahead_off);
 // swings via confirmed pivots.
@@ -27,11 +27,15 @@ showPrev = input.bool(true,  "Show previous range", group=gVis)
 showHist = input.bool(false, "Show historical ranges", group=gVis)
 maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
 
-gCol   = "Range lines — Colours & Style"
+gCol   = "Range box — Colours & Style"
 curCol   = input.color(color.new(#2962FF, 0),  "Current range", group=gCol)
 prevCol  = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
 histCol  = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
-lw       = input.int(2, "Range line width", minval=1, maxval=4, group=gCol)
+lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
+closeLeft= input.bool(true, "Close the left side of the range (box)", group=gCol)
+showShade= input.bool(false, "Shade inside the range", group=gCol)
+shadeCol = input.color(color.new(#2962FF, 90), "Shade colour", group=gCol)
+shadeDepth = input.float(1.0, "Shade depth (0 = none, 1 = full range)", minval=0, maxval=1, step=0.05, group=gCol)
 
 gLab   = "CRT High / Low labels"
 labDesign = input.string("Filled", "Label design", options=["Filled","Ghost","Tinted","Chip"], group=gLab)
@@ -76,16 +80,19 @@ discC    = input.color(color.new(color.green, 0), "Discount tint", group=gDW)
 gPDA = "PD Arrays — FVG & Order Blocks  (optional)"
 showFVG = input.bool(false, "Show fair-value gaps", group=gPDA)
 showOB  = input.bool(false, "Show order blocks", group=gPDA)
-tf1On = input.bool(false, "1H", inline="tfa", group=gPDA)
-tf2On = input.bool(false, "2H", inline="tfa", group=gPDA)
-tf3On = input.bool(false, "3H", inline="tfa", group=gPDA)
-tf4On = input.bool(true,  "4H", inline="tfb", group=gPDA)
-tf6On = input.bool(false, "6H", inline="tfb", group=gPDA)
-tf8On = input.bool(false, "8H", inline="tfb", group=gPDA)
-pdKeep = input.int(6, "Keep last N per type", minval=1, maxval=30, group=gPDA)
+tf5On  = input.bool(false, "5m",  inline="pr1", group=gPDA)
+tf15On = input.bool(false, "15m", inline="pr1", group=gPDA)
+tf30On = input.bool(false, "30m", inline="pr1", group=gPDA)
+tf1On  = input.bool(false, "1H",  inline="pr2", group=gPDA)
+tf2On  = input.bool(false, "2H",  inline="pr2", group=gPDA)
+tf4On  = input.bool(true,  "4H",  inline="pr2", group=gPDA)
+tf8On  = input.bool(false, "8H",  inline="pr3", group=gPDA)
+tfDOn  = input.bool(false, "D",   inline="pr3", group=gPDA)
+tfWOn  = input.bool(false, "W",   inline="pr3", group=gPDA)
+pdKeep = input.int(20, "Keep last N per type", minval=1, maxval=60, group=gPDA, tooltip="Shared across timeframes. With many TFs on, raise this. Mitigated ones are removed to make room.")
 pdMit  = input.bool(true, "React to mitigation", group=gPDA)
 showHistPD = input.bool(false, "Keep historical (mitigated), faded", group=gPDA)
-showPdLbl = input.bool(true, "Label boxes (FVG / OB)", group=gPDA)
+showPdLbl = input.bool(true, "Label boxes (e.g. '4h FVG')", group=gPDA)
 pdLabSz   = input.string("Tiny", "Box label size", options=["Tiny","Small","Normal"], group=gPDA)
 pdTxtCol  = input.color(color.new(color.white, 0), "Box label colour", group=gPDA)
 fvgUpC = input.color(color.new(color.teal, 82),   "Bullish FVG", inline="cf", group=gPDA)
@@ -97,9 +104,10 @@ histC  = input.color(color.new(color.gray, 88),   "Historical fill", group=gPDA)
 // ===================== SWINGS — S/R + EQUAL H/L (optional) ===================
 gSR = "Swings — Support / Resistance  (optional)"
 showSR   = input.bool(false, "Recent swing High / Low (S/R)", group=gSR)
+srTF     = input.timeframe("", "S/R source timeframe (blank = chart)", group=gSR, tooltip="On a low TF, set this to e.g. 60 or 240 for more meaningful S/R levels.")
 srLen    = input.int(10, "Swing length", minval=2, group=gSR)
 srExt    = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSR)
-srMaxLen = input.int(60, "Max line length (bars, 0 = from pivot)", minval=0, maxval=1000, group=gSR, tooltip="Caps how far LEFT the lines reach so an old equal-high/low can't stretch across the whole chart. 60 on 4H = ~10 days.")
+srMaxLen = input.int(60, "Max line length (bars, 0 = from pivot)", minval=0, maxval=1000, group=gSR)
 showSrLbl= input.bool(true, "Label S/R & equal H/L lines", group=gSR)
 srLabSz  = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gSR)
 resCol   = input.color(color.new(color.red, 0),   "Resistance (swing high)", group=gSR)
@@ -111,6 +119,7 @@ eqlCol   = input.color(color.new(color.fuchsia, 0), "Equal H/L", group=gSR)
 // ===================== SUPPLY / DEMAND ZONES (optional) ======================
 gSD = "Supply / Demand zones  (optional)"
 showSD  = input.bool(false, "Show supply / demand zones", group=gSD)
+sdTF    = input.timeframe("", "S/D source timeframe (blank = chart)", group=gSD, tooltip="On a low TF, set this higher for more meaningful zones.")
 sdLen   = input.int(10, "Swing length", minval=2, group=gSD)
 sdKeep  = input.int(2, "Keep last N each", minval=1, maxval=6, group=gSD)
 sdExt   = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSD)
@@ -208,18 +217,18 @@ f_maintainT(array<box> act, array<line> actM, array<box> hist, bool bull) =>
                 else
                     box.delete(b)
             i := i - 1
-f_pdScan(bool en, float h1, float h3, float l1, float l3, float o3, float c3, int t2, bool nb) =>
+f_pdScan(bool en, string tfName, float h1, float h3, float l1, float l3, float o3, float c3, int t2, bool nb) =>
     if en and nb
         bull = not na(h3) and not na(l1) and h3 < l1
         bear = not na(l3) and not na(h1) and l3 > h1
         if showFVG and bull
-            f_addBoxT(fvgU, fvgUm, l1, h3, t2, fvgUpC, "FVG")
+            f_addBoxT(fvgU, fvgUm, l1, h3, t2, fvgUpC, tfName + " FVG")
         if showFVG and bear
-            f_addBoxT(fvgD, fvgDm, l3, h1, t2, fvgDnC, "FVG")
+            f_addBoxT(fvgD, fvgDm, l3, h1, t2, fvgDnC, tfName + " FVG")
         if showOB and bull and c3 < o3
-            f_addBoxT(obU, obUm, h3, l3, t2, obUpC, "OB")
+            f_addBoxT(obU, obUm, h3, l3, t2, obUpC, tfName + " OB")
         if showOB and bear and c3 > o3
-            f_addBoxT(obD, obDm, h3, l3, t2, obDnC, "OB")
+            f_addBoxT(obD, obDm, h3, l3, t2, obDnC, tfName + " OB")
 
 // title tag at the right end of an S/R or equal-H/L line
 f_srLabel(label lb, bool show, line ln, string txt, color col, int ext, string sz) =>
@@ -240,9 +249,11 @@ cLow   = request.security(sym, tfIn, low[1],  lookahead=barmerge.lookahead_off)
 cOpenT = request.security(sym, tfIn, time[1], lookahead=barmerge.lookahead_off)
 tfMs   = timeframe.in_seconds(tfIn) * 1000
 
-var array<line> hiA = array.new<line>()
-var array<line> loA = array.new<line>()
-var array<line> eqA = array.new<line>()
+var array<line> hiA   = array.new<line>()
+var array<line> loA   = array.new<line>()
+var array<line> eqA   = array.new<line>()
+var array<line> leftA = array.new<line>()
+var array<box>  shA   = array.new<box>()
 var label labHi = na
 var label labLo = na
 var label labEq = na
@@ -259,9 +270,13 @@ if newClosed
     lh = line.new(startT, cHigh, endT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw)
     ll = line.new(startT, cLow,  endT, cLow,  xloc=xloc.bar_time, color=curCol, width=lw)
     le = showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle)) : na
+    lft = closeLeft ? line.new(startT, cLow, startT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw) : na
+    sh  = showShade and shadeDepth > 0 ? box.new(startT, cHigh, startT + int(shadeDepth * (endT - startT)), cLow, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=shadeCol) : na
     array.push(hiA, lh)
     array.push(loA, ll)
     array.push(eqA, le)
+    array.push(leftA, lft)
+    array.push(shA, sh)
 
     hiName = shortHL ? "CRT H" : "CRT High"
     loName = shortHL ? "CRT L" : "CRT Low"
@@ -294,6 +309,12 @@ if newClosed
         lex = array.get(eqA, i)
         if not na(lex)
             line.set_color(lex, age == 0 ? eqLnCol : col)
+        lftx = array.get(leftA, i)
+        if not na(lftx)
+            line.set_color(lftx, col)
+        shx = array.get(shA, i)
+        if not na(shx)
+            box.set_bgcolor(shx, age == 0 ? shadeCol : (age == 1 ? (showPrev ? shadeCol : HIDE) : (showHist ? shadeCol : HIDE)))
 
     while array.size(hiA) > maxHist + 2
         line.delete(array.shift(hiA))
@@ -301,6 +322,12 @@ if newClosed
         led = array.shift(eqA)
         if not na(led)
             line.delete(led)
+        lfd = array.shift(leftA)
+        if not na(lfd)
+            line.delete(lfd)
+        shd = array.shift(shA)
+        if not na(shd)
+            box.delete(shd)
 
 // ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
 ndHi = request.security(sym, "1D", high[1], lookahead=barmerge.lookahead_off)
@@ -367,20 +394,26 @@ if (showDR and newDailyEvt) or (showWR and newWeeklyEvt)
         f_drawHTF(prevWHi, prevWLo, int(prevWSt), wProjMs, wCol, "W")
 
 // ===================== OPTIONAL: Multi-TF FVG / Order Blocks ==================
-// one tuple security call per timeframe (stays well under the request limit)
-[a1,a3,b1,b3,ao,ac,at1,at2] = request.security(sym, "60",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[c1,c3,d1,d3,co,cc,ct1,ct2] = request.security(sym, "120", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[e1,e3,f1,f3,eo,ec,et1,et2] = request.security(sym, "180", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[g1,g3,h1x,h3x,go,gc,gt1,gt2] = request.security(sym, "240", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[i1,i3,j1,j3,io,ic,it1,it2] = request.security(sym, "360", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[k1,k3,l1x,l3x,ko,kc,kt1,kt2] = request.security(sym, "480", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+// one tuple security call per timeframe (9 total; well under the request limit)
+[f5h1,f5h3,f5l1,f5l3,f5o,f5c,f5t1,f5t2]       = request.security(sym, "5",   [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[f15h1,f15h3,f15l1,f15l3,f15o,f15c,f15t1,f15t2] = request.security(sym, "15", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[f30h1,f30h3,f30l1,f30l3,f30o,f30c,f30t1,f30t2] = request.security(sym, "30", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[f1h1,f1h3,f1l1,f1l3,f1o,f1c,f1t1,f1t2]       = request.security(sym, "60",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[f2h1,f2h3,f2l1,f2l3,f2o,f2c,f2t1,f2t2]       = request.security(sym, "120", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[f4h1,f4h3,f4l1,f4l3,f4o,f4c,f4t1,f4t2]       = request.security(sym, "240", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[f8h1,f8h3,f8l1,f8l3,f8o,f8c,f8t1,f8t2]       = request.security(sym, "480", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[fdh1,fdh3,fdl1,fdl3,fdo,fdc,fdt1,fdt2]       = request.security(sym, "1D",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+[fwh1,fwh3,fwl1,fwl3,fwo,fwc,fwt1,fwt2]       = request.security(sym, "1W",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
 
-f_pdScan(tf1On, a1, a3, b1, b3, ao, ac, int(at2), not na(at1) and at1 != at1[1])
-f_pdScan(tf2On, c1, c3, d1, d3, co, cc, int(ct2), not na(ct1) and ct1 != ct1[1])
-f_pdScan(tf3On, e1, e3, f1, f3, eo, ec, int(et2), not na(et1) and et1 != et1[1])
-f_pdScan(tf4On, g1, g3, h1x, h3x, go, gc, int(gt2), not na(gt1) and gt1 != gt1[1])
-f_pdScan(tf6On, i1, i3, j1, j3, io, ic, int(it2), not na(it1) and it1 != it1[1])
-f_pdScan(tf8On, k1, k3, l1x, l3x, ko, kc, int(kt2), not na(kt1) and kt1 != kt1[1])
+f_pdScan(tf5On,  "5m",  f5h1, f5h3, f5l1, f5l3, f5o, f5c, int(f5t2), not na(f5t1) and f5t1 != f5t1[1])
+f_pdScan(tf15On, "15m", f15h1, f15h3, f15l1, f15l3, f15o, f15c, int(f15t2), not na(f15t1) and f15t1 != f15t1[1])
+f_pdScan(tf30On, "30m", f30h1, f30h3, f30l1, f30l3, f30o, f30c, int(f30t2), not na(f30t1) and f30t1 != f30t1[1])
+f_pdScan(tf1On,  "1h",  f1h1, f1h3, f1l1, f1l3, f1o, f1c, int(f1t2), not na(f1t1) and f1t1 != f1t1[1])
+f_pdScan(tf2On,  "2h",  f2h1, f2h3, f2l1, f2l3, f2o, f2c, int(f2t2), not na(f2t1) and f2t1 != f2t1[1])
+f_pdScan(tf4On,  "4h",  f4h1, f4h3, f4l1, f4l3, f4o, f4c, int(f4t2), not na(f4t1) and f4t1 != f4t1[1])
+f_pdScan(tf8On,  "8h",  f8h1, f8h3, f8l1, f8l3, f8o, f8c, int(f8t2), not na(f8t1) and f8t1 != f8t1[1])
+f_pdScan(tfDOn,  "1D",  fdh1, fdh3, fdl1, fdl3, fdo, fdc, int(fdt2), not na(fdt1) and fdt1 != fdt1[1])
+f_pdScan(tfWOn,  "1W",  fwh1, fwh3, fwl1, fwl3, fwo, fwc, int(fwt2), not na(fwt1) and fwt1 != fwt1[1])
 
 if showFVG
     f_maintainT(fvgU, fvgUm, fvgUh, true)
@@ -391,8 +424,8 @@ if showOB
 
 // ===================== OPTIONAL: Swing S/R + Equal H/L ========================
 atrRef = ta.atr(14)
-srPh = ta.pivothigh(srLen, srLen)
-srPl = ta.pivotlow(srLen, srLen)
+srUseTF = srTF == "" ? timeframe.period : srTF
+[srPh, srPl] = request.security(sym, srUseTF, [ta.pivothigh(srLen, srLen), ta.pivotlow(srLen, srLen)], lookahead=barmerge.lookahead_off)
 var float lastPH = na
 var float prevPH = na
 var float lastPL = na
@@ -437,8 +470,6 @@ if not na(srPl)
         eqlLine := line.new(bar_index - srLen, math.min(lastPL, prevPL), bar_index, math.min(lastPL, prevPL), color=eqlCol, style=line.style_dotted)
         eqlBar  := bar_index - srLen
 
-// trail right to current price, and clamp the LEFT edge so old lines can't
-// stretch across the whole chart (fixes an EQ line reaching back months)
 if not na(resLine)
     line.set_x1(resLine, srMaxLen > 0 ? math.max(nz(resBar, bar_index), bar_index - srMaxLen) : nz(resBar, bar_index))
     line.set_x2(resLine, bar_index + srExt)
@@ -457,25 +488,20 @@ eqhLbl := f_srLabel(eqhLbl, showEQL and showSrLbl, eqhLine, "EQH",        eqlCol
 eqlLbl := f_srLabel(eqlLbl, showEQL and showSrLbl, eqlLine, "EQL",        eqlCol, srExt, srLabSz)
 
 // ===================== OPTIONAL: Supply / Demand zones ========================
-sdPh = ta.pivothigh(sdLen, sdLen)
-sdPl = ta.pivotlow(sdLen, sdLen)
+sdUseTF = sdTF == "" ? timeframe.period : sdTF
+[sdPhV, sdPhBody, sdPlV, sdPlBody] = request.security(sym, sdUseTF, [ta.pivothigh(sdLen, sdLen), math.max(open[sdLen], close[sdLen]), ta.pivotlow(sdLen, sdLen), math.min(open[sdLen], close[sdLen])], lookahead=barmerge.lookahead_off)
 var array<box> supplyA = array.new<box>()
 var array<box> demandA = array.new<box>()
-if showSD and not na(sdPh)
-    topS = high[sdLen]
-    botS = math.max(open[sdLen], close[sdLen])
-    bS = box.new(bar_index - sdLen, topS, bar_index, botS, border_color=TRANSP, bgcolor=supplyC, text=showSdLbl ? "Supply" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
+if showSD and not na(sdPhV)
+    bS = box.new(bar_index - sdLen, sdPhV, bar_index, sdPhBody, border_color=TRANSP, bgcolor=supplyC, text=showSdLbl ? "Supply" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
     array.push(supplyA, bS)
     while array.size(supplyA) > sdKeep
         box.delete(array.shift(supplyA))
-if showSD and not na(sdPl)
-    botD = low[sdLen]
-    topD = math.min(open[sdLen], close[sdLen])
-    bD = box.new(bar_index - sdLen, topD, bar_index, botD, border_color=TRANSP, bgcolor=demandC, text=showSdLbl ? "Demand" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
+if showSD and not na(sdPlV)
+    bD = box.new(bar_index - sdLen, sdPlBody, bar_index, sdPlV, border_color=TRANSP, bgcolor=demandC, text=showSdLbl ? "Demand" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
     array.push(demandA, bD)
     while array.size(demandA) > sdKeep
         box.delete(array.shift(demandA))
-// trail zones to current price (+ optional bars) so they stop at the market
 if showSD and array.size(supplyA) > 0
     for idx = 0 to array.size(supplyA) - 1
         box.set_right(array.get(supplyA, idx), bar_index + sdExt)
