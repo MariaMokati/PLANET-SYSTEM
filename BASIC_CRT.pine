@@ -101,6 +101,10 @@ obUpC  = input.color(color.new(color.green, 78),  "Bullish OB", inline="co", gro
 obDnC  = input.color(color.new(color.red, 78),    "Bearish OB", inline="co", group=gPDA)
 histC  = input.color(color.new(color.gray, 88),   "Historical fill", group=gPDA)
 
+gWk = "Weekly filter (FVG / OB / Zones)"
+showCurWeek  = input.bool(true, "Show current week", group=gWk, tooltip="Only boxes/zones from these weeks are shown; anything older than last week is removed.")
+showPrevWeek = input.bool(true, "Show previous week", group=gWk)
+
 // ===================== SWINGS — S/R + EQUAL H/L (optional) ===================
 gSR = "Swings — Support / Resistance  (optional)"
 showSR   = input.bool(false, "Recent swing High / Low (S/R)", group=gSR)
@@ -141,6 +145,17 @@ mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, 
     label.new(x, y, txt, xloc=xloc.bar_time, style=label.style_label_left, color=bg, textcolor=tc, size=f_lsz(szStr))
 
 TRANSP = color.new(color.gray, 100)
+
+// ---- current & previous week start times (for the weekly filter) ----
+curWkStart = time("W")
+var int prevWkStart = na
+if ta.change(time("W")) != 0
+    prevWkStart := time("W")[1]
+// which week bucket a formation-time belongs to: 0 = current, 1 = previous, 2 = older
+f_wkBucket(int L) =>
+    L >= curWkStart ? 0 : (na(prevWkStart) or L >= prevWkStart) ? 1 : 2
+f_wkVisible(int bucket) =>
+    (bucket == 0 and showCurWeek) or (bucket == 1 and showPrevWeek)
 
 // ---- Daily/Weekly store ----
 var array<line>  dwL   = array.new<line>()
@@ -194,28 +209,40 @@ f_addBoxT(array<box> a, array<line> m, float top, float bot, int left, color col
         lmo = array.shift(m)
         if not na(lmo)
             line.delete(lmo)
-f_maintainT(array<box> act, array<line> actM, array<box> hist, bool bull) =>
+f_maintainT(array<box> act, array<line> actM, array<box> hist, bool bull, color realCol) =>
     if array.size(act) > 0
         i = array.size(act) - 1
         while i >= 0
             b  = array.get(act, i)
             lm = array.get(actM, i)
-            box.set_right(b, time)
-            if not na(lm)
-                line.set_x2(lm, time)
-            mit = pdMit and (bull ? close < box.get_bottom(b) : close > box.get_top(b))
-            if mit
+            bucket = f_wkBucket(int(box.get_left(b)))
+            if bucket >= 2
                 array.remove(act, i)
                 array.remove(actM, i)
+                box.delete(b)
                 if not na(lm)
                     line.delete(lm)
-                if showHistPD
-                    box.set_bgcolor(b, histC)
-                    array.push(hist, b)
-                    while array.size(hist) > pdKeep
-                        box.delete(array.shift(hist))
-                else
-                    box.delete(b)
+            else
+                vis = f_wkVisible(bucket)
+                box.set_right(b, time)
+                box.set_bgcolor(b, vis ? realCol : TRANSP)
+                box.set_text_color(b, vis ? pdTxtCol : TRANSP)
+                if not na(lm)
+                    line.set_x2(lm, time)
+                    line.set_color(lm, vis and showFvgEq ? eqLnCol : TRANSP)
+                mit = pdMit and (bull ? close < box.get_bottom(b) : close > box.get_top(b))
+                if mit
+                    array.remove(act, i)
+                    array.remove(actM, i)
+                    if not na(lm)
+                        line.delete(lm)
+                    if showHistPD
+                        box.set_bgcolor(b, histC)
+                        array.push(hist, b)
+                        while array.size(hist) > pdKeep
+                            box.delete(array.shift(hist))
+                    else
+                        box.delete(b)
             i := i - 1
 f_pdScan(bool en, string tfName, float h1, float h3, float l1, float l3, float o3, float c3, int t2, bool nb) =>
     if en and nb
@@ -416,11 +443,11 @@ f_pdScan(tfDOn,  "1D",  fdh1, fdh3, fdl1, fdl3, fdo, fdc, int(fdt2), not na(fdt1
 f_pdScan(tfWOn,  "1W",  fwh1, fwh3, fwl1, fwl3, fwo, fwc, int(fwt2), not na(fwt1) and fwt1 != fwt1[1])
 
 if showFVG
-    f_maintainT(fvgU, fvgUm, fvgUh, true)
-    f_maintainT(fvgD, fvgDm, fvgDh, false)
+    f_maintainT(fvgU, fvgUm, fvgUh, true,  fvgUpC)
+    f_maintainT(fvgD, fvgDm, fvgDh, false, fvgDnC)
 if showOB
-    f_maintainT(obU, obUm, obUh, true)
-    f_maintainT(obD, obDm, obDh, false)
+    f_maintainT(obU, obUm, obUh, true,  obUpC)
+    f_maintainT(obD, obDm, obDh, false, obDnC)
 
 // ===================== OPTIONAL: Swing S/R + Equal H/L ========================
 atrRef = ta.atr(14)
@@ -492,19 +519,51 @@ sdUseTF = sdTF == "" ? timeframe.period : sdTF
 [sdPhV, sdPhBody, sdPlV, sdPlBody] = request.security(sym, sdUseTF, [ta.pivothigh(sdLen, sdLen), math.max(open[sdLen], close[sdLen]), ta.pivotlow(sdLen, sdLen), math.min(open[sdLen], close[sdLen])], lookahead=barmerge.lookahead_off)
 var array<box> supplyA = array.new<box>()
 var array<box> demandA = array.new<box>()
+var array<int> supplyT = array.new<int>()
+var array<int> demandT = array.new<int>()
 if showSD and not na(sdPhV)
     bS = box.new(bar_index - sdLen, sdPhV, bar_index, sdPhBody, border_color=TRANSP, bgcolor=supplyC, text=showSdLbl ? "Supply" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
     array.push(supplyA, bS)
+    array.push(supplyT, time)
     while array.size(supplyA) > sdKeep
         box.delete(array.shift(supplyA))
+        array.shift(supplyT)
 if showSD and not na(sdPlV)
     bD = box.new(bar_index - sdLen, sdPlBody, bar_index, sdPlV, border_color=TRANSP, bgcolor=demandC, text=showSdLbl ? "Demand" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
     array.push(demandA, bD)
+    array.push(demandT, time)
     while array.size(demandA) > sdKeep
         box.delete(array.shift(demandA))
-if showSD and array.size(supplyA) > 0
-    for idx = 0 to array.size(supplyA) - 1
-        box.set_right(array.get(supplyA, idx), bar_index + sdExt)
-if showSD and array.size(demandA) > 0
-    for idx = 0 to array.size(demandA) - 1
-        box.set_right(array.get(demandA, idx), bar_index + sdExt)
+        array.shift(demandT)
+// weekly filter + trail — supply
+if array.size(supplyA) > 0
+    i = array.size(supplyA) - 1
+    while i >= 0
+        b = array.get(supplyA, i)
+        bucket = f_wkBucket(array.get(supplyT, i))
+        if bucket >= 2
+            box.delete(b)
+            array.remove(supplyA, i)
+            array.remove(supplyT, i)
+        else
+            vis = showSD and f_wkVisible(bucket)
+            box.set_right(b, bar_index + sdExt)
+            box.set_bgcolor(b, vis ? supplyC : TRANSP)
+            box.set_text_color(b, vis ? zoneTxtCol : TRANSP)
+        i := i - 1
+// weekly filter + trail — demand
+if array.size(demandA) > 0
+    i2 = array.size(demandA) - 1
+    while i2 >= 0
+        b = array.get(demandA, i2)
+        bucket = f_wkBucket(array.get(demandT, i2))
+        if bucket >= 2
+            box.delete(b)
+            array.remove(demandA, i2)
+            array.remove(demandT, i2)
+        else
+            vis = showSD and f_wkVisible(bucket)
+            box.set_right(b, bar_index + sdExt)
+            box.set_bgcolor(b, vis ? demandC : TRANSP)
+            box.set_text_color(b, vis ? zoneTxtCol : TRANSP)
+        i2 := i2 - 1
