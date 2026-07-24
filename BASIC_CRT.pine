@@ -373,13 +373,11 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
     rr   = risk > 0 ? rew / risk : 0.0
     if rr >= setupMinRR and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
         dirC = dir == 1 ? setupLongC : setupShortC
-        endX = startX + 24
         shortEndX = startX + 4
-        // ENTRY = the prominent element: solid line + filled Long/Short tag (stands out even inside the range shade)
-        lnE = line.new(startX, entry, endX, entry, color=dirC, width=setupLineW, style=line.style_solid)
-        etxt = (dir == 1 ? "Long " : "Short ") + str.tostring(rr, "#.0") + "R"
-        lbR = label.new(endX, entry, etxt, style=label.style_label_left, color=dirC, textcolor=labTxtCol, size=f_lsz(labSz))
-        // TP / SL = short dotted with tiny titles
+        // entry / TP / SL all the SAME short dotted length with tiny titles.
+        // LE = long entry, SE = short entry.
+        lnE = line.new(startX, entry, shortEndX, entry, color=dirC, width=setupLineW, style=line.style_dotted)
+        lbR = label.new(shortEndX, entry, dir == 1 ? "LE" : "SE", style=label.style_label_left, color=color.new(color.gray, 100), textcolor=dirC, size=size.tiny)
         lnT = line.new(startX, tp, shortEndX, tp, color=setupTpC, width=setupLineW, style=line.style_dotted)
         lnS = line.new(startX, sl, shortEndX, sl, color=setupSlC, width=setupLineW, style=line.style_dotted)
         lbT = label.new(shortEndX, tp, "TP", style=label.style_label_left, color=color.new(color.gray, 100), textcolor=setupTpC, size=size.tiny)
