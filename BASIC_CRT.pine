@@ -6,11 +6,12 @@
 //
 // OPTIONAL LAYERS (all default OFF — the core stays simple when unused):
 //   1. Daily & Weekly CRT ranges + premium/discount (broker or NY-17:00 anchor)
-//   2. Multi-timeframe FVGs & Order Blocks (1H/2H/3H/4H/6H/8H, each toggle),
-//      with mitigation and a current-vs-historical toggle
+//   2. Multi-timeframe FVGs & Order Blocks (1H/2H/3H/4H/6H/8H), each with its
+//      own 50% EQ line, mitigation, and a current-vs-historical toggle
 //   3. Swing High/Low support & resistance + equal highs/lows
 //   4. Supply / demand zones at recent swings
-// Every element has its own on/off switch so the chart only shows what you pick.
+// Every element has its own on/off switch AND its own label size, so the chart
+// only shows what you pick, styled how you like.
 //
 // Non-repainting: HTF data via request.security(closed bars, lookahead_off);
 // swings via confirmed pivots.
@@ -19,40 +20,43 @@ indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=100, 
 
 // ===================== CORE INPUTS ===========================================
 tfIn   = input.timeframe("240", "Range timeframe", tooltip="Which candle defines each range. 240 = 4H.")
-liveN  = input.int(3, "Keep range live for N candles", minval=1, tooltip="A range projects right for this many candles. 3 = classic CRT.")
+liveN  = input.int(3, "Keep range live for N candles", minval=1)
 
 gVis   = "Visibility"
 showPrev = input.bool(true,  "Show previous range", group=gVis)
 showHist = input.bool(false, "Show historical ranges", group=gVis)
 maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
 
-gCol   = "Lines — Colours & Style"
+gCol   = "Range lines — Colours & Style"
 curCol   = input.color(color.new(#2962FF, 0),  "Current range", group=gCol)
 prevCol  = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
 histCol  = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
-showEqLn = input.bool(true, "Show equilibrium line", group=gCol)
-eqLnCol  = input.color(color.new(#FF6D00, 40), "Equilibrium line", group=gCol)
-lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
+lw       = input.int(2, "Range line width", minval=1, maxval=4, group=gCol)
 
-gLab   = "Labels"
+gLab   = "CRT High / Low labels"
 labDesign = input.string("Filled", "Label design", options=["Filled","Ghost","Tinted","Chip"], group=gLab)
 showHL    = input.bool(true,  "Show High / Low labels", group=gLab)
 shortHL   = input.bool(false, "Short names (CRT H / CRT L)", group=gLab)
-showPx    = input.bool(true,  "Show price in High / Low labels", group=gLab)
+showPx    = input.bool(true,  "Show price in labels", group=gLab)
 labSz     = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gLab)
+hlLabCol  = input.color(color.new(#2962FF, 0), "Label colour", group=gLab)
+labTxtCol = input.color(color.white, "Text colour (Filled)", group=gLab)
 
-gLabC  = "Labels — Colours"
-hlLabCol  = input.color(color.new(#2962FF, 0), "High / Low label", group=gLabC)
-eqLabCol  = input.color(color.new(color.black, 0), "EQ label", group=gLabC)
-labTxtCol = input.color(color.white, "Label text colour", group=gLabC)
-
-gEq    = "Equilibrium label"
-showEqLab = input.bool(true,  "Show EQ label", group=gEq)
-showEqPx  = input.bool(false, "Include EQ price", group=gEq)
-showSize  = input.bool(true,  "Show range size (PTS)", group=gEq)
-pointSize = input.float(0.0, "Price per point (0 = auto min-tick)", minval=0, step=0.001, group=gEq)
-brUnit    = input.string("Pips", "Bracket unit", options=["Pips","Ticks","Price","None"], group=gEq)
-pipSize   = input.float(0.0, "Price per pip (0 = auto)", minval=0, step=0.0001, group=gEq)
+// ===================== EQUILIBRIUM (all ranges) ==============================
+gEQ = "Equilibrium (all ranges)"
+showEqLn  = input.bool(true, "Show equilibrium line", group=gEQ)
+eqLnCol   = input.color(color.new(#FF6D00, 0), "EQ line colour", group=gEQ)
+eqLnWidth = input.int(2, "EQ line width", minval=1, maxval=4, group=gEQ)
+eqLnStyle = input.string("Dotted", "EQ line style", options=["Dotted","Dashed","Solid"], group=gEQ)
+showFvgEq = input.bool(true, "Add 50% EQ line to FVG / OB boxes", group=gEQ)
+showEqLab = input.bool(true, "Show EQ label", group=gEQ)
+eqLabSz   = input.string("Tiny", "EQ label size", options=["Tiny","Small","Normal"], group=gEQ)
+eqLabCol  = input.color(color.new(color.black, 0), "EQ label colour", group=gEQ)
+showEqPx  = input.bool(false, "Include EQ price in label", group=gEQ)
+showSize  = input.bool(true,  "Show range size (PTS) in label", group=gEQ)
+pointSize = input.float(0.0, "Price per point (0 = auto min-tick)", minval=0, step=0.001, group=gEQ)
+brUnit    = input.string("Pips", "Bracket unit", options=["Pips","Ticks","Price","None"], group=gEQ)
+pipSize   = input.float(0.0, "Price per pip (0 = auto)", minval=0, step=0.0001, group=gEQ)
 
 // ===================== DAILY / WEEKLY CRT (optional) =========================
 gDW = "HTF Bias — Daily / Weekly CRT  (optional)"
@@ -62,6 +66,7 @@ nyAnchor = input.bool(false, "Anchor D/W to New York 17:00", group=gDW, tooltip=
 showPD   = input.bool(true,  "Premium / discount shading", group=gDW)
 htfProj  = input.int(1, "Project ranges N periods right", minval=1, maxval=5, group=gDW)
 showHtfLbl = input.bool(true, "Label D / W ranges", group=gDW)
+dwLabSz  = input.string("Small", "D / W label size", options=["Tiny","Small","Normal"], group=gDW)
 dCol     = input.color(color.new(#787B86, 0), "Daily line", group=gDW)
 wCol     = input.color(color.new(#5D606B, 0), "Weekly line", group=gDW)
 premC    = input.color(color.new(color.red, 0), "Premium tint", group=gDW)
@@ -80,13 +85,14 @@ tf8On = input.bool(false, "8H", inline="tfb", group=gPDA)
 pdKeep = input.int(6, "Keep last N per type", minval=1, maxval=30, group=gPDA)
 pdMit  = input.bool(true, "React to mitigation", group=gPDA)
 showHistPD = input.bool(false, "Keep historical (mitigated), faded", group=gPDA)
+showPdLbl = input.bool(true, "Label boxes (FVG / OB)", group=gPDA)
+pdLabSz   = input.string("Tiny", "Box label size", options=["Tiny","Small","Normal"], group=gPDA)
+pdTxtCol  = input.color(color.new(color.white, 0), "Box label colour", group=gPDA)
 fvgUpC = input.color(color.new(color.teal, 82),   "Bullish FVG", inline="cf", group=gPDA)
 fvgDnC = input.color(color.new(color.maroon, 82), "Bearish FVG", inline="cf", group=gPDA)
 obUpC  = input.color(color.new(color.green, 78),  "Bullish OB", inline="co", group=gPDA)
 obDnC  = input.color(color.new(color.red, 78),    "Bearish OB", inline="co", group=gPDA)
 histC  = input.color(color.new(color.gray, 88),   "Historical fill", group=gPDA)
-showPdLbl = input.bool(true, "Label FVG / OB boxes", group=gPDA)
-pdTxtCol  = input.color(color.new(color.white, 0), "Box label colour", group=gPDA)
 
 // ===================== SWINGS — S/R + EQUAL H/L (optional) ===================
 gSR = "Swings — Support / Resistance  (optional)"
@@ -95,6 +101,7 @@ srLen    = input.int(10, "Swing length", minval=2, group=gSR)
 srExt    = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSR)
 srMaxLen = input.int(60, "Max line length (bars, 0 = from pivot)", minval=0, maxval=1000, group=gSR, tooltip="Caps how far LEFT the lines reach so an old equal-high/low can't stretch across the whole chart. 60 on 4H = ~10 days.")
 showSrLbl= input.bool(true, "Label S/R & equal H/L lines", group=gSR)
+srLabSz  = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gSR)
 resCol   = input.color(color.new(color.red, 0),   "Resistance (swing high)", group=gSR)
 supCol   = input.color(color.new(color.green, 0), "Support (swing low)", group=gSR)
 showEQL  = input.bool(false, "Equal highs / lows", group=gSR)
@@ -108,6 +115,7 @@ sdLen   = input.int(10, "Swing length", minval=2, group=gSD)
 sdKeep  = input.int(2, "Keep last N each", minval=1, maxval=6, group=gSD)
 sdExt   = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSD)
 showSdLbl  = input.bool(true, "Label zones", group=gSD)
+sdLabSz    = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gSD)
 zoneTxtCol = input.color(color.new(color.white, 0), "Zone label colour", group=gSD)
 supplyC = input.color(color.new(color.red, 85),   "Supply zone", group=gSD)
 demandC = input.color(color.new(color.green, 85), "Demand zone", group=gSD)
@@ -115,6 +123,8 @@ demandC = input.color(color.new(color.green, 85), "Demand zone", group=gSD)
 // ===================== HELPERS ===============================================
 f_lsz(string s) =>
     s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+f_lstyle(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Solid" ? line.style_solid : line.style_dotted
 
 mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, string szStr) =>
     bg = design == "Ghost"  ? color.new(color.gray, 100) : design == "Tinted" ? color.new(mainCol, 70) : design == "Chip" ? chart.bg_color : mainCol
@@ -140,37 +150,56 @@ f_drawHTF(float hi, float lo, int st, int projMs, color lc, string tag) =>
         en  = st + projMs
         array.push(dwL, line.new(st, hi,  en, hi,  xloc=xloc.bar_time, color=lc, width=lw))
         array.push(dwL, line.new(st, lo,  en, lo,  xloc=xloc.bar_time, color=lc, width=lw))
-        array.push(dwL, line.new(st, eqy, en, eqy, xloc=xloc.bar_time, color=color.new(lc, 45), style=line.style_dotted))
+        if showEqLn
+            array.push(dwL, line.new(st, eqy, en, eqy, xloc=xloc.bar_time, color=color.new(lc, 30), width=eqLnWidth, style=f_lstyle(eqLnStyle)))
         if showPD
             array.push(dwB, box.new(st, hi,  en, eqy, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(premC, 92)))
             array.push(dwB, box.new(st, eqy, en, lo,  xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(discC, 92)))
         if showHtfLbl
-            array.push(dwLab, mkLabel(en, hi, tag + " High " + str.tostring(hi, format.mintick), labDesign, lc, labTxtCol, labSz))
-            array.push(dwLab, mkLabel(en, lo, tag + " Low "  + str.tostring(lo, format.mintick), labDesign, lc, labTxtCol, labSz))
+            array.push(dwLab, mkLabel(en, hi, tag + " High " + str.tostring(hi, format.mintick), labDesign, lc, labTxtCol, dwLabSz))
+            array.push(dwLab, mkLabel(en, lo, tag + " Low "  + str.tostring(lo, format.mintick), labDesign, lc, labTxtCol, dwLabSz))
 
-// ---- PD array (FVG/OB) stores: active + historical per type ----
-var array<box> fvgU  = array.new<box>()
-var array<box> fvgD  = array.new<box>()
-var array<box> obU   = array.new<box>()
-var array<box> obD   = array.new<box>()
-var array<box> fvgUh = array.new<box>()
-var array<box> fvgDh = array.new<box>()
-var array<box> obUh  = array.new<box>()
-var array<box> obDh  = array.new<box>()
-f_addBoxT(array<box> a, float top, float bot, int left, color col, string txt) =>
-    b = box.new(left, top, time, bot, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=col, text=showPdLbl ? txt : "", text_color=pdTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=size.small)
+// ---- PD array (FVG/OB): box stores + parallel 50% EQ midline stores ----
+var array<box>  fvgU  = array.new<box>()
+var array<box>  fvgD  = array.new<box>()
+var array<box>  obU   = array.new<box>()
+var array<box>  obD   = array.new<box>()
+var array<box>  fvgUh = array.new<box>()
+var array<box>  fvgDh = array.new<box>()
+var array<box>  obUh  = array.new<box>()
+var array<box>  obDh  = array.new<box>()
+var array<line> fvgUm = array.new<line>()
+var array<line> fvgDm = array.new<line>()
+var array<line> obUm  = array.new<line>()
+var array<line> obDm  = array.new<line>()
+f_addBoxT(array<box> a, array<line> m, float top, float bot, int left, color col, string txt) =>
+    b = box.new(left, top, time, bot, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=col, text=showPdLbl ? txt : "", text_color=pdTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(pdLabSz))
     array.push(a, b)
+    line lm = na
+    if showFvgEq
+        mid = (top + bot) / 2.0
+        lm := line.new(left, mid, time, mid, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle))
+    array.push(m, lm)
     while array.size(a) > pdKeep
         box.delete(array.shift(a))
-f_maintainT(array<box> act, array<box> hist, bool bull) =>
+        lmo = array.shift(m)
+        if not na(lmo)
+            line.delete(lmo)
+f_maintainT(array<box> act, array<line> actM, array<box> hist, bool bull) =>
     if array.size(act) > 0
         i = array.size(act) - 1
         while i >= 0
-            b = array.get(act, i)
+            b  = array.get(act, i)
+            lm = array.get(actM, i)
             box.set_right(b, time)
+            if not na(lm)
+                line.set_x2(lm, time)
             mit = pdMit and (bull ? close < box.get_bottom(b) : close > box.get_top(b))
             if mit
                 array.remove(act, i)
+                array.remove(actM, i)
+                if not na(lm)
+                    line.delete(lm)
                 if showHistPD
                     box.set_bgcolor(b, histC)
                     array.push(hist, b)
@@ -179,27 +208,26 @@ f_maintainT(array<box> act, array<box> hist, bool bull) =>
                 else
                     box.delete(b)
             i := i - 1
-// detect FVG/OB from one timeframe's closed-bar data and add boxes
 f_pdScan(bool en, float h1, float h3, float l1, float l3, float o3, float c3, int t2, bool nb) =>
     if en and nb
         bull = not na(h3) and not na(l1) and h3 < l1
         bear = not na(l3) and not na(h1) and l3 > h1
         if showFVG and bull
-            f_addBoxT(fvgU, l1, h3, t2, fvgUpC, "FVG")
+            f_addBoxT(fvgU, fvgUm, l1, h3, t2, fvgUpC, "FVG")
         if showFVG and bear
-            f_addBoxT(fvgD, l3, h1, t2, fvgDnC, "FVG")
+            f_addBoxT(fvgD, fvgDm, l3, h1, t2, fvgDnC, "FVG")
         if showOB and bull and c3 < o3
-            f_addBoxT(obU, h3, l3, t2, obUpC, "OB")
+            f_addBoxT(obU, obUm, h3, l3, t2, obUpC, "OB")
         if showOB and bear and c3 > o3
-            f_addBoxT(obD, h3, l3, t2, obDnC, "OB")
+            f_addBoxT(obD, obDm, h3, l3, t2, obDnC, "OB")
 
 // title tag at the right end of an S/R or equal-H/L line
-f_srLabel(label lb, bool show, line ln, string txt, color col, int ext) =>
+f_srLabel(label lb, bool show, line ln, string txt, color col, int ext, string sz) =>
     label out = lb
     if show and not na(ln)
         lvl = line.get_y2(ln)
         if na(out)
-            out := label.new(bar_index + ext, lvl, txt, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=col, size=size.small)
+            out := label.new(bar_index + ext, lvl, txt, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=col, size=f_lsz(sz))
         else
             label.set_xy(out, bar_index + ext, lvl)
             label.set_text(out, txt)
@@ -230,7 +258,7 @@ if newClosed
 
     lh = line.new(startT, cHigh, endT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw)
     ll = line.new(startT, cLow,  endT, cLow,  xloc=xloc.bar_time, color=curCol, width=lw)
-    le = showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=1, style=line.style_dotted) : na
+    le = showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle)) : na
     array.push(hiA, lh)
     array.push(loA, ll)
     array.push(eqA, le)
@@ -255,7 +283,7 @@ if newClosed
         label.delete(labEq)
     labHi := showHL    ? mkLabel(endT, cHigh, hiTxt, labDesign, hlLabCol, labTxtCol, labSz) : na
     labLo := showHL    ? mkLabel(endT, cLow,  loTxt, labDesign, hlLabCol, labTxtCol, labSz) : na
-    labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, labDesign, eqLabCol, labTxtCol, labSz) : na
+    labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, labDesign, eqLabCol, labTxtCol, eqLabSz) : na
 
     n = array.size(hiA)
     for i = 0 to n - 1
@@ -355,11 +383,11 @@ f_pdScan(tf6On, i1, i3, j1, j3, io, ic, int(it2), not na(it1) and it1 != it1[1])
 f_pdScan(tf8On, k1, k3, l1x, l3x, ko, kc, int(kt2), not na(kt1) and kt1 != kt1[1])
 
 if showFVG
-    f_maintainT(fvgU, fvgUh, true)
-    f_maintainT(fvgD, fvgDh, false)
+    f_maintainT(fvgU, fvgUm, fvgUh, true)
+    f_maintainT(fvgD, fvgDm, fvgDh, false)
 if showOB
-    f_maintainT(obU, obUh, true)
-    f_maintainT(obD, obDh, false)
+    f_maintainT(obU, obUm, obUh, true)
+    f_maintainT(obD, obDm, obDh, false)
 
 // ===================== OPTIONAL: Swing S/R + Equal H/L ========================
 atrRef = ta.atr(14)
@@ -423,10 +451,10 @@ if not na(eqhLine)
 if not na(eqlLine)
     line.set_x1(eqlLine, srMaxLen > 0 ? math.max(nz(eqlBar, bar_index), bar_index - srMaxLen) : nz(eqlBar, bar_index))
     line.set_x2(eqlLine, bar_index + srExt)
-resLbl := f_srLabel(resLbl, showSR and showSrLbl,  resLine, "Resistance", resCol, srExt)
-supLbl := f_srLabel(supLbl, showSR and showSrLbl,  supLine, "Support",    supCol, srExt)
-eqhLbl := f_srLabel(eqhLbl, showEQL and showSrLbl, eqhLine, "EQH",        eqlCol, srExt)
-eqlLbl := f_srLabel(eqlLbl, showEQL and showSrLbl, eqlLine, "EQL",        eqlCol, srExt)
+resLbl := f_srLabel(resLbl, showSR and showSrLbl,  resLine, "Resistance", resCol, srExt, srLabSz)
+supLbl := f_srLabel(supLbl, showSR and showSrLbl,  supLine, "Support",    supCol, srExt, srLabSz)
+eqhLbl := f_srLabel(eqhLbl, showEQL and showSrLbl, eqhLine, "EQH",        eqlCol, srExt, srLabSz)
+eqlLbl := f_srLabel(eqlLbl, showEQL and showSrLbl, eqlLine, "EQL",        eqlCol, srExt, srLabSz)
 
 // ===================== OPTIONAL: Supply / Demand zones ========================
 sdPh = ta.pivothigh(sdLen, sdLen)
@@ -436,14 +464,14 @@ var array<box> demandA = array.new<box>()
 if showSD and not na(sdPh)
     topS = high[sdLen]
     botS = math.max(open[sdLen], close[sdLen])
-    bS = box.new(bar_index - sdLen, topS, bar_index, botS, border_color=TRANSP, bgcolor=supplyC, text=showSdLbl ? "Supply" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=size.small)
+    bS = box.new(bar_index - sdLen, topS, bar_index, botS, border_color=TRANSP, bgcolor=supplyC, text=showSdLbl ? "Supply" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
     array.push(supplyA, bS)
     while array.size(supplyA) > sdKeep
         box.delete(array.shift(supplyA))
 if showSD and not na(sdPl)
     botD = low[sdLen]
     topD = math.min(open[sdLen], close[sdLen])
-    bD = box.new(bar_index - sdLen, topD, bar_index, botD, border_color=TRANSP, bgcolor=demandC, text=showSdLbl ? "Demand" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=size.small)
+    bD = box.new(bar_index - sdLen, topD, bar_index, botD, border_color=TRANSP, bgcolor=demandC, text=showSdLbl ? "Demand" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
     array.push(demandA, bD)
     while array.size(demandA) > sdKeep
         box.delete(array.shift(demandA))
