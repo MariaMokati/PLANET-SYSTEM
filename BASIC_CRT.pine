@@ -14,7 +14,7 @@
 //   * HISTORICAL ranges are hidden by default and can be enabled in settings.
 //   * 50% equilibrium is drawn as a dotted line; its label shows the range size.
 //
-// LABEL DESIGNS: Filled (most visible) / Tag / Ghost (text only) / Outline.
+// Labels are clean filled tabs at the END of each line (High / Low / EQ).
 // Label colours, price on/off, short names, and EQ units are all configurable.
 //
 // Non-repainting: ranges are built only from CLOSED HTF candles
@@ -39,8 +39,7 @@ showEqLn = input.bool(true, "Show equilibrium line", group=gCol)
 eqLnCol  = input.color(color.new(#FF6D00, 40), "Equilibrium line", group=gCol)
 lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
 
-gLab   = "Labels — Design"
-labDesign = input.string("Filled", "Label design", options=["Filled","Tag","Ghost","Outline"], group=gLab, tooltip="Filled = solid box (most visible). Tag = box, no arrow. Ghost = text only. Outline = outlined text.")
+gLab   = "Labels"
 showHL    = input.bool(true,  "Show High / Low labels", group=gLab)
 shortHL   = input.bool(false, "Short names (CRT H / CRT L)", group=gLab)
 showPx    = input.bool(true,  "Show price in High / Low labels", group=gLab)
@@ -49,7 +48,7 @@ labSz     = input.string("Small", "Label size", options=["Tiny","Small","Normal"
 gLabC  = "Labels — Colours"
 hlLabCol  = input.color(color.new(#2962FF, 0), "High / Low label", group=gLabC)
 eqLabCol  = input.color(color.new(color.black, 0), "EQ label", group=gLabC)
-labTxtCol = input.color(color.white, "Text colour (Filled / Tag)", group=gLabC)
+labTxtCol = input.color(color.white, "Label text colour", group=gLabC)
 
 gEq    = "Equilibrium label"
 showEqLab = input.bool(true,  "Show EQ label", group=gEq)
@@ -63,15 +62,9 @@ pipSize   = input.float(0.0, "Price per pip (0 = auto)", minval=0, step=0.0001, 
 f_lsz(string s) =>
     s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
 
-f_style(string s) =>
-    s == "Ghost" ? label.style_none : s == "Outline" ? label.style_text_outline : s == "Tag" ? label.style_label_center : label.style_label_left
-
-// creates a label honouring the chosen design (ghost = text only, etc.)
-mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, string szStr) =>
-    st = f_style(design)
-    bg = design == "Ghost" ? color.new(color.gray, 100) : design == "Outline" ? color.new(mainCol, 82) : mainCol
-    tc = design == "Ghost" or design == "Outline" ? mainCol : txtCol
-    label.new(x, y, txt, xloc=xloc.bar_time, style=st, color=bg, textcolor=tc, size=f_lsz(szStr))
+// filled label — the pointer tab sits at the END of the line, text extends right
+mkLabel(int x, float y, string txt, color mainCol, color txtCol, string szStr) =>
+    label.new(x, y, txt, xloc=xloc.bar_time, style=label.style_label_left, color=mainCol, textcolor=txtCol, size=f_lsz(szStr))
 
 // --------------------- HTF DATA (previous CLOSED candle) ---------------------
 cHigh  = request.security(syminfo.tickerid, tfIn, high[1], lookahead=barmerge.lookahead_off)
@@ -125,9 +118,9 @@ if newClosed
         label.delete(labLo)
     if not na(labEq)
         label.delete(labEq)
-    labHi := showHL    ? mkLabel(endT, cHigh, hiTxt, labDesign, hlLabCol, labTxtCol, labSz) : na
-    labLo := showHL    ? mkLabel(endT, cLow,  loTxt, labDesign, hlLabCol, labTxtCol, labSz) : na
-    labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, labDesign, eqLabCol, labTxtCol, labSz) : na
+    labHi := showHL    ? mkLabel(endT, cHigh, hiTxt, hlLabCol, labTxtCol, labSz) : na
+    labLo := showHL    ? mkLabel(endT, cLow,  loTxt, hlLabCol, labTxtCol, labSz) : na
+    labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, eqLabCol, labTxtCol, labSz) : na
 
     // ---- recolour every range by age: 0 = current, 1 = previous, >=2 = historical
     n = array.size(hiA)
