@@ -1,35 +1,29 @@
 //@version=6
 // =============================================================================
-// BASIC CRT  —  Candle Range Theory range marker
+// BASIC CRT  —  Candle Range Theory range marker (+ optional HTF bias layer)
 // -----------------------------------------------------------------------------
-// Marks the High / Low / 50% equilibrium of each closed candle on a chosen
-// timeframe (default 4H) as a projected range.
+// CORE (always on): marks High / Low / 50% EQ of each closed candle on a chosen
+// timeframe (default 4H) as a projected range. Current = coloured + labelled,
+// previous = greyed (toggle), historical = hidden (toggle).
 //
-//   * A NEW range is anchored on every closed HTF candle (candle 1 of a CRT set)
-//     and projects right for "Keep range live for N candles" (default 3), i.e.
-//     it stays live until the 3rd candle of the set closes. Ranges overlap by
-//     design — that is normal CRT.
-//   * The CURRENT (newest) range is drawn in colour and labelled CRT High / Low.
-//   * The PREVIOUS range is greyed out and can be toggled off independently.
-//   * HISTORICAL ranges are hidden by default and can be enabled in settings.
-//   * 50% equilibrium is drawn as a dotted line; its label shows the range size.
+// OPTIONAL HTF BIAS (all default OFF — the core stays simple when unused):
+//   * Daily & Weekly CRT ranges with premium/discount shading, anchored either
+//     to your broker feed OR to a custom New York 17:00 session (toggle).
+//   * HTF PD arrays: order blocks & fair-value gaps on a chosen timeframe,
+//     with mitigation removal.
 //
-// Label designs (Filled / Ghost / Tinted / Chip) all anchor at the END of each
-// line with text to the right — never overlapping. Colours, price on/off, short
-// names, and EQ units are all configurable.
-//
-// Non-repainting: ranges are built only from CLOSED HTF candles
-// (request.security on high[1]/low[1]/time[1] with lookahead_off).
+// Non-repainting: everything is built from CLOSED candles via request.security
+// with lookahead_off, or from confirmed running sessions.
 // =============================================================================
-indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=100)
+indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=100, max_boxes_count=500)
 
-// ------------------------------- INPUTS --------------------------------------
+// ===================== CORE INPUTS ===========================================
 tfIn   = input.timeframe("240", "Range timeframe", tooltip="Which candle defines each range. 240 = 4H.")
-liveN  = input.int(3, "Keep range live for N candles", minval=1, tooltip="A range projects right for this many candles. 3 = classic CRT — it stays live until the 3rd candle closes.")
+liveN  = input.int(3, "Keep range live for N candles", minval=1, tooltip="A range projects right for this many candles. 3 = classic CRT.")
 
 gVis   = "Visibility"
-showPrev = input.bool(true,  "Show previous range", group=gVis, tooltip="The range immediately before the current one. Independent of the historical toggle.")
-showHist = input.bool(false, "Show historical ranges", group=gVis, tooltip="Every range older than 'previous'. Off by default.")
+showPrev = input.bool(true,  "Show previous range", group=gVis)
+showHist = input.bool(false, "Show historical ranges", group=gVis)
 maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
 
 gCol   = "Lines — Colours & Style"
@@ -41,7 +35,7 @@ eqLnCol  = input.color(color.new(#FF6D00, 40), "Equilibrium line", group=gCol)
 lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
 
 gLab   = "Labels"
-labDesign = input.string("Filled", "Label design", options=["Filled","Ghost","Tinted","Chip"], group=gLab, tooltip="All designs sit at the END of the line, text to the right. Filled = solid tab (most visible). Ghost = coloured text only. Tinted = soft translucent badge. Chip = clean tab matching the chart background.")
+labDesign = input.string("Filled", "Label design", options=["Filled","Ghost","Tinted","Chip"], group=gLab, tooltip="All designs sit at the END of the line, text to the right. Filled = solid tab. Ghost = text only. Tinted = translucent badge. Chip = matches chart background.")
 showHL    = input.bool(true,  "Show High / Low labels", group=gLab)
 shortHL   = input.bool(false, "Short names (CRT H / CRT L)", group=gLab)
 showPx    = input.bool(true,  "Show price in High / Low labels", group=gLab)
@@ -56,38 +50,109 @@ gEq    = "Equilibrium label"
 showEqLab = input.bool(true,  "Show EQ label", group=gEq)
 showEqPx  = input.bool(false, "Include EQ price", group=gEq)
 showSize  = input.bool(true,  "Show range size (PTS)", group=gEq)
-pointSize = input.float(0.0, "Price per point (0 = auto min-tick)", minval=0, step=0.001, group=gEq, tooltip="Value of 1 'point'. 0 = symbol min tick. e.g. 0.01 = cents.")
+pointSize = input.float(0.0, "Price per point (0 = auto min-tick)", minval=0, step=0.001, group=gEq)
 brUnit    = input.string("Pips", "Bracket unit", options=["Pips","Ticks","Price","None"], group=gEq)
-pipSize   = input.float(0.0, "Price per pip (0 = auto)", minval=0, step=0.0001, group=gEq, tooltip="Value of 1 pip for the bracket. 0 = auto (10x min tick).")
+pipSize   = input.float(0.0, "Price per pip (0 = auto)", minval=0, step=0.0001, group=gEq)
 
-// ------------------------------- HELPERS -------------------------------------
+// ===================== HTF BIAS INPUTS (optional, default OFF) ================
+gDW = "HTF Bias — Daily / Weekly CRT  (optional)"
+showDR   = input.bool(false, "Show Daily CRT range", group=gDW)
+showWR   = input.bool(false, "Show Weekly CRT range", group=gDW)
+nyAnchor = input.bool(false, "Anchor D/W to New York 17:00", group=gDW, tooltip="OFF = broker's native daily/weekly (already NY-close on most forex/gold feeds). ON = build the range from a 17:00 New York session — feed-independent, exact on any instrument.")
+showPD   = input.bool(true,  "Premium / discount shading", group=gDW)
+htfProj  = input.int(1, "Project ranges N periods right", minval=1, maxval=5, group=gDW)
+showHtfLbl = input.bool(true, "Label D / W ranges", group=gDW)
+dCol     = input.color(color.new(#787B86, 0), "Daily line", group=gDW)
+wCol     = input.color(color.new(#5D606B, 0), "Weekly line", group=gDW)
+premC    = input.color(color.new(color.red, 0), "Premium tint", group=gDW)
+discC    = input.color(color.new(color.green, 0), "Discount tint", group=gDW)
+
+gPDA = "HTF PD Arrays — Order Blocks & FVGs  (optional)"
+showFVG = input.bool(false, "Show HTF fair-value gaps", group=gPDA)
+showOB  = input.bool(false, "Show HTF order blocks", group=gPDA)
+pdTF    = input.timeframe("1D", "PD-array timeframe", group=gPDA)
+pdKeep  = input.int(3, "Keep last N of each", minval=1, maxval=8, group=gPDA)
+pdMit   = input.bool(true, "Remove when violated (mitigated)", group=gPDA)
+fvgUpC  = input.color(color.new(color.teal, 82),   "Bullish FVG", group=gPDA)
+fvgDnC  = input.color(color.new(color.maroon, 82), "Bearish FVG", group=gPDA)
+obUpC   = input.color(color.new(color.green, 78),  "Bullish OB", group=gPDA)
+obDnC   = input.color(color.new(color.red, 78),    "Bearish OB", group=gPDA)
+
+// ===================== HELPERS ===============================================
 f_lsz(string s) =>
     s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
 
-// Every design uses style_label_left so the label ALWAYS anchors at the end of
-// the line with its text to the right (never overlapping). Only the fill/text
-// colour changes between designs, so alignment is identical across all of them.
+// Every design uses style_label_left so the label anchors at the END of the
+// line, text to the right (never overlapping). Only the fill/text colour varies.
 mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, string szStr) =>
     bg = design == "Ghost"  ? color.new(color.gray, 100) : design == "Tinted" ? color.new(mainCol, 70) : design == "Chip" ? chart.bg_color : mainCol
     tc = design == "Filled" ? txtCol : mainCol
     label.new(x, y, txt, xloc=xloc.bar_time, style=label.style_label_left, color=bg, textcolor=tc, size=f_lsz(szStr))
 
-// --------------------- HTF DATA (previous CLOSED candle) ---------------------
+TRANSP = color.new(color.gray, 100)
+
+// ---- Daily/Weekly object store + drawing ----
+var array<line>  dwL   = array.new<line>()
+var array<box>   dwB   = array.new<box>()
+var array<label> dwLab = array.new<label>()
+f_clearDW() =>
+    while array.size(dwL) > 0
+        line.delete(array.shift(dwL))
+    while array.size(dwB) > 0
+        box.delete(array.shift(dwB))
+    while array.size(dwLab) > 0
+        label.delete(array.shift(dwLab))
+
+f_drawHTF(float hi, float lo, int st, int projMs, color lc, string tag) =>
+    if not na(hi) and not na(lo) and not na(st)
+        eqy = (hi + lo) / 2.0
+        en  = st + projMs
+        array.push(dwL, line.new(st, hi,  en, hi,  xloc=xloc.bar_time, color=lc, width=lw))
+        array.push(dwL, line.new(st, lo,  en, lo,  xloc=xloc.bar_time, color=lc, width=lw))
+        array.push(dwL, line.new(st, eqy, en, eqy, xloc=xloc.bar_time, color=color.new(lc, 45), style=line.style_dotted))
+        if showPD
+            array.push(dwB, box.new(st, hi,  en, eqy, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(premC, 92)))
+            array.push(dwB, box.new(st, eqy, en, lo,  xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(discC, 92)))
+        if showHtfLbl
+            array.push(dwLab, mkLabel(en, hi, tag + " High " + str.tostring(hi, format.mintick), labDesign, lc, labTxtCol, labSz))
+            array.push(dwLab, mkLabel(en, lo, tag + " Low "  + str.tostring(lo, format.mintick), labDesign, lc, labTxtCol, labSz))
+
+// ---- PD-array (OB/FVG) box stores + maintenance ----
+var array<box> fvgU = array.new<box>()
+var array<box> fvgD = array.new<box>()
+var array<box> obU  = array.new<box>()
+var array<box> obD  = array.new<box>()
+f_addBox(array<box> a, float top, float bot, int left, color col, int keep) =>
+    b = box.new(left, top, time, bot, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=col)
+    array.push(a, b)
+    while array.size(a) > keep
+        box.delete(array.shift(a))
+f_maintain(array<box> a, bool bull) =>
+    if array.size(a) > 0
+        i = array.size(a) - 1
+        while i >= 0
+            b = array.get(a, i)
+            box.set_right(b, time)
+            violated = pdMit and (bull ? close < box.get_bottom(b) : close > box.get_top(b))
+            if violated
+                box.delete(b)
+                array.remove(a, i)
+            i := i - 1
+
+// ===================== CORE: per-candle CRT ranges ===========================
 cHigh  = request.security(syminfo.tickerid, tfIn, high[1], lookahead=barmerge.lookahead_off)
 cLow   = request.security(syminfo.tickerid, tfIn, low[1],  lookahead=barmerge.lookahead_off)
 cOpenT = request.security(syminfo.tickerid, tfIn, time[1], lookahead=barmerge.lookahead_off)
 tfMs   = timeframe.in_seconds(tfIn) * 1000
 
-// ------------------------------- STORAGE -------------------------------------
 var array<line> hiA = array.new<line>()
 var array<line> loA = array.new<line>()
 var array<line> eqA = array.new<line>()
 var label labHi = na
 var label labLo = na
 var label labEq = na
-HIDE = color.new(color.gray, 100)   // fully transparent = hidden
+HIDE = color.new(color.gray, 100)
 
-// A new closed HTF candle appears when its open time changes.
 newClosed = not na(cHigh) and not na(cOpenT) and (na(cOpenT[1]) or cOpenT != cOpenT[1])
 
 if newClosed
@@ -96,7 +161,6 @@ if newClosed
     eqv    = (cHigh + cLow) / 2.0
     rangePx = cHigh - cLow
 
-    // ---- draw the new (current) range lines ----
     lh = line.new(startT, cHigh, endT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw)
     ll = line.new(startT, cLow,  endT, cLow,  xloc=xloc.bar_time, color=curCol, width=lw)
     le = showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=1, style=line.style_dotted) : na
@@ -104,7 +168,6 @@ if newClosed
     array.push(loA, ll)
     array.push(eqA, le)
 
-    // ---- build label texts ----
     hiName = shortHL ? "CRT H" : "CRT High"
     loName = shortHL ? "CRT L" : "CRT Low"
     hiTxt  = hiName + (showPx ? " " + str.tostring(cHigh, format.mintick) : "")
@@ -117,7 +180,6 @@ if newClosed
     brStr = brUnit == "None" ? "" : brUnit == "Price" ? "(" + str.tostring(rangePx, format.mintick) + ")" : "(" + str.tostring(brNum, "#") + " " + (brUnit == "Pips" ? "pips" : "ticks") + ")"
     eqTxt = "EQ" + (showEqPx ? " " + str.tostring(eqv, format.mintick) : "") + (showSize ? "  " + str.tostring(ptsN, "#") + " PTS" : "") + (brStr == "" ? "" : "  " + brStr)
 
-    // ---- labels live only on the CURRENT range: delete old, make new ----
     if not na(labHi)
         label.delete(labHi)
     if not na(labLo)
@@ -128,7 +190,6 @@ if newClosed
     labLo := showHL    ? mkLabel(endT, cLow,  loTxt, labDesign, hlLabCol, labTxtCol, labSz) : na
     labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, labDesign, eqLabCol, labTxtCol, labSz) : na
 
-    // ---- recolour every range by age: 0 = current, 1 = previous, >=2 = historical
     n = array.size(hiA)
     for i = 0 to n - 1
         age = n - 1 - i
@@ -139,10 +200,107 @@ if newClosed
         if not na(lex)
             line.set_color(lex, age == 0 ? eqLnCol : col)
 
-    // ---- prune the oldest ranges (keep current + previous + maxHist) ----
     while array.size(hiA) > maxHist + 2
         line.delete(array.shift(hiA))
         line.delete(array.shift(loA))
         led = array.shift(eqA)
         if not na(led)
             line.delete(led)
+
+// ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
+sym = syminfo.tickerid
+// native broker daily/weekly (previous CLOSED period)
+ndHi = request.security(sym, "1D", high[1], lookahead=barmerge.lookahead_off)
+ndLo = request.security(sym, "1D", low[1],  lookahead=barmerge.lookahead_off)
+ndT  = request.security(sym, "1D", time[1], lookahead=barmerge.lookahead_off)
+nwHi = request.security(sym, "1W", high[1], lookahead=barmerge.lookahead_off)
+nwLo = request.security(sym, "1W", low[1],  lookahead=barmerge.lookahead_off)
+nwT  = request.security(sym, "1W", time[1], lookahead=barmerge.lookahead_off)
+
+// custom NY 17:00 anchored day/week: +7h shift makes 17:00 ET the boundary
+shiftMs = 7 * 3600 * 1000
+newNYd = ta.change(dayofmonth(time + shiftMs, "America/New_York")) != 0
+newNYw = ta.change(weekofyear(time + shiftMs, "America/New_York")) != 0
+
+var float cdH = na
+var float cdL = na
+var int   cdS = na
+var float pdH = na
+var float pdL = na
+var int   pdS = na
+if newNYd
+    pdH := cdH
+    pdL := cdL
+    pdS := cdS
+    cdH := high
+    cdL := low
+    cdS := time
+else
+    cdH := math.max(nz(cdH, high), high)
+    cdL := math.min(nz(cdL, low),  low)
+
+var float cwH = na
+var float cwL = na
+var int   cwS = na
+var float pwH = na
+var float pwL = na
+var int   pwS = na
+if newNYw
+    pwH := cwH
+    pwL := cwL
+    pwS := cwS
+    cwH := high
+    cwL := low
+    cwS := time
+else
+    cwH := math.max(nz(cwH, high), high)
+    cwL := math.min(nz(cwL, low),  low)
+
+prevDHi = nyAnchor ? pdH : ndHi
+prevDLo = nyAnchor ? pdL : ndLo
+prevDSt = nyAnchor ? pdS : ndT
+prevWHi = nyAnchor ? pwH : nwHi
+prevWLo = nyAnchor ? pwL : nwLo
+prevWSt = nyAnchor ? pwS : nwT
+newDailyEvt  = nyAnchor ? newNYd : (ndT != ndT[1])
+newWeeklyEvt = nyAnchor ? newNYw : (nwT != nwT[1])
+dProjMs = 86400000 * htfProj
+wProjMs = 604800000 * htfProj
+
+if (showDR and newDailyEvt) or (showWR and newWeeklyEvt)
+    f_clearDW()
+    if showDR
+        f_drawHTF(prevDHi, prevDLo, int(prevDSt), dProjMs, dCol, "D")
+    if showWR
+        f_drawHTF(prevWHi, prevWLo, int(prevWSt), wProjMs, wCol, "W")
+
+// ===================== OPTIONAL: HTF PD arrays (OB / FVG) =====================
+ph1 = request.security(sym, pdTF, high[1],  lookahead=barmerge.lookahead_off)
+ph3 = request.security(sym, pdTF, high[3],  lookahead=barmerge.lookahead_off)
+pl1 = request.security(sym, pdTF, low[1],   lookahead=barmerge.lookahead_off)
+pl3 = request.security(sym, pdTF, low[3],   lookahead=barmerge.lookahead_off)
+po3 = request.security(sym, pdTF, open[3],  lookahead=barmerge.lookahead_off)
+pc3 = request.security(sym, pdTF, close[3], lookahead=barmerge.lookahead_off)
+pT1 = request.security(sym, pdTF, time[1],  lookahead=barmerge.lookahead_off)
+pT2 = request.security(sym, pdTF, time[2],  lookahead=barmerge.lookahead_off)
+newPd = not na(pT1) and pT1 != pT1[1]
+
+if newPd
+    bullFvg = not na(ph3) and not na(pl1) and ph3 < pl1     // gap: bar3.high < bar1.low
+    bearFvg = not na(pl3) and not na(ph1) and pl3 > ph1     // gap: bar3.low  > bar1.high
+    if showFVG and bullFvg
+        f_addBox(fvgU, pl1, ph3, int(pT2), fvgUpC, pdKeep)
+    if showFVG and bearFvg
+        f_addBox(fvgD, pl3, ph1, int(pT2), fvgDnC, pdKeep)
+    if showOB and bullFvg and pc3 < po3                     // OB = down candle before up displacement
+        f_addBox(obU, ph3, pl3, int(pT2), obUpC, pdKeep)
+    if showOB and bearFvg and pc3 > po3                     // OB = up candle before down displacement
+        f_addBox(obD, ph3, pl3, int(pT2), obDnC, pdKeep)
+
+// extend right + remove on mitigation, every bar
+if showFVG
+    f_maintain(fvgU, true)
+    f_maintain(fvgD, false)
+if showOB
+    f_maintain(obU, true)
+    f_maintain(obD, false)
