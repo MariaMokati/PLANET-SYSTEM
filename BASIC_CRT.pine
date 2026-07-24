@@ -85,12 +85,15 @@ fvgDnC = input.color(color.new(color.maroon, 82), "Bearish FVG", inline="cf", gr
 obUpC  = input.color(color.new(color.green, 78),  "Bullish OB", inline="co", group=gPDA)
 obDnC  = input.color(color.new(color.red, 78),    "Bearish OB", inline="co", group=gPDA)
 histC  = input.color(color.new(color.gray, 88),   "Historical fill", group=gPDA)
+showPdLbl = input.bool(true, "Label FVG / OB boxes", group=gPDA)
+pdTxtCol  = input.color(color.new(color.white, 0), "Box label colour", group=gPDA)
 
 // ===================== SWINGS — S/R + EQUAL H/L (optional) ===================
 gSR = "Swings — Support / Resistance  (optional)"
 showSR   = input.bool(false, "Recent swing High / Low (S/R)", group=gSR)
 srLen    = input.int(10, "Swing length", minval=2, group=gSR)
-srExtend = input.bool(true, "Extend lines right", group=gSR)
+srExt    = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSR)
+showSrLbl= input.bool(true, "Label S/R & equal H/L lines", group=gSR)
 resCol   = input.color(color.new(color.red, 0),   "Resistance (swing high)", group=gSR)
 supCol   = input.color(color.new(color.green, 0), "Support (swing low)", group=gSR)
 showEQL  = input.bool(false, "Equal highs / lows", group=gSR)
@@ -102,6 +105,9 @@ gSD = "Supply / Demand zones  (optional)"
 showSD  = input.bool(false, "Show supply / demand zones", group=gSD)
 sdLen   = input.int(10, "Swing length", minval=2, group=gSD)
 sdKeep  = input.int(2, "Keep last N each", minval=1, maxval=6, group=gSD)
+sdExt   = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSD)
+showSdLbl  = input.bool(true, "Label zones", group=gSD)
+zoneTxtCol = input.color(color.new(color.white, 0), "Zone label colour", group=gSD)
 supplyC = input.color(color.new(color.red, 85),   "Supply zone", group=gSD)
 demandC = input.color(color.new(color.green, 85), "Demand zone", group=gSD)
 
@@ -150,8 +156,8 @@ var array<box> fvgUh = array.new<box>()
 var array<box> fvgDh = array.new<box>()
 var array<box> obUh  = array.new<box>()
 var array<box> obDh  = array.new<box>()
-f_addBoxT(array<box> a, float top, float bot, int left, color col) =>
-    b = box.new(left, top, time, bot, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=col)
+f_addBoxT(array<box> a, float top, float bot, int left, color col, string txt) =>
+    b = box.new(left, top, time, bot, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=col, text=showPdLbl ? txt : "", text_color=pdTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=size.small)
     array.push(a, b)
     while array.size(a) > pdKeep
         box.delete(array.shift(a))
@@ -178,13 +184,25 @@ f_pdScan(bool en, float h1, float h3, float l1, float l3, float o3, float c3, in
         bull = not na(h3) and not na(l1) and h3 < l1
         bear = not na(l3) and not na(h1) and l3 > h1
         if showFVG and bull
-            f_addBoxT(fvgU, l1, h3, t2, fvgUpC)
+            f_addBoxT(fvgU, l1, h3, t2, fvgUpC, "FVG")
         if showFVG and bear
-            f_addBoxT(fvgD, l3, h1, t2, fvgDnC)
+            f_addBoxT(fvgD, l3, h1, t2, fvgDnC, "FVG")
         if showOB and bull and c3 < o3
-            f_addBoxT(obU, h3, l3, t2, obUpC)
+            f_addBoxT(obU, h3, l3, t2, obUpC, "OB")
         if showOB and bear and c3 > o3
-            f_addBoxT(obD, h3, l3, t2, obDnC)
+            f_addBoxT(obD, h3, l3, t2, obDnC, "OB")
+
+// title tag at the right end of an S/R or equal-H/L line
+f_srLabel(label lb, bool show, line ln, string txt, color col, int ext) =>
+    label out = lb
+    if show and not na(ln)
+        lvl = line.get_y2(ln)
+        if na(out)
+            out := label.new(bar_index + ext, lvl, txt, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=col, size=size.small)
+        else
+            label.set_xy(out, bar_index + ext, lvl)
+            label.set_text(out, txt)
+    out
 
 // ===================== CORE: per-candle CRT ranges ===========================
 sym    = syminfo.tickerid
@@ -354,6 +372,10 @@ var line resLine = na
 var line supLine = na
 var line eqhLine = na
 var line eqlLine = na
+var label resLbl = na
+var label supLbl = na
+var label eqhLbl = na
+var label eqlLbl = na
 
 if not na(srPh)
     prevPH := lastPH
@@ -361,22 +383,36 @@ if not na(srPh)
     if showSR
         if not na(resLine)
             line.delete(resLine)
-        resLine := line.new(bar_index - srLen, srPh, bar_index, srPh, color=resCol, width=2, extend=srExtend ? extend.right : extend.none)
+        resLine := line.new(bar_index - srLen, srPh, bar_index, srPh, color=resCol, width=2)
     if showEQL and not na(prevPH) and math.abs(lastPH - prevPH) <= eqlTol * atrRef
         if not na(eqhLine)
             line.delete(eqhLine)
-        eqhLine := line.new(bar_index - srLen, math.max(lastPH, prevPH), bar_index, math.max(lastPH, prevPH), color=eqlCol, style=line.style_dotted, extend=extend.right)
+        eqhLine := line.new(bar_index - srLen, math.max(lastPH, prevPH), bar_index, math.max(lastPH, prevPH), color=eqlCol, style=line.style_dotted)
 if not na(srPl)
     prevPL := lastPL
     lastPL := srPl
     if showSR
         if not na(supLine)
             line.delete(supLine)
-        supLine := line.new(bar_index - srLen, srPl, bar_index, srPl, color=supCol, width=2, extend=srExtend ? extend.right : extend.none)
+        supLine := line.new(bar_index - srLen, srPl, bar_index, srPl, color=supCol, width=2)
     if showEQL and not na(prevPL) and math.abs(lastPL - prevPL) <= eqlTol * atrRef
         if not na(eqlLine)
             line.delete(eqlLine)
-        eqlLine := line.new(bar_index - srLen, math.min(lastPL, prevPL), bar_index, math.min(lastPL, prevPL), color=eqlCol, style=line.style_dotted, extend=extend.right)
+        eqlLine := line.new(bar_index - srLen, math.min(lastPL, prevPL), bar_index, math.min(lastPL, prevPL), color=eqlCol, style=line.style_dotted)
+
+// trail lines to current price (+ optional bars) so they stop at the market
+if not na(resLine)
+    line.set_x2(resLine, bar_index + srExt)
+if not na(supLine)
+    line.set_x2(supLine, bar_index + srExt)
+if not na(eqhLine)
+    line.set_x2(eqhLine, bar_index + srExt)
+if not na(eqlLine)
+    line.set_x2(eqlLine, bar_index + srExt)
+resLbl := f_srLabel(resLbl, showSR and showSrLbl,  resLine, "Resistance", resCol, srExt)
+supLbl := f_srLabel(supLbl, showSR and showSrLbl,  supLine, "Support",    supCol, srExt)
+eqhLbl := f_srLabel(eqhLbl, showEQL and showSrLbl, eqhLine, "EQH",        eqlCol, srExt)
+eqlLbl := f_srLabel(eqlLbl, showEQL and showSrLbl, eqlLine, "EQL",        eqlCol, srExt)
 
 // ===================== OPTIONAL: Supply / Demand zones ========================
 sdPh = ta.pivothigh(sdLen, sdLen)
@@ -386,14 +422,21 @@ var array<box> demandA = array.new<box>()
 if showSD and not na(sdPh)
     topS = high[sdLen]
     botS = math.max(open[sdLen], close[sdLen])
-    bS = box.new(bar_index - sdLen, topS, bar_index, botS, border_color=TRANSP, bgcolor=supplyC, extend=extend.right)
+    bS = box.new(bar_index - sdLen, topS, bar_index, botS, border_color=TRANSP, bgcolor=supplyC, text=showSdLbl ? "Supply" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=size.small)
     array.push(supplyA, bS)
     while array.size(supplyA) > sdKeep
         box.delete(array.shift(supplyA))
 if showSD and not na(sdPl)
     botD = low[sdLen]
     topD = math.min(open[sdLen], close[sdLen])
-    bD = box.new(bar_index - sdLen, topD, bar_index, botD, border_color=TRANSP, bgcolor=demandC, extend=extend.right)
+    bD = box.new(bar_index - sdLen, topD, bar_index, botD, border_color=TRANSP, bgcolor=demandC, text=showSdLbl ? "Demand" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=size.small)
     array.push(demandA, bD)
     while array.size(demandA) > sdKeep
         box.delete(array.shift(demandA))
+// trail zones to current price (+ optional bars) so they stop at the market
+if showSD and array.size(supplyA) > 0
+    for idx = 0 to array.size(supplyA) - 1
+        box.set_right(array.get(supplyA, idx), bar_index + sdExt)
+if showSD and array.size(demandA) > 0
+    for idx = 0 to array.size(demandA) - 1
+        box.set_right(array.get(demandA, idx), bar_index + sdExt)
