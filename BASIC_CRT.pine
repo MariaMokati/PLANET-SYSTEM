@@ -76,6 +76,8 @@ swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=
 // Marks the setup only — NOT financial advice; must be validated.
 gSet = "CRT setups  (optional)"
 showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
+setup2c    = input.bool(true,  "2-candle setups (range → sweep → reversal)", group=gSet, tooltip="Candle A = range, candle B sweeps A's high/low AND closes back inside → enter B close, target the opposite extreme.")
+setup3c    = input.bool(false, "3-candle setups (range → purge → reclaim)", group=gSet, tooltip="Candle A = range, candle B sweeps & holds beyond, candle C closes back inside → enter C close, target the opposite extreme.")
 setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet)
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
@@ -317,8 +319,8 @@ cHigh  = request.security(sym, tfIn, high[1], lookahead=barmerge.lookahead_off)
 cLow   = request.security(sym, tfIn, low[1],  lookahead=barmerge.lookahead_off)
 cOpenT = request.security(sym, tfIn, time[1], lookahead=barmerge.lookahead_off)
 tfMs   = timeframe.in_seconds(tfIn) * 1000
-// candle A (range) = high[2]/low[2]; candle B (manipulation) close + range-TF ATR
-[aHi, aLo, bClose, atrTf] = request.security(sym, tfIn, [high[2], low[2], close[1], ta.atr(14)[1]], lookahead=barmerge.lookahead_off)
+// last three CLOSED range-TF candles: p1 = [1] (newest), p2 = [2], p3 = [3]; + ATR
+[p2Hi, p2Lo, p1Close, p3Hi, p3Lo, p2Close, atrTf] = request.security(sym, tfIn, [high[2], low[2], close[1], high[3], low[3], close[2], ta.atr(14)[1]], lookahead=barmerge.lookahead_off)
 
 var array<line> hiA   = array.new<line>()
 var array<line> loA   = array.new<line>()
@@ -353,6 +355,44 @@ f_sweepScan(float aLoV, float aHiV, float bLoV, float bHiV, float bC, int bT, bo
             f_sweepMark(true, bT, bLoV)
         if bHiV > aHiV and bC < aHiV
             f_sweepMark(false, bT, bHiV)
+
+// build one setup (RR-gated): entry line + short titled TP/SL, tracked for hits
+f_makeSetup(int dir, float entry, float sl, float tp, int startT) =>
+    risk = math.abs(entry - sl)
+    rew  = math.abs(tp - entry)
+    rr   = risk > 0 ? rew / risk : 0.0
+    if rr >= setupMinRR and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
+        dirC = dir == 1 ? setupLongC : setupShortC
+        endT = startT + liveN * tfMs
+        shortEnd = startT + tfMs
+        lnE = line.new(startT, entry, endT, entry, xloc=xloc.bar_time, color=dirC, width=1, style=line.style_dotted)
+        lnT = line.new(startT, tp, shortEnd, tp, xloc=xloc.bar_time, color=setupTpC, width=setupLineW, style=line.style_dotted)
+        lnS = line.new(startT, sl, shortEnd, sl, xloc=xloc.bar_time, color=setupSlC, width=setupLineW, style=line.style_dotted)
+        lbT = label.new(shortEnd, tp, "TP", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=setupTpC, size=size.tiny)
+        lbSl = label.new(shortEnd, sl, "SL", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=setupSlC, size=size.tiny)
+        txt = (dir == 1 ? "CRT Long " : "CRT Short ") + str.tostring(rr, "#.0") + "R"
+        lbR = mkLabel(endT, entry, txt, labDesign, dirC, labTxtCol, labSz)
+        array.push(sEntryLn, lnE)
+        array.push(sTpLn, lnT)
+        array.push(sSlLn, lnS)
+        array.push(sTpLb, lbT)
+        array.push(sSlLb, lbSl)
+        array.push(sRrLb, lbR)
+        array.push(sDir, dir)
+        array.push(sTp, tp)
+        array.push(sSl, sl)
+        array.push(sDone, false)
+        while array.size(sEntryLn) > setKeep
+            line.delete(array.shift(sEntryLn))
+            line.delete(array.shift(sTpLn))
+            line.delete(array.shift(sSlLn))
+            label.delete(array.shift(sTpLb))
+            label.delete(array.shift(sSlLb))
+            label.delete(array.shift(sRrLb))
+            array.shift(sDir)
+            array.shift(sTp)
+            array.shift(sSl)
+            array.shift(sDone)
 
 var label labHi = na
 var label labLo = na
@@ -455,52 +495,26 @@ if showSweep and swpWOn
     f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
 
 // ===================== OPTIONAL: CRT setups (range TF) ========================
-// One evaluation per newly-closed range candle B against the prior candle A.
-if newClosed and showSetup and not na(aHi) and not na(aLo) and not na(bClose)
-    swLong  = cLow  < aLo and bClose > aLo   // wick below range low, closed back inside
-    swShort = cHigh > aHi and bClose < aHi   // wick above range high, closed back inside
-    if swLong or swShort
-        bStart = cOpenT
-        bEnd   = cOpenT + liveN * tfMs
-        pad    = slPadAtr * nz(atrTf, 0)
-        entry = bClose
-        sl    = swLong ? cLow - pad : cHigh + pad
-        tp    = swLong ? aHi : aLo
-        risk  = math.abs(entry - sl)
-        rew   = math.abs(tp - entry)
-        rr    = risk > 0 ? rew / risk : 0.0
-        if rr >= setupMinRR and tp != entry and ((swLong and tp > entry) or (swShort and tp < entry))
-            dirC = swLong ? setupLongC : setupShortC
-            shortEnd = bStart + tfMs   // short "..." length for TP / SL: one range candle
-            // entry line: full-range dotted (original look). TP / SL: short dotted, titled.
-            lnE = line.new(bStart, entry, bEnd, entry, xloc=xloc.bar_time, color=dirC, width=1, style=line.style_dotted)
-            lnT = line.new(bStart, tp, shortEnd, tp, xloc=xloc.bar_time, color=setupTpC, width=setupLineW, style=line.style_dotted)
-            lnS = line.new(bStart, sl, shortEnd, sl, xloc=xloc.bar_time, color=setupSlC, width=setupLineW, style=line.style_dotted)
-            lbT = label.new(shortEnd, tp, "TP", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=setupTpC, size=size.tiny)
-            lbSl = label.new(shortEnd, sl, "SL", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=setupSlC, size=size.tiny)
-            txt = (swLong ? "CRT Long " : "CRT Short ") + str.tostring(rr, "#.0") + "R"
-            lbR = mkLabel(bEnd, entry, txt, labDesign, dirC, labTxtCol, labSz)
-            array.push(sEntryLn, lnE)
-            array.push(sTpLn, lnT)
-            array.push(sSlLn, lnS)
-            array.push(sTpLb, lbT)
-            array.push(sSlLb, lbSl)
-            array.push(sRrLb, lbR)
-            array.push(sDir, swLong ? 1 : -1)
-            array.push(sTp, tp)
-            array.push(sSl, sl)
-            array.push(sDone, false)
-            while array.size(sEntryLn) > setKeep
-                line.delete(array.shift(sEntryLn))
-                line.delete(array.shift(sTpLn))
-                line.delete(array.shift(sSlLn))
-                label.delete(array.shift(sTpLb))
-                label.delete(array.shift(sSlLb))
-                label.delete(array.shift(sRrLb))
-                array.shift(sDir)
-                array.shift(sTp)
-                array.shift(sSl)
-                array.shift(sDone)
+// Evaluated once per newly-closed range candle. p1 = newest closed, p2, p3 older.
+if newClosed and showSetup and not na(p2Hi) and not na(p2Lo)
+    pad = slPadAtr * nz(atrTf, 0)
+    // ---- 2-candle: range = candle [2], sweeper = last candle [1] ----------
+    if setup2c and not na(p1Close)
+        eqA = (p2Hi + p2Lo) / 2.0
+        swL = cLow  < p2Lo and p1Close > p2Lo   // swept the low,  closed back inside
+        swS = cHigh > p2Hi and p1Close < p2Hi   // swept the high, closed back inside
+        // outside bar (both sides swept): pick direction by where it CLOSED
+        dir2 = swL and swS ? (p1Close < eqA ? -1 : 1) : swL ? 1 : swS ? -1 : 0
+        if dir2 != 0
+            f_makeSetup(dir2, p1Close, dir2 == 1 ? cLow - pad : cHigh + pad, dir2 == 1 ? p2Hi : p2Lo, cOpenT)
+    // ---- 3-candle: range [3], purge [2] (holds beyond), reclaim [1] --------
+    if setup3c and not na(p3Hi) and not na(p3Lo) and not na(p2Close) and not na(p1Close)
+        swS3 = p2Hi > p3Hi and p2Close > p3Hi and p1Close < p3Hi  // swept high, held, then reclaimed
+        swL3 = p2Lo < p3Lo and p2Close < p3Lo and p1Close > p3Lo  // swept low,  held, then reclaimed
+        if swS3 and not swL3
+            f_makeSetup(-1, p1Close, math.max(cHigh, p2Hi) + pad, p3Lo, cOpenT)
+        else if swL3 and not swS3
+            f_makeSetup(1,  p1Close, math.min(cLow,  p2Lo) - pad, p3Hi, cOpenT)
 
 // mark TP / SL hits: when price reaches a level, tag the label (✓ win, ✗ loss)
 if showSetup and array.size(sTp) > 0
