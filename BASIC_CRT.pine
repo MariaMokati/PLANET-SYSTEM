@@ -1,0 +1,108 @@
+//@version=6
+// =============================================================================
+// BASIC CRT  —  Candle Range Theory range marker
+// -----------------------------------------------------------------------------
+// Marks the High / Low / 50% equilibrium of each closed candle on a chosen
+// timeframe (default 4H) as a projected range.
+//
+//   * A NEW range is anchored on every closed HTF candle (candle 1 of a CRT set)
+//     and projects right for "Keep range live for N candles" (default 3), i.e.
+//     it stays live until the 3rd candle of the set closes. Ranges overlap by
+//     design — that is normal CRT.
+//   * The CURRENT (newest) range is drawn in colour and labelled CRT High / Low.
+//   * The PREVIOUS range is greyed out and can be toggled off independently.
+//   * HISTORICAL ranges are hidden by default and can be enabled in settings.
+//   * 50% equilibrium is drawn as a dotted line; its label shows the range size.
+//
+// Non-repainting: ranges are built only from CLOSED HTF candles
+// (request.security on high[1]/low[1]/time[1] with lookahead_off), so a range
+// never appears or moves after the fact.
+// =============================================================================
+indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=100)
+
+// ------------------------------- INPUTS --------------------------------------
+tfIn   = input.timeframe("240", "Range timeframe", tooltip="Which candle defines each range. 240 = 4H.")
+liveN  = input.int(3, "Keep range live for N candles", minval=1, tooltip="A range projects right for this many candles. 3 = classic CRT (1 set / 2 sweep / 3 move) — it stays live until the 3rd candle closes.")
+
+gVis   = "Visibility"
+showPrev = input.bool(true,  "Show previous range", group=gVis, tooltip="The range immediately before the current one. Independent of the historical toggle.")
+showHist = input.bool(false, "Show historical ranges", group=gVis, tooltip="Every range older than 'previous'. Off by default.")
+maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
+
+gCol   = "Colours & Style"
+curCol  = input.color(color.new(#2962FF, 0),  "Current range", group=gCol)
+prevCol = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
+histCol = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
+eqCol   = input.color(color.new(#FF6D00, 0),  "Equilibrium (current)", group=gCol)
+lw      = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
+
+gLab   = "Labels"
+showHL  = input.bool(true, "Label CRT High / Low", group=gLab)
+showEq  = input.bool(true, "Show 50% equilibrium", group=gLab)
+showSz  = input.bool(true, "Show range size on EQ label", group=gLab)
+labSz   = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gLab)
+
+f_lsz(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+
+// --------------------- HTF DATA (previous CLOSED candle) ---------------------
+cHigh  = request.security(syminfo.tickerid, tfIn, high[1], lookahead=barmerge.lookahead_off)
+cLow   = request.security(syminfo.tickerid, tfIn, low[1],  lookahead=barmerge.lookahead_off)
+cOpenT = request.security(syminfo.tickerid, tfIn, time[1], lookahead=barmerge.lookahead_off)
+tfMs   = timeframe.in_seconds(tfIn) * 1000
+
+// ------------------------------- STORAGE -------------------------------------
+var array<line> hiA = array.new<line>()
+var array<line> loA = array.new<line>()
+var array<line> eqA = array.new<line>()
+var label labHi = na
+var label labLo = na
+var label labEq = na
+HIDE = color.new(color.gray, 100)   // fully transparent = hidden
+
+// A new closed HTF candle appears when its open time changes.
+newClosed = not na(cHigh) and not na(cOpenT) and (na(cOpenT[1]) or cOpenT != cOpenT[1])
+
+if newClosed
+    startT = cOpenT
+    endT   = cOpenT + liveN * tfMs
+    eqv    = (cHigh + cLow) / 2.0
+    sz     = cHigh - cLow
+
+    // draw the new (current) range
+    lh = line.new(startT, cHigh, endT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw)
+    ll = line.new(startT, cLow,  endT, cLow,  xloc=xloc.bar_time, color=curCol, width=lw)
+    le = showEq ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqCol, width=1, style=line.style_dotted) : na
+    array.push(hiA, lh)
+    array.push(loA, ll)
+    array.push(eqA, le)
+
+    // labels live only on the CURRENT range -> delete the old ones, make new
+    if not na(labHi)
+        label.delete(labHi)
+    if not na(labLo)
+        label.delete(labLo)
+    if not na(labEq)
+        label.delete(labEq)
+    labHi := showHL ? label.new(endT, cHigh, "CRT High " + str.tostring(cHigh, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=curCol, textcolor=color.white, size=f_lsz(labSz)) : na
+    labLo := showHL ? label.new(endT, cLow,  "CRT Low "  + str.tostring(cLow,  format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=curCol, textcolor=color.white, size=f_lsz(labSz)) : na
+    labEq := (showEq and (showHL or showSz)) ? label.new(endT, eqv, "EQ " + str.tostring(eqv, format.mintick) + (showSz ? "  (Δ " + str.tostring(sz, format.mintick) + ")" : ""), xloc=xloc.bar_time, style=label.style_label_left, color=eqCol, textcolor=color.white, size=f_lsz(labSz)) : na
+
+    // recolour every range by its age: 0 = current, 1 = previous, >=2 = historical
+    n = array.size(hiA)
+    for i = 0 to n - 1
+        age = n - 1 - i
+        col = age == 0 ? curCol : age == 1 ? (showPrev ? prevCol : HIDE) : (showHist ? histCol : HIDE)
+        line.set_color(array.get(hiA, i), col)
+        line.set_color(array.get(loA, i), col)
+        lex = array.get(eqA, i)
+        if not na(lex)
+            line.set_color(lex, age == 0 ? eqCol : col)
+
+    // prune the oldest ranges (keep current + previous + maxHist)
+    while array.size(hiA) > maxHist + 2
+        line.delete(array.shift(hiA))
+        line.delete(array.shift(loA))
+        led = array.shift(eqA)
+        if not na(led)
+            line.delete(led)
