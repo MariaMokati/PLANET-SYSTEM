@@ -47,26 +47,42 @@ labSz     = input.string("Small", "Label size", options=["Tiny","Small","Normal"
 hlLabCol  = input.color(color.new(#2962FF, 0), "Label colour", group=gLab)
 labTxtCol = input.color(color.white, "Text colour (Filled)", group=gLab)
 
-// ===================== SWEEPS & CRT SETUPS (optional) ========================
-// CRT 2-candle logic on the range TF: candle A = range, candle B = manipulation.
-// A sweep = B wicks beyond A's high/low but CLOSES back inside A's range.
-//   - swept the LOW  -> bullish (sell-side liquidity taken)  -> draw is the high
-//   - swept the HIGH -> bearish (buy-side liquidity taken)   -> draw is the low
-// Non-repainting: evaluated only on CLOSED range-TF candles via request.security.
-gSwp = "Sweeps & CRT setups  (optional)"
-showSweep  = input.bool(false, "Show liquidity sweeps", group=gSwp)
-sweepLbl   = input.bool(true,  "Label sweeps ('Sweep')", group=gSwp)
-sweepSz    = input.string("Tiny", "Sweep marker size", options=["Tiny","Small","Normal"], group=gSwp)
-sweepUpC   = input.color(color.new(color.lime, 0), "Bullish sweep (swept lows)", group=gSwp)
-sweepDnC   = input.color(color.new(color.red, 0),  "Bearish sweep (swept highs)", group=gSwp)
-showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSwp, tooltip="Mechanical CRT sweep-reversal: entry at the manipulation close, SL beyond the sweep wick, TP at the opposite range extreme (the draw). Marks the setup only — NOT financial advice, must be validated.")
-setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSwp)
-slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSwp)
-setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSwp)
-setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSwp)
-setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSwp)
-setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSwp)
-swKeep     = input.int(8, "Keep last N sweeps / setups", minval=1, maxval=50, group=gSwp)
+// ===================== SWEEPS (optional, per timeframe) ======================
+// A valid sweep = a CLOSED candle wicks beyond the PRIOR candle's high/low but
+// CLOSES back inside it (liquidity taken then rejected). Detected independently
+// on each enabled timeframe, so a scalper can watch 15m sweeps only, a swing
+// trader only D/W, etc. Data loads only for enabled timeframes (memory-safe).
+gSwp = "Sweeps  (optional)"
+showSweep   = input.bool(false, "Show liquidity sweeps", group=gSwp)
+sweepDesign = input.string("Label", "Sweep marker design", options=["Label","Triangle S","Circle S"], group=gSwp, tooltip="Label = pointer tag ('Sweep'). Triangle S / Circle S = minimal shape with an 'S' on the sweeping candle.")
+sweepLbl    = input.bool(true,  "Show 'Sweep' text (Label design only)", group=gSwp)
+sweepSz     = input.string("Tiny", "Sweep marker size", options=["Tiny","Small","Normal"], group=gSwp)
+sweepUpC    = input.color(color.new(color.lime, 0), "Bullish sweep (swept lows)", group=gSwp)
+sweepDnC    = input.color(color.new(color.red, 0),  "Bearish sweep (swept highs)", group=gSwp)
+swp5On  = input.bool(false, "5m",  inline="sw1", group=gSwp)
+swp15On = input.bool(false, "15m", inline="sw1", group=gSwp)
+swp30On = input.bool(false, "30m", inline="sw1", group=gSwp)
+swp1On  = input.bool(false, "1H",  inline="sw2", group=gSwp)
+swp2On  = input.bool(false, "2H",  inline="sw2", group=gSwp)
+swp4On  = input.bool(true,  "4H",  inline="sw2", group=gSwp)
+swp8On  = input.bool(false, "8H",  inline="sw3", group=gSwp)
+swpDOn  = input.bool(false, "D",   inline="sw3", group=gSwp)
+swpWOn  = input.bool(false, "W",   inline="sw3", group=gSwp)
+swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=100, group=gSwp)
+
+// ===================== CRT SETUPS (optional) =================================
+// Mechanical 2-candle CRT on the RANGE timeframe: entry at the manipulation
+// close, SL beyond the sweep wick, TP at the opposite range extreme (the draw).
+// Marks the setup only — NOT financial advice; must be validated.
+gSet = "CRT setups  (optional)"
+showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
+setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet)
+slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
+setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
+setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSet)
+setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSet)
+setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSet)
+setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 
 // ===================== EQUILIBRIUM (all ranges) ==============================
 gEQ = "Equilibrium (all ranges)"
@@ -310,6 +326,24 @@ var array<box>  shA   = array.new<box>()
 var array<label> swLbA  = array.new<label>()
 var array<line>  setLnA = array.new<line>()
 var array<label> setLbA = array.new<label>()
+
+// draw one sweep marker (design-aware) at a bar-time, pruning the shared store
+f_sweepMark(bool bull, int atT, float y) =>
+    style = sweepDesign == "Triangle S" ? (bull ? label.style_triangleup : label.style_triangledown) : sweepDesign == "Circle S" ? label.style_circle : (bull ? label.style_label_up : label.style_label_down)
+    txt   = sweepDesign == "Label" ? (sweepLbl ? "Sweep" : "") : "S"
+    col   = bull ? sweepUpC : sweepDnC
+    lb = label.new(atT, y, txt, xloc=xloc.bar_time, style=style, color=color.new(col, 20), textcolor=chart.bg_color, size=f_lsz(sweepSz))
+    array.push(swLbA, lb)
+    while array.size(swLbA) > swKeep
+        label.delete(array.shift(swLbA))
+// detect a valid sweep on one timeframe's last two closed candles and mark it
+f_sweepScan(float aLoV, float aHiV, float bLoV, float bHiV, float bC, int bT, bool nb) =>
+    if nb and not na(aLoV) and not na(aHiV)
+        if bLoV < aLoV and bC > aLoV
+            f_sweepMark(true, bT, bLoV)
+        if bHiV > aHiV and bC < aHiV
+            f_sweepMark(false, bT, bHiV)
+
 var label labHi = na
 var label labLo = na
 var label labEq = na
@@ -379,47 +413,67 @@ if newClosed
         if not na(shd)
             box.delete(shd)
 
-// ===================== OPTIONAL: Sweeps & CRT setups ==========================
-// Evaluate once per newly-closed range candle B, against the prior candle A.
-if newClosed and (showSweep or showSetup) and not na(aHi) and not na(aLo) and not na(bClose)
+// ===================== OPTIONAL: Sweeps (per timeframe) =======================
+// Data loads only for enabled timeframes (request.security gated inside each if),
+// so disabled TFs cost no memory. Each fires on its own closed candles.
+if showSweep and swp5On
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "5",   [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swp15On
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "15",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swp30On
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "30",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swp1On
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "60",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swp2On
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "120", [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swp4On
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "240", [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swp8On
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "480", [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swpDOn
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "1D",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+if showSweep and swpWOn
+    [al,ah,bl,bh,bc,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
+
+// ===================== OPTIONAL: CRT setups (range TF) ========================
+// One evaluation per newly-closed range candle B against the prior candle A.
+if newClosed and showSetup and not na(aHi) and not na(aLo) and not na(bClose)
     swLong  = cLow  < aLo and bClose > aLo   // wick below range low, closed back inside
     swShort = cHigh > aHi and bClose < aHi   // wick above range high, closed back inside
     if swLong or swShort
         bStart = cOpenT
         bEnd   = cOpenT + liveN * tfMs
         pad    = slPadAtr * nz(atrTf, 0)
-        // --- sweep marker at the swept extreme ---
-        if showSweep
-            swY   = swLong ? cLow : cHigh
-            swCol = swLong ? sweepUpC : sweepDnC
-            swStyle = swLong ? label.style_label_up : label.style_label_down
-            lb = label.new(bStart, swY, sweepLbl ? "Sweep" : "", xloc=xloc.bar_time, style=swStyle, color=color.new(swCol, 20), textcolor=chart.bg_color, size=f_lsz(sweepSz))
-            array.push(swLbA, lb)
-            while array.size(swLbA) > swKeep
-                label.delete(array.shift(swLbA))
-        // --- CRT setup (entry / SL / TP + RR), gated by RR ---
-        if showSetup
-            entry = bClose
-            sl    = swLong ? cLow - pad : cHigh + pad
-            tp    = swLong ? aHi : aLo
-            risk  = math.abs(entry - sl)
-            rew   = math.abs(tp - entry)
-            rr    = risk > 0 ? rew / risk : 0.0
-            if rr >= setupMinRR and tp != entry and ((swLong and tp > entry) or (swShort and tp < entry))
-                dirC = swLong ? setupLongC : setupShortC
-                lnE = line.new(bStart, entry, bEnd, entry, xloc=xloc.bar_time, color=dirC, width=1, style=line.style_dotted)
-                lnS = line.new(bStart, sl,    bEnd, sl,    xloc=xloc.bar_time, color=setupSlC, width=1)
-                lnT = line.new(bStart, tp,    bEnd, tp,    xloc=xloc.bar_time, color=setupTpC, width=1)
-                array.push(setLnA, lnE)
-                array.push(setLnA, lnS)
-                array.push(setLnA, lnT)
-                txt = (swLong ? "CRT Long " : "CRT Short ") + str.tostring(rr, "#.0") + "R"
-                lbS = mkLabel(bEnd, entry, txt, labDesign, dirC, labTxtCol, labSz)
-                array.push(setLbA, lbS)
-                while array.size(setLnA) > swKeep * 3
-                    line.delete(array.shift(setLnA))
-                while array.size(setLbA) > swKeep
-                    label.delete(array.shift(setLbA))
+        entry = bClose
+        sl    = swLong ? cLow - pad : cHigh + pad
+        tp    = swLong ? aHi : aLo
+        risk  = math.abs(entry - sl)
+        rew   = math.abs(tp - entry)
+        rr    = risk > 0 ? rew / risk : 0.0
+        if rr >= setupMinRR and tp != entry and ((swLong and tp > entry) or (swShort and tp < entry))
+            dirC = swLong ? setupLongC : setupShortC
+            lnE = line.new(bStart, entry, bEnd, entry, xloc=xloc.bar_time, color=dirC, width=1, style=line.style_dotted)
+            lnS = line.new(bStart, sl,    bEnd, sl,    xloc=xloc.bar_time, color=setupSlC, width=1)
+            lnT = line.new(bStart, tp,    bEnd, tp,    xloc=xloc.bar_time, color=setupTpC, width=1)
+            array.push(setLnA, lnE)
+            array.push(setLnA, lnS)
+            array.push(setLnA, lnT)
+            txt = (swLong ? "CRT Long " : "CRT Short ") + str.tostring(rr, "#.0") + "R"
+            lbS = mkLabel(bEnd, entry, txt, labDesign, dirC, labTxtCol, labSz)
+            array.push(setLbA, lbS)
+            while array.size(setLnA) > setKeep * 3
+                line.delete(array.shift(setLnA))
+            while array.size(setLbA) > setKeep
+                label.delete(array.shift(setLbA))
 
 // ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
 ndHi = request.security(sym, "1D", high[1], lookahead=barmerge.lookahead_off)
