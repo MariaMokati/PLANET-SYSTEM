@@ -93,6 +93,7 @@ gSR = "Swings — Support / Resistance  (optional)"
 showSR   = input.bool(false, "Recent swing High / Low (S/R)", group=gSR)
 srLen    = input.int(10, "Swing length", minval=2, group=gSR)
 srExt    = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSR)
+srMaxLen = input.int(60, "Max line length (bars, 0 = from pivot)", minval=0, maxval=1000, group=gSR, tooltip="Caps how far LEFT the lines reach so an old equal-high/low can't stretch across the whole chart. 60 on 4H = ~10 days.")
 showSrLbl= input.bool(true, "Label S/R & equal H/L lines", group=gSR)
 resCol   = input.color(color.new(color.red, 0),   "Resistance (swing high)", group=gSR)
 supCol   = input.color(color.new(color.green, 0), "Support (swing low)", group=gSR)
@@ -376,6 +377,10 @@ var label resLbl = na
 var label supLbl = na
 var label eqhLbl = na
 var label eqlLbl = na
+var int resBar = na
+var int supBar = na
+var int eqhBar = na
+var int eqlBar = na
 
 if not na(srPh)
     prevPH := lastPH
@@ -384,10 +389,12 @@ if not na(srPh)
         if not na(resLine)
             line.delete(resLine)
         resLine := line.new(bar_index - srLen, srPh, bar_index, srPh, color=resCol, width=2)
+        resBar  := bar_index - srLen
     if showEQL and not na(prevPH) and math.abs(lastPH - prevPH) <= eqlTol * atrRef
         if not na(eqhLine)
             line.delete(eqhLine)
         eqhLine := line.new(bar_index - srLen, math.max(lastPH, prevPH), bar_index, math.max(lastPH, prevPH), color=eqlCol, style=line.style_dotted)
+        eqhBar  := bar_index - srLen
 if not na(srPl)
     prevPL := lastPL
     lastPL := srPl
@@ -395,19 +402,26 @@ if not na(srPl)
         if not na(supLine)
             line.delete(supLine)
         supLine := line.new(bar_index - srLen, srPl, bar_index, srPl, color=supCol, width=2)
+        supBar  := bar_index - srLen
     if showEQL and not na(prevPL) and math.abs(lastPL - prevPL) <= eqlTol * atrRef
         if not na(eqlLine)
             line.delete(eqlLine)
         eqlLine := line.new(bar_index - srLen, math.min(lastPL, prevPL), bar_index, math.min(lastPL, prevPL), color=eqlCol, style=line.style_dotted)
+        eqlBar  := bar_index - srLen
 
-// trail lines to current price (+ optional bars) so they stop at the market
+// trail right to current price, and clamp the LEFT edge so old lines can't
+// stretch across the whole chart (fixes an EQ line reaching back months)
 if not na(resLine)
+    line.set_x1(resLine, srMaxLen > 0 ? math.max(nz(resBar, bar_index), bar_index - srMaxLen) : nz(resBar, bar_index))
     line.set_x2(resLine, bar_index + srExt)
 if not na(supLine)
+    line.set_x1(supLine, srMaxLen > 0 ? math.max(nz(supBar, bar_index), bar_index - srMaxLen) : nz(supBar, bar_index))
     line.set_x2(supLine, bar_index + srExt)
 if not na(eqhLine)
+    line.set_x1(eqhLine, srMaxLen > 0 ? math.max(nz(eqhBar, bar_index), bar_index - srMaxLen) : nz(eqhBar, bar_index))
     line.set_x2(eqhLine, bar_index + srExt)
 if not na(eqlLine)
+    line.set_x1(eqlLine, srMaxLen > 0 ? math.max(nz(eqlBar, bar_index), bar_index - srMaxLen) : nz(eqlBar, bar_index))
     line.set_x2(eqlLine, bar_index + srExt)
 resLbl := f_srLabel(resLbl, showSR and showSrLbl,  resLine, "Resistance", resCol, srExt)
 supLbl := f_srLabel(supLbl, showSR and showSrLbl,  supLine, "Support",    supCol, srExt)
