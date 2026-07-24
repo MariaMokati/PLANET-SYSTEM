@@ -486,26 +486,37 @@ if (showDR and newDailyEvt) or (showWR and newWeeklyEvt)
         f_drawHTF(prevWHi, prevWLo, int(prevWSt), wProjMs, wCol, "W")
 
 // ===================== OPTIONAL: Multi-TF FVG / Order Blocks ==================
-// one tuple security call per timeframe (9 total; well under the request limit)
-[f5h1,f5h3,f5l1,f5l3,f5o,f5c,f5t1,f5t2]       = request.security(sym, "5",   [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[f15h1,f15h3,f15l1,f15l3,f15o,f15c,f15t1,f15t2] = request.security(sym, "15", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[f30h1,f30h3,f30l1,f30l3,f30o,f30c,f30t1,f30t2] = request.security(sym, "30", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[f1h1,f1h3,f1l1,f1l3,f1o,f1c,f1t1,f1t2]       = request.security(sym, "60",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[f2h1,f2h3,f2l1,f2l3,f2o,f2c,f2t1,f2t2]       = request.security(sym, "120", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[f4h1,f4h3,f4l1,f4l3,f4o,f4c,f4t1,f4t2]       = request.security(sym, "240", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[f8h1,f8h3,f8l1,f8l3,f8o,f8c,f8t1,f8t2]       = request.security(sym, "480", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[fdh1,fdh3,fdl1,fdl3,fdo,fdc,fdt1,fdt2]       = request.security(sym, "1D",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-[fwh1,fwh3,fwl1,fwl3,fwo,fwc,fwt1,fwt2]       = request.security(sym, "1W",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-
-f_pdScan(tf5On,  "5m",  f5h1, f5h3, f5l1, f5l3, f5o, f5c, int(f5t2), not na(f5t1) and f5t1 != f5t1[1])
-f_pdScan(tf15On, "15m", f15h1, f15h3, f15l1, f15l3, f15o, f15c, int(f15t2), not na(f15t1) and f15t1 != f15t1[1])
-f_pdScan(tf30On, "30m", f30h1, f30h3, f30l1, f30l3, f30o, f30c, int(f30t2), not na(f30t1) and f30t1 != f30t1[1])
-f_pdScan(tf1On,  "1h",  f1h1, f1h3, f1l1, f1l3, f1o, f1c, int(f1t2), not na(f1t1) and f1t1 != f1t1[1])
-f_pdScan(tf2On,  "2h",  f2h1, f2h3, f2l1, f2l3, f2o, f2c, int(f2t2), not na(f2t1) and f2t1 != f2t1[1])
-f_pdScan(tf4On,  "4h",  f4h1, f4h3, f4l1, f4l3, f4o, f4c, int(f4t2), not na(f4t1) and f4t1 != f4t1[1])
-f_pdScan(tf8On,  "8h",  f8h1, f8h3, f8l1, f8l3, f8o, f8c, int(f8t2), not na(f8t1) and f8t1 != f8t1[1])
-f_pdScan(tfDOn,  "1D",  fdh1, fdh3, fdl1, fdl3, fdo, fdc, int(fdt2), not na(fdt1) and fdt1 != fdt1[1])
-f_pdScan(tfWOn,  "1W",  fwh1, fwh3, fwl1, fwl3, fwo, fwc, int(fwt2), not na(fwt1) and fwt1 != fwt1[1])
+// Data is loaded ONLY for timeframes that are enabled AND while FVG/OB is on, so
+// disabled timeframes cost no memory (request.security is gated inside each if).
+// This prevents "Memory limits exceeded" from loading 5m/15m/30m on a high chart.
+pdaOn = showFVG or showOB
+if pdaOn and tf5On
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "5",   [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "5m", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tf15On
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "15",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "15m", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tf30On
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "30",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "30m", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tf1On
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "60",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "1h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tf2On
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "120", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "2h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tf4On
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "240", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "4h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tf8On
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "480", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "8h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tfDOn
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "1D",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "1D", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
+if pdaOn and tfWOn
+    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "1W",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
+    f_pdScan(true, "1W", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
 
 if showFVG
     f_maintainT(fvgU, fvgUm, fvgUh, true,  fvgUpC)
