@@ -14,36 +14,64 @@
 //   * HISTORICAL ranges are hidden by default and can be enabled in settings.
 //   * 50% equilibrium is drawn as a dotted line; its label shows the range size.
 //
+// LABEL DESIGNS: Filled (most visible) / Tag / Ghost (text only) / Outline.
+// Label colours, price on/off, short names, and EQ units are all configurable.
+//
 // Non-repainting: ranges are built only from CLOSED HTF candles
-// (request.security on high[1]/low[1]/time[1] with lookahead_off), so a range
-// never appears or moves after the fact.
+// (request.security on high[1]/low[1]/time[1] with lookahead_off).
 // =============================================================================
 indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=100)
 
 // ------------------------------- INPUTS --------------------------------------
 tfIn   = input.timeframe("240", "Range timeframe", tooltip="Which candle defines each range. 240 = 4H.")
-liveN  = input.int(3, "Keep range live for N candles", minval=1, tooltip="A range projects right for this many candles. 3 = classic CRT (1 set / 2 sweep / 3 move) — it stays live until the 3rd candle closes.")
+liveN  = input.int(3, "Keep range live for N candles", minval=1, tooltip="A range projects right for this many candles. 3 = classic CRT — it stays live until the 3rd candle closes.")
 
 gVis   = "Visibility"
 showPrev = input.bool(true,  "Show previous range", group=gVis, tooltip="The range immediately before the current one. Independent of the historical toggle.")
 showHist = input.bool(false, "Show historical ranges", group=gVis, tooltip="Every range older than 'previous'. Off by default.")
 maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
 
-gCol   = "Colours & Style"
-curCol  = input.color(color.new(#2962FF, 0),  "Current range", group=gCol)
-prevCol = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
-histCol = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
-eqCol   = input.color(color.new(#FF6D00, 0),  "Equilibrium (current)", group=gCol)
-lw      = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
+gCol   = "Lines — Colours & Style"
+curCol   = input.color(color.new(#2962FF, 0),  "Current range", group=gCol)
+prevCol  = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
+histCol  = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
+showEqLn = input.bool(true, "Show equilibrium line", group=gCol)
+eqLnCol  = input.color(color.new(#FF6D00, 40), "Equilibrium line", group=gCol)
+lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
 
-gLab   = "Labels"
-showHL  = input.bool(true, "Label CRT High / Low", group=gLab)
-showEq  = input.bool(true, "Show 50% equilibrium", group=gLab)
-showSz  = input.bool(true, "Show range size on EQ label", group=gLab)
-labSz   = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gLab)
+gLab   = "Labels — Design"
+labDesign = input.string("Filled", "Label design", options=["Filled","Tag","Ghost","Outline"], group=gLab, tooltip="Filled = solid box (most visible). Tag = box, no arrow. Ghost = text only. Outline = outlined text.")
+showHL    = input.bool(true,  "Show High / Low labels", group=gLab)
+shortHL   = input.bool(false, "Short names (CRT H / CRT L)", group=gLab)
+showPx    = input.bool(true,  "Show price in High / Low labels", group=gLab)
+labSz     = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gLab)
 
+gLabC  = "Labels — Colours"
+hlLabCol  = input.color(color.new(#2962FF, 0), "High / Low label", group=gLabC)
+eqLabCol  = input.color(color.new(color.black, 0), "EQ label", group=gLabC)
+labTxtCol = input.color(color.white, "Text colour (Filled / Tag)", group=gLabC)
+
+gEq    = "Equilibrium label"
+showEqLab = input.bool(true,  "Show EQ label", group=gEq)
+showEqPx  = input.bool(false, "Include EQ price", group=gEq)
+showSize  = input.bool(true,  "Show range size (PTS)", group=gEq)
+pointSize = input.float(0.0, "Price per point (0 = auto min-tick)", minval=0, step=0.001, group=gEq, tooltip="Value of 1 'point'. 0 = symbol min tick. e.g. 0.01 = cents.")
+brUnit    = input.string("Pips", "Bracket unit", options=["Pips","Ticks","Price","None"], group=gEq)
+pipSize   = input.float(0.0, "Price per pip (0 = auto)", minval=0, step=0.0001, group=gEq, tooltip="Value of 1 pip for the bracket. 0 = auto (10x min tick).")
+
+// ------------------------------- HELPERS -------------------------------------
 f_lsz(string s) =>
     s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+
+f_style(string s) =>
+    s == "Ghost" ? label.style_none : s == "Outline" ? label.style_text_outline : s == "Tag" ? label.style_label_center : label.style_label_left
+
+// creates a label honouring the chosen design (ghost = text only, etc.)
+mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, string szStr) =>
+    st = f_style(design)
+    bg = design == "Ghost" ? color.new(color.gray, 100) : design == "Outline" ? color.new(mainCol, 82) : mainCol
+    tc = design == "Ghost" or design == "Outline" ? mainCol : txtCol
+    label.new(x, y, txt, xloc=xloc.bar_time, style=st, color=bg, textcolor=tc, size=f_lsz(szStr))
 
 // --------------------- HTF DATA (previous CLOSED candle) ---------------------
 cHigh  = request.security(syminfo.tickerid, tfIn, high[1], lookahead=barmerge.lookahead_off)
@@ -67,28 +95,41 @@ if newClosed
     startT = cOpenT
     endT   = cOpenT + liveN * tfMs
     eqv    = (cHigh + cLow) / 2.0
-    sz     = cHigh - cLow
+    rangePx = cHigh - cLow
 
-    // draw the new (current) range
+    // ---- draw the new (current) range lines ----
     lh = line.new(startT, cHigh, endT, cHigh, xloc=xloc.bar_time, color=curCol, width=lw)
     ll = line.new(startT, cLow,  endT, cLow,  xloc=xloc.bar_time, color=curCol, width=lw)
-    le = showEq ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqCol, width=1, style=line.style_dotted) : na
+    le = showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=1, style=line.style_dotted) : na
     array.push(hiA, lh)
     array.push(loA, ll)
     array.push(eqA, le)
 
-    // labels live only on the CURRENT range -> delete the old ones, make new
+    // ---- build label texts ----
+    hiName = shortHL ? "CRT H" : "CRT High"
+    loName = shortHL ? "CRT L" : "CRT Low"
+    hiTxt  = hiName + (showPx ? " " + str.tostring(cHigh, format.mintick) : "")
+    loTxt  = loName + (showPx ? " " + str.tostring(cLow,  format.mintick) : "")
+
+    ptSz  = pointSize > 0 ? pointSize : syminfo.mintick
+    ppSz  = pipSize   > 0 ? pipSize   : syminfo.mintick * 10
+    ptsN  = math.round(rangePx / ptSz)
+    brNum = brUnit == "Pips" ? math.round(rangePx / ppSz) : brUnit == "Ticks" ? math.round(rangePx / syminfo.mintick) : na
+    brStr = brUnit == "None" ? "" : brUnit == "Price" ? "(" + str.tostring(rangePx, format.mintick) + ")" : "(" + str.tostring(brNum, "#") + " " + (brUnit == "Pips" ? "pips" : "ticks") + ")"
+    eqTxt = "EQ" + (showEqPx ? " " + str.tostring(eqv, format.mintick) : "") + (showSize ? "  " + str.tostring(ptsN, "#") + " PTS" : "") + (brStr == "" ? "" : "  " + brStr)
+
+    // ---- labels live only on the CURRENT range: delete old, make new ----
     if not na(labHi)
         label.delete(labHi)
     if not na(labLo)
         label.delete(labLo)
     if not na(labEq)
         label.delete(labEq)
-    labHi := showHL ? label.new(endT, cHigh, "CRT High " + str.tostring(cHigh, format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=curCol, textcolor=color.white, size=f_lsz(labSz)) : na
-    labLo := showHL ? label.new(endT, cLow,  "CRT Low "  + str.tostring(cLow,  format.mintick), xloc=xloc.bar_time, style=label.style_label_left, color=curCol, textcolor=color.white, size=f_lsz(labSz)) : na
-    labEq := (showEq and (showHL or showSz)) ? label.new(endT, eqv, "EQ " + str.tostring(eqv, format.mintick) + (showSz ? "  (Δ " + str.tostring(sz, format.mintick) + ")" : ""), xloc=xloc.bar_time, style=label.style_label_left, color=eqCol, textcolor=color.white, size=f_lsz(labSz)) : na
+    labHi := showHL    ? mkLabel(endT, cHigh, hiTxt, labDesign, hlLabCol, labTxtCol, labSz) : na
+    labLo := showHL    ? mkLabel(endT, cLow,  loTxt, labDesign, hlLabCol, labTxtCol, labSz) : na
+    labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, labDesign, eqLabCol, labTxtCol, labSz) : na
 
-    // recolour every range by its age: 0 = current, 1 = previous, >=2 = historical
+    // ---- recolour every range by age: 0 = current, 1 = previous, >=2 = historical
     n = array.size(hiA)
     for i = 0 to n - 1
         age = n - 1 - i
@@ -97,9 +138,9 @@ if newClosed
         line.set_color(array.get(loA, i), col)
         lex = array.get(eqA, i)
         if not na(lex)
-            line.set_color(lex, age == 0 ? eqCol : col)
+            line.set_color(lex, age == 0 ? eqLnCol : col)
 
-    // prune the oldest ranges (keep current + previous + maxHist)
+    // ---- prune the oldest ranges (keep current + previous + maxHist) ----
     while array.size(hiA) > maxHist + 2
         line.delete(array.shift(hiA))
         line.delete(array.shift(loA))
