@@ -80,8 +80,9 @@ setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
 setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSet)
-setupTpC   = input.color(color.new(color.green, 0),  "Take-profit dot", group=gSet)
-setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss dot", group=gSet)
+setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSet)
+setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSet)
+setupLineW = input.int(2, "TP / SL line width", minval=1, maxval=4, group=gSet, tooltip="Raise for bolder, more visible TP / SL dotted lines.")
 setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 
 // ===================== EQUILIBRIUM (all ranges) ==============================
@@ -324,8 +325,17 @@ var array<line> loA   = array.new<line>()
 var array<line> eqA   = array.new<line>()
 var array<box>  shA   = array.new<box>()
 var array<label> swLbA  = array.new<label>()
-var array<label> setLbA = array.new<label>()
-var array<line>  setLnA = array.new<line>()
+// setup stores (parallel; one slot per setup, pruned together by setKeep)
+var array<line>  sEntryLn = array.new<line>()
+var array<line>  sTpLn    = array.new<line>()
+var array<line>  sSlLn    = array.new<line>()
+var array<label> sTpLb    = array.new<label>()
+var array<label> sSlLb    = array.new<label>()
+var array<label> sRrLb    = array.new<label>()
+var array<int>   sDir     = array.new<int>()
+var array<float> sTp      = array.new<float>()
+var array<float> sSl      = array.new<float>()
+var array<bool>  sDone    = array.new<bool>()
 
 // draw one sweep marker (design-aware) at a bar-time, pruning the shared store
 f_sweepMark(bool bull, int atT, float y) =>
@@ -461,21 +471,54 @@ if newClosed and showSetup and not na(aHi) and not na(aLo) and not na(bClose)
         rr    = risk > 0 ? rew / risk : 0.0
         if rr >= setupMinRR and tp != entry and ((swLong and tp > entry) or (swShort and tp < entry))
             dirC = swLong ? setupLongC : setupShortC
-            shortEnd = bStart + tfMs   // "..." length: one range candle wide
-            // minimal: entry = a small dot; TP & SL = short dotted line segments
-            dE = label.new(bStart, entry, "", xloc=xloc.bar_time, style=label.style_circle, color=dirC, size=size.tiny)
-            lnT = line.new(bStart, tp, shortEnd, tp, xloc=xloc.bar_time, color=setupTpC, width=1, style=line.style_dotted)
-            lnS = line.new(bStart, sl, shortEnd, sl, xloc=xloc.bar_time, color=setupSlC, width=1, style=line.style_dotted)
+            shortEnd = bStart + tfMs   // short "..." length for TP / SL: one range candle
+            // entry line: full-range dotted (original look). TP / SL: short dotted, titled.
+            lnE = line.new(bStart, entry, bEnd, entry, xloc=xloc.bar_time, color=dirC, width=1, style=line.style_dotted)
+            lnT = line.new(bStart, tp, shortEnd, tp, xloc=xloc.bar_time, color=setupTpC, width=setupLineW, style=line.style_dotted)
+            lnS = line.new(bStart, sl, shortEnd, sl, xloc=xloc.bar_time, color=setupSlC, width=setupLineW, style=line.style_dotted)
+            lbT = label.new(shortEnd, tp, "TP", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=setupTpC, size=size.tiny)
+            lbSl = label.new(shortEnd, sl, "SL", xloc=xloc.bar_time, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=setupSlC, size=size.tiny)
             txt = (swLong ? "CRT Long " : "CRT Short ") + str.tostring(rr, "#.0") + "R"
-            lbS = mkLabel(bEnd, entry, txt, labDesign, dirC, labTxtCol, labSz)
-            array.push(setLbA, dE)
-            array.push(setLbA, lbS)
-            array.push(setLnA, lnT)
-            array.push(setLnA, lnS)
-            while array.size(setLbA) > setKeep * 2
-                label.delete(array.shift(setLbA))
-            while array.size(setLnA) > setKeep * 2
-                line.delete(array.shift(setLnA))
+            lbR = mkLabel(bEnd, entry, txt, labDesign, dirC, labTxtCol, labSz)
+            array.push(sEntryLn, lnE)
+            array.push(sTpLn, lnT)
+            array.push(sSlLn, lnS)
+            array.push(sTpLb, lbT)
+            array.push(sSlLb, lbSl)
+            array.push(sRrLb, lbR)
+            array.push(sDir, swLong ? 1 : -1)
+            array.push(sTp, tp)
+            array.push(sSl, sl)
+            array.push(sDone, false)
+            while array.size(sEntryLn) > setKeep
+                line.delete(array.shift(sEntryLn))
+                line.delete(array.shift(sTpLn))
+                line.delete(array.shift(sSlLn))
+                label.delete(array.shift(sTpLb))
+                label.delete(array.shift(sSlLb))
+                label.delete(array.shift(sRrLb))
+                array.shift(sDir)
+                array.shift(sTp)
+                array.shift(sSl)
+                array.shift(sDone)
+
+// mark TP / SL hits: when price reaches a level, tag the label (✓ win, ✗ loss)
+if showSetup and array.size(sTp) > 0
+    j = array.size(sTp) - 1
+    while j >= 0
+        if not array.get(sDone, j)
+            dir = array.get(sDir, j)
+            tpv = array.get(sTp, j)
+            slv = array.get(sSl, j)
+            hitTp = dir == 1 ? high >= tpv : low  <= tpv
+            hitSl = dir == 1 ? low  <= slv : high >= slv
+            if hitSl
+                label.set_text(array.get(sSlLb, j), "SL ✗")
+                array.set(sDone, j, true)
+            else if hitTp
+                label.set_text(array.get(sTpLb, j), "TP ✓")
+                array.set(sDone, j, true)
+        j := j - 1
 
 // ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
 ndHi = request.security(sym, "1D", high[1], lookahead=barmerge.lookahead_off)
