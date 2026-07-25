@@ -5,7 +5,8 @@
 // Same visuals as the Basic CRT indicator (ranges, sweeps, PD arrays, S/R, S/D,
 // D/W bias) PLUS live execution: every LIVE CRT setup (sweep → reclaim) is taken
 // as a real trade — entry at the reclaim close, SL beyond the sweep, TP the
-// opposite range extreme — with risk-based or fixed position sizing.
+// OPPOSITE RANGE EXTREME — with risk-based or fixed position sizing. The R:R is
+// whatever that geometry gives you: 2R, 5R, 9R. It is never capped.
 //
 // Non-repainting: HTF data via request.security(closed bars, lookahead_off);
 // setups fire only on CONFIRMED chart bars; orders processed on bar close.
@@ -74,7 +75,7 @@ swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=
 // below the range TF. Marks the setup only — NOT financial advice; validate it.
 gSet = "CRT setups  (optional)"
 showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
-setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. SL beyond the sweep; TP per the Target mode below (default a clean 1:2).")
+setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. SL beyond the sweep; TP is the opposite extreme of the range.")
 setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Same live logic but the sweep+reclaim may complete up to two candles after the range instead of one.")
 // TARGET IS ALWAYS THE OPPOSITE RANGE EXTREME. That is the CRT model: you sweep
 // one side, reclaim, and run for the other side. The R:R is an OUTCOME of where
@@ -83,11 +84,7 @@ setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)
 setupMinRR = input.float(2.0, "Skip setups with RR below", minval=0, step=0.1, group=gSet, tooltip="A FILTER on the natural R:R, not a target. TP is always the opposite range extreme; this simply skips setups where the reclaim gave you a poor entry (too far into the range). 2.0 keeps entries in the outer third of the range, which is where CRT entries belong. Setups offering 5R, 8R, whatever — all kept in full.")
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
 minStopRng = input.float(0.10, "Min stop distance (× range height)", minval=0, maxval=0.5, step=0.01, group=gSet, tooltip="Only prevents a degenerate near-zero stop when the reclaim closes almost exactly on the swept extreme (those died to same-bar noise). Expressed as a fraction of the RANGE so it scales with the setup and does NOT eat your R:R — the previous ATR-based floor blew the risk leg out and made RR>=2 unreachable. 0.10 = stop can never be tighter than 10% of the range height.")
-// ---- QUALITY FILTERS -------------------------------------------------------
-// Added after a 6,674-trade pooled audit showed the raw sweep→reclaim entry has
-// essentially ZERO gross edge (+0.0009R/trade). It fired on ANY bar that closed
-// back inside the range — including tiny indecision candles. Real CRT requires
-// the reclaim to be IMPULSIVE (displacement). These filters enforce that.
+// ---- OPTIONAL QUALITY FILTERS ----------------------------------------------
 // ALL OFF BY DEFAULT. The base model is pure CRT: sweep → reclaim → target the
 // opposite extreme. These are optional extras to test one at a time, never
 // something the model needs to function.
