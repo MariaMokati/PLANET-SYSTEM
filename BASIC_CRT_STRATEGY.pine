@@ -101,6 +101,7 @@ allowShort = input.bool(true,  "Allow shorts", inline="dir", group=gExec)
 sizeModel  = input.string("Risk % of equity", "Position sizing", options=["Risk % of equity","Fixed contracts"], group=gExec)
 riskPerc   = input.float(1.0, "Risk % per trade", minval=0.1, maxval=100, step=0.1, group=gExec, tooltip="Sizes the position so a full stop-out loses this % of current equity.")
 fixedQty   = input.float(1.0, "Fixed contracts / lots", minval=0, step=0.1, group=gExec)
+maxNotion  = input.float(0.90, "Max position notional (× equity)", minval=0.05, step=0.05, group=gExec, tooltip="Caps position size so notional stays under your account leverage. On a high-priced symbol like gold, risking 1% with an ATR-sized stop needs roughly 1x notional — and with Properties → Long/Short leverage at 1x the broker emulator margin-calls the position, producing junk fractional 'trades' that pollute the report. 0.90 keeps it safely inside 1x. If you would rather take the full risk %, raise Long/Short leverage in the Properties tab instead of lowering this.")
 useWindow  = input.bool(false, "Restrict entries to a session window", group=gExec)
 sessWin    = input.session("0000-2400", "Entry window", group=gExec)
 sessTz     = input.string("America/New_York", "Window timezone", group=gExec)
@@ -389,7 +390,11 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
     risk = math.abs(entry - sl)
     rew  = math.abs(tp - entry)
     rr   = risk > 0 ? rew / risk : 0.0
-    fired = rr >= setupMinRR and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
+    // NOTE the 0.01 tolerance. tp is built as close ± tgtRR*stopDist, and on a
+    // high-priced symbol (gold ~4000) subtracting two nearby large floats loses
+    // precision, so rr lands on 1.999999999999982 instead of 2.0. A bare
+    // "rr >= setupMinRR" silently threw away ~24% of otherwise valid setups.
+    fired = rr >= setupMinRR - 0.01 and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
     if fired
         dirC = dir == 1 ? setupLongC : setupShortC
         shortEndX = startX + 4
@@ -612,7 +617,10 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
 inWin = not useWindow or not na(time(timeframe.period, sessWin, sessTz))
 if tradeOn and sigDir != 0 and strategy.position_size == 0 and inWin
     stopDist = math.abs(close - sigSl)
-    qty = sizeModel == "Fixed contracts" ? fixedQty : (stopDist > 0 ? (strategy.equity * riskPerc / 100.0) / stopDist : na)
+    qtyRaw = sizeModel == "Fixed contracts" ? fixedQty : (stopDist > 0 ? (strategy.equity * riskPerc / 100.0) / stopDist : na)
+    // cap notional so the broker emulator can't margin-call the position
+    qtyCap = close > 0 ? (maxNotion * strategy.equity) / close : na
+    qty = na(qtyRaw) ? na : (na(qtyCap) ? qtyRaw : math.min(qtyRaw, qtyCap))
     if not na(qty) and qty > 0
         if sigDir == 1 and allowLong
             strategy.entry("Long", strategy.long, qty=qty)
