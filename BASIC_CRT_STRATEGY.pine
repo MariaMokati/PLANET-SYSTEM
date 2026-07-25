@@ -76,26 +76,30 @@ gSet = "CRT setups  (optional)"
 showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
 setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. SL beyond the sweep; TP per the Target mode below (default a clean 1:2).")
 setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Same live logic but the sweep+reclaim may complete up to two candles after the range instead of one.")
-tgtMode    = input.string("Fixed R:R", "Target (TP) mode", options=["Fixed R:R","Opposite range extreme"], group=gSet, tooltip="Fixed R:R (default) = every trade targets EXACTLY your reward multiple × the stop distance — a clean 1:2 on every single setup, no matter where in the range the reclaim happens. This also fires far MORE setups, because the target is no longer rejected for being closer than the stop. Opposite range extreme = classic CRT target (the other side of the range); the RR then varies trade to trade and many setups get filtered out.")
-tgtRR      = input.float(2.0, "Reward : Risk", minval=0.5, step=0.5, group=gSet, tooltip="Fixed R:R mode: TP = entry + this × stop distance. Default 2.0 = a clean 1 : 2 on every trade.")
-setupMinRR = input.float(2.0, "Skip setups with RR below", minval=0, step=0.1, group=gSet, tooltip="Safety floor. In Fixed R:R mode every trade is exactly your Reward:Risk, so this rarely triggers. In Opposite-range-extreme mode it filters out reclaims whose target is nearer than the stop.")
+// TARGET IS ALWAYS THE OPPOSITE RANGE EXTREME. That is the CRT model: you sweep
+// one side, reclaim, and run for the other side. The R:R is an OUTCOME of where
+// the reclaim let you in — enter near the swept extreme and it is large, enter
+// mid-range and it is small. It is never something imposed on the trade.
+setupMinRR = input.float(2.0, "Skip setups with RR below", minval=0, step=0.1, group=gSet, tooltip="A FILTER on the natural R:R, not a target. TP is always the opposite range extreme; this simply skips setups where the reclaim gave you a poor entry (too far into the range). 2.0 keeps entries in the outer third of the range, which is where CRT entries belong. Setups offering 5R, 8R, whatever — all kept in full.")
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
-minStopAtr = input.float(1.0, "Min stop distance (x ATR of range TF)", minval=0, step=0.05, group=gSet, tooltip="Floors how tight the stop can be. Raised from 0.5 to 1.0 after a 6,676-trade pooled test: trades stopped out within 1-6 bars were the single biggest bleed (8.7% win rate in the 1-2 bar bucket), while trades that survived 21+ bars won 42-49%. A wider floor gives the reclaim room to work. This is a HYPOTHESIS to test, not a proven fix — a wider stop also pushes the 2R target further away. Compare runs at 0.5 / 1.0 / 1.5.")
+minStopRng = input.float(0.10, "Min stop distance (× range height)", minval=0, maxval=0.5, step=0.01, group=gSet, tooltip="Only prevents a degenerate near-zero stop when the reclaim closes almost exactly on the swept extreme (those died to same-bar noise). Expressed as a fraction of the RANGE so it scales with the setup and does NOT eat your R:R — the previous ATR-based floor blew the risk leg out and made RR>=2 unreachable. 0.10 = stop can never be tighter than 10% of the range height.")
 // ---- QUALITY FILTERS -------------------------------------------------------
 // Added after a 6,674-trade pooled audit showed the raw sweep→reclaim entry has
 // essentially ZERO gross edge (+0.0009R/trade). It fired on ANY bar that closed
 // back inside the range — including tiny indecision candles. Real CRT requires
 // the reclaim to be IMPULSIVE (displacement). These filters enforce that.
-gFlt = "Entry quality filters"
-dispOn   = input.bool(true, "Require displacement on the reclaim", group=gFlt, tooltip="THE key filter. A valid CRT reclaim is impulsive — the market rejects the sweep with intent. Without this the strategy takes every limp doji that happens to close back inside the range, which is where the edge disappeared.")
-dispBody = input.float(0.6, "Min reclaim body (× ATR of chart TF)", minval=0, step=0.1, group=gFlt, tooltip="The reclaim candle's BODY (|close-open|) must be at least this many chart-TF ATRs. 0.6 keeps genuinely impulsive candles and rejects noise. Raise for fewer, stronger setups.")
-dispEq   = input.bool(true, "Reclaim must close beyond range 50% (EQ)", group=gFlt, tooltip="A real reclaim drives back through the middle of the range, not just barely inside the edge. Longs must close above EQ, shorts below.")
-kzOn     = input.bool(true, "Only trade killzones", group=gFlt, tooltip="CRT is a session model. Outside the London / New York windows a sweep is usually thin-liquidity noise — the audit found hours 19-01 and 07 consistently negative.")
+// ALL OFF BY DEFAULT. The base model is pure CRT: sweep → reclaim → target the
+// opposite extreme. These are optional extras to test one at a time, never
+// something the model needs to function.
+gFlt = "Entry quality filters  (all optional, default OFF)"
+dispOn   = input.bool(false, "Require displacement on the reclaim", group=gFlt, tooltip="Optional. Requires the reclaim candle to be impulsive (real body, closing in the trade direction) rather than a doji drifting back inside. Leave OFF for the pure CRT model.")
+dispBody = input.float(0.3, "Min reclaim body (× ATR of chart TF)", minval=0, step=0.1, group=gFlt, tooltip="Only used when displacement is ON. The reclaim candle's body (|close-open|) must be at least this many chart-TF ATRs.")
+kzOn     = input.bool(false, "Only trade killzones", group=gFlt, tooltip="Optional session filter. The pooled audit found entry hours 19-01 and 07 consistently negative, but this is your call — OFF by default so the model runs unrestricted.")
 kz1      = input.session("0200-0500", "London killzone", group=gFlt)
 kz2      = input.session("0700-1000", "New York killzone", group=gFlt)
 kzTz     = input.string("America/New_York", "Killzone timezone", group=gFlt)
 showDbg  = input.bool(true, "Show diagnostics table", group=gFlt, tooltip="Counts what the engine actually did: ranges armed, reclaims seen, and exactly which filter rejected them. If you ever get zero trades again, this table tells you which setting is responsible instead of guessing.")
-biasOn     = input.bool(true, "Only trade with higher-TF bias (EMA)", group=gSet, tooltip="Now ON by default. Longs only when price is above the bias EMA, shorts only when below. CRT reclaims work best in the direction of the higher-TF draw on liquidity.")
+biasOn     = input.bool(false, "Only trade with higher-TF bias (EMA)", group=gSet, tooltip="Optional, OFF by default. Longs only when price is above the bias EMA, shorts only when below. CRT reclaims work best in the direction of the higher-TF draw on liquidity.")
 biasTf     = input.timeframe("D", "Bias timeframe", group=gSet)
 biasLen    = input.int(50, "Bias EMA length", minval=1, group=gSet)
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
@@ -407,8 +411,8 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
     risk = math.abs(entry - sl)
     rew  = math.abs(tp - entry)
     rr   = risk > 0 ? rew / risk : 0.0
-    // NOTE the 0.01 tolerance. tp is built as close ± tgtRR*stopDist, and on a
-    // high-priced symbol (gold ~4000) subtracting two nearby large floats loses
+    // NOTE the 0.01 tolerance guards against float rounding making a genuine
+    // 2.00 RR evaluate as 1.999999999999982 and get silently discarded.
     // precision, so rr lands on 1.999999999999982 instead of 2.0. A bare
     // "rr >= setupMinRR" silently threw away ~24% of otherwise valid setups.
     fired = rr >= setupMinRR - 0.01 and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
@@ -615,26 +619,30 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             canS = swH and close < hi   // swept the high, now reclaimed back inside
             canL = swL and close > lo   // swept the low,  now reclaimed back inside
             wdirRaw = canS and canL ? (close < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
-            // ---- QUALITY GATE: the reclaim must be an impulsive rejection ----
+            // ---- OPTIONAL displacement gate (off by default) ----
+            // NOTE: there is deliberately NO "close beyond EQ" rule here. That
+            // would force the entry past mid-range, which caps the distance to
+            // the opposite extreme below the risk leg and makes RR >= 2
+            // unreachable by construction. CRT wants you in AT the extreme.
             bodyOk = not dispOn or math.abs(close - open) >= dispBody * nz(atrChart, 0)
-            eqOk   = not dispEq or wdirRaw == 0 or (wdirRaw == 1 ? close > eqR : close < eqR)
             dirOk  = not dispOn or wdirRaw == 0 or (wdirRaw == 1 ? close > open : close < open)
-            wdir = (bodyOk and eqOk and dirOk and inKZ) ? wdirRaw : 0
+            wdir = (bodyOk and dirOk and inKZ) ? wdirRaw : 0
             // tally WHY a reclaim did or didn't become a setup
             if wdirRaw != 0
                 dReclaim += 1
                 if not inKZ
                     dRejKZ += 1
-                else if not (bodyOk and eqOk and dirOk)
+                else if not (bodyOk and dirOk)
                     dRejDisp += 1
             if wdir != 0
                 rawSl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
-                // floor the stop distance so a micro-stop can't die to same-bar noise
-                minDist = minStopAtr * nz(atrTf, 0)
+                // floor only the degenerate case (reclaim closing on top of the
+                // sweep). Scaled to the RANGE so it never eats the reward leg.
+                minDist = minStopRng * (hi - lo)
                 sl = wdir == -1 ? math.max(rawSl, close + minDist) : math.min(rawSl, close - minDist)
-                stopDist = math.abs(close - sl)
-                // TP: Fixed R:R (exactly tgtRR × risk on every trade) or the opposite range extreme
-                tp = tgtMode == "Fixed R:R" ? (wdir == 1 ? close + tgtRR * stopDist : close - tgtRR * stopDist) : (wdir == -1 ? lo : hi)
+                // TP = the opposite extreme of the range. Always. The R:R that
+                // results is whatever the entry earned — 2R, 5R, 9R, all kept.
+                tp = wdir == -1 ? lo : hi
                 // optional higher-TF bias gate (applies to drawing AND trade together)
                 biasOk = not biasOn or na(biasEma) or (wdir == 1 ? close > biasEma : close < biasEma)
                 // fired == the setup passed the RR + direction gate (same as what's drawn)
@@ -703,7 +711,7 @@ if showDbg and barstate.islast
     if na(dbgT)
         dbgT := table.new(position.top_right, 2, 9, border_width=1, frame_width=1, frame_color=color.gray)
     // the diagnosis line: name the setting that is actually blocking everything
-    diag = not showSetup ? "Turn ON 'Show CRT setups'" : dArmed == 0 ? "No ranges armed — check Range timeframe" : dReclaim == 0 ? "No sweep+reclaim — chart TF must be BELOW range TF" : dFired == 0 and dRejRR > 0 ? "RR gate blocks all — set Target mode = Fixed R:R" : dFired == 0 and dRejDisp > 0 ? "Displacement too strict — lower Min reclaim body" : dFired == 0 and dRejKZ > 0 ? "All reclaims outside killzones — widen or disable" : dFired == 0 and dRejBias > 0 ? "Bias filter blocks all — try turning it off" : "OK — setups are firing"
+    diag = not showSetup ? "Turn ON 'Show CRT setups'" : dArmed == 0 ? "No ranges armed — check Range timeframe" : dReclaim == 0 ? "No sweep+reclaim — chart TF must be BELOW range TF" : dFired == 0 and dRejRR > 0 ? "RR gate blocks all — entries too deep in range; lower Min stop or Min RR" : dFired == 0 and dRejDisp > 0 ? "Displacement too strict — lower Min reclaim body" : dFired == 0 and dRejKZ > 0 ? "All reclaims outside killzones — widen or disable" : dFired == 0 and dRejBias > 0 ? "Bias filter blocks all — try turning it off" : "OK — setups are firing"
     dcol = dFired > 0 ? color.new(color.green, 0) : color.new(color.red, 0)
     rrCol = dRejRR > 0 and dFired == 0 ? color.red : color.gray
     bg    = color.new(color.gray, 90)
