@@ -94,6 +94,7 @@ kzOn     = input.bool(true, "Only trade killzones", group=gFlt, tooltip="CRT is 
 kz1      = input.session("0200-0500", "London killzone", group=gFlt)
 kz2      = input.session("0700-1000", "New York killzone", group=gFlt)
 kzTz     = input.string("America/New_York", "Killzone timezone", group=gFlt)
+showDbg  = input.bool(true, "Show diagnostics table", group=gFlt, tooltip="Counts what the engine actually did: ranges armed, reclaims seen, and exactly which filter rejected them. If you ever get zero trades again, this table tells you which setting is responsible instead of guessing.")
 biasOn     = input.bool(true, "Only trade with higher-TF bias (EMA)", group=gSet, tooltip="Now ON by default. Longs only when price is above the bias EMA, shorts only when below. CRT reclaims work best in the direction of the higher-TF draw on liquidity.")
 biasTf     = input.timeframe("D", "Bias timeframe", group=gSet)
 biasLen    = input.int(50, "Bias EMA length", minval=1, group=gSet)
@@ -552,6 +553,15 @@ if showSweep and swpWOn
 // NOT wait for the whole next HTF candle to close. SL beyond the swept extreme,
 // TP the opposite range extreme. Use a chart TF below the range TF for precision.
 // 2-candle = reclaim in the very next candle; 3-candle allows one candle later.
+// ---- diagnostic counters: what the engine actually did ----------------------
+var int dArmed   = 0   // ranges armed as watches
+var int dReclaim = 0   // bars where a raw sweep+reclaim was present
+var int dRejKZ   = 0   // rejected: outside killzone
+var int dRejDisp = 0   // rejected: displacement (body / direction / EQ)
+var int dRejBias = 0   // rejected: higher-TF bias
+var int dRejRR   = 0   // rejected: RR below the minimum  <-- the silent killer
+var int dFired   = 0   // setups that passed everything
+
 if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na(cLow)
     array.push(wHi, cHigh)
     array.push(wLo, cLow)
@@ -560,6 +570,7 @@ if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na
     array.push(wSwL, false)
     array.push(wExtH, cHigh)
     array.push(wExtL, cLow)
+    dArmed += 1
     while array.size(wHi) > 10
         array.shift(wHi)
         array.shift(wLo)
@@ -609,6 +620,13 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             eqOk   = not dispEq or wdirRaw == 0 or (wdirRaw == 1 ? close > eqR : close < eqR)
             dirOk  = not dispOn or wdirRaw == 0 or (wdirRaw == 1 ? close > open : close < open)
             wdir = (bodyOk and eqOk and dirOk and inKZ) ? wdirRaw : 0
+            // tally WHY a reclaim did or didn't become a setup
+            if wdirRaw != 0
+                dReclaim += 1
+                if not inKZ
+                    dRejKZ += 1
+                else if not (bodyOk and eqOk and dirOk)
+                    dRejDisp += 1
             if wdir != 0
                 rawSl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
                 // floor the stop distance so a micro-stop can't die to same-bar noise
@@ -623,6 +641,12 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
                 bool fired = false
                 if biasOk
                     fired := f_makeSetup(wdir, close, sl, tp, bar_index)
+                else
+                    dRejBias += 1
+                if fired
+                    dFired += 1
+                else if biasOk
+                    dRejRR += 1
                 if fired and sigDir == 0   // trade ONLY the setups that actually qualify
                     sigDir := wdir
                     sigSl  := sl
@@ -672,6 +696,35 @@ if showSetup and array.size(sTp) > 0
                 label.set_text(array.get(sTpLb, j), "TP ✓")
                 array.set(sDone, j, true)
         j := j - 1
+
+// ---- diagnostics table: never guess why there are no trades again -----------
+var table dbgT = na
+if showDbg and barstate.islast
+    if na(dbgT)
+        dbgT := table.new(position.top_right, 2, 9, border_width=1, frame_width=1, frame_color=color.gray)
+    // the diagnosis line: name the setting that is actually blocking everything
+    diag = not showSetup ? "Turn ON 'Show CRT setups'" : dArmed == 0 ? "No ranges armed — check Range timeframe" : dReclaim == 0 ? "No sweep+reclaim — chart TF must be BELOW range TF" : dFired == 0 and dRejRR > 0 ? "RR gate blocks all — set Target mode = Fixed R:R" : dFired == 0 and dRejDisp > 0 ? "Displacement too strict — lower Min reclaim body" : dFired == 0 and dRejKZ > 0 ? "All reclaims outside killzones — widen or disable" : dFired == 0 and dRejBias > 0 ? "Bias filter blocks all — try turning it off" : "OK — setups are firing"
+    dcol = dFired > 0 ? color.new(color.green, 0) : color.new(color.red, 0)
+    rrCol = dRejRR > 0 and dFired == 0 ? color.red : color.gray
+    bg    = color.new(color.gray, 90)
+    table.cell(dbgT, 0, 0, "CRT DIAGNOSTICS",      text_size=size.small, text_halign=text.align_left,  text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 1, 0, "",                     text_size=size.small, text_halign=text.align_right, text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 0, 1, "Ranges armed",         text_size=size.small, text_halign=text.align_left,  text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 1, 1, str.tostring(dArmed),   text_size=size.small, text_halign=text.align_right, text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 0, 2, "Reclaim bars seen",    text_size=size.small, text_halign=text.align_left,  text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 1, 2, str.tostring(dReclaim), text_size=size.small, text_halign=text.align_right, text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 0, 3, "· rejected killzone",  text_size=size.small, text_halign=text.align_left,  text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 1, 3, str.tostring(dRejKZ),   text_size=size.small, text_halign=text.align_right, text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 0, 4, "· rejected displacement", text_size=size.small, text_halign=text.align_left,  text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 1, 4, str.tostring(dRejDisp), text_size=size.small, text_halign=text.align_right, text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 0, 5, "· rejected bias",      text_size=size.small, text_halign=text.align_left,  text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 1, 5, str.tostring(dRejBias), text_size=size.small, text_halign=text.align_right, text_color=color.gray, bgcolor=bg)
+    table.cell(dbgT, 0, 6, "· rejected RR gate",   text_size=size.small, text_halign=text.align_left,  text_color=rrCol, bgcolor=bg)
+    table.cell(dbgT, 1, 6, str.tostring(dRejRR),   text_size=size.small, text_halign=text.align_right, text_color=rrCol, bgcolor=bg)
+    table.cell(dbgT, 0, 7, "SETUPS FIRED",         text_size=size.small, text_halign=text.align_left,  text_color=dcol, bgcolor=bg)
+    table.cell(dbgT, 1, 7, str.tostring(dFired),   text_size=size.small, text_halign=text.align_right, text_color=dcol, bgcolor=bg)
+    table.cell(dbgT, 0, 8, diag,                   text_size=size.small, text_halign=text.align_left,  text_color=dcol, bgcolor=bg)
+    table.cell(dbgT, 1, 8, "",                     text_size=size.small, text_halign=text.align_right, text_color=dcol, bgcolor=bg)
 
 // ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
 ndHi = request.security(sym, "1D", high[1], lookahead=barmerge.lookahead_off)
