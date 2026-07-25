@@ -413,8 +413,6 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
     rr   = risk > 0 ? rew / risk : 0.0
     // NOTE the 0.01 tolerance guards against float rounding making a genuine
     // 2.00 RR evaluate as 1.999999999999982 and get silently discarded.
-    // precision, so rr lands on 1.999999999999982 instead of 2.0. A bare
-    // "rr >= setupMinRR" silently threw away ~24% of otherwise valid setups.
     fired = rr >= setupMinRR - 0.01 and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
     if fired
         dirC = dir == 1 ? setupLongC : setupShortC
