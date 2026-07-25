@@ -74,9 +74,11 @@ swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=
 // below the range TF. Marks the setup only — NOT financial advice; validate it.
 gSet = "CRT setups  (optional)"
 showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
-setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. Target the opposite extreme; SL beyond the sweep.")
+setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. SL beyond the sweep; TP per the Target mode below (default a clean 1:2).")
 setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Same live logic but the sweep+reclaim may complete up to two candles after the range instead of one.")
-setupMinRR = input.float(1.5, "Only take setups with RR ≥", minval=0, step=0.1, group=gSet, tooltip="Now enforced on TRADES too, not just the drawing. A reclaim whose target (opposite range extreme) is closer than its stop is skipped — this is what stops the low-quality, sub-1R winners from being traded.")
+tgtMode    = input.string("Fixed R:R", "Target (TP) mode", options=["Fixed R:R","Opposite range extreme"], group=gSet, tooltip="Fixed R:R (default) = every trade targets EXACTLY your reward multiple × the stop distance — a clean 1:2 on every single setup, no matter where in the range the reclaim happens. This also fires far MORE setups, because the target is no longer rejected for being closer than the stop. Opposite range extreme = classic CRT target (the other side of the range); the RR then varies trade to trade and many setups get filtered out.")
+tgtRR      = input.float(2.0, "Reward : Risk", minval=0.5, step=0.5, group=gSet, tooltip="Fixed R:R mode: TP = entry + this × stop distance. Default 2.0 = a clean 1 : 2 on every trade.")
+setupMinRR = input.float(2.0, "Skip setups with RR below", minval=0, step=0.1, group=gSet, tooltip="Safety floor. In Fixed R:R mode every trade is exactly your Reward:Risk, so this rarely triggers. In Opposite-range-extreme mode it filters out reclaims whose target is nearer than the stop.")
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
 minStopAtr = input.float(0.5, "Min stop distance (x ATR of range TF)", minval=0, step=0.05, group=gSet, tooltip="Floors how tight the stop can be. On a reclaim the entry can sit only a few ticks from the sweep, giving a micro-stop that dies to same-bar noise (0-bar losers). This pushes the stop out to at least this many ATRs so the trade has room to work. Set 0 to disable.")
 biasOn     = input.bool(false, "Only trade with higher-TF bias (EMA)", group=gSet, tooltip="Optional trend filter (default OFF so it doesn't change the base behaviour). Longs only when price is above the bias EMA, shorts only when below. CRT reclaims work best in the direction of the higher-TF draw on liquidity.")
@@ -584,7 +586,9 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
                 // floor the stop distance so a micro-stop can't die to same-bar noise
                 minDist = minStopAtr * nz(atrTf, 0)
                 sl = wdir == -1 ? math.max(rawSl, close + minDist) : math.min(rawSl, close - minDist)
-                tp = wdir == -1 ? lo : hi
+                stopDist = math.abs(close - sl)
+                // TP: Fixed R:R (exactly tgtRR × risk on every trade) or the opposite range extreme
+                tp = tgtMode == "Fixed R:R" ? (wdir == 1 ? close + tgtRR * stopDist : close - tgtRR * stopDist) : (wdir == -1 ? lo : hi)
                 // optional higher-TF bias gate (applies to drawing AND trade together)
                 biasOk = not biasOn or na(biasEma) or (wdir == 1 ? close > biasEma : close < biasEma)
                 // fired == the setup passed the RR + direction gate (same as what's drawn)
