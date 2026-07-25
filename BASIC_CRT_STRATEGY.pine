@@ -81,7 +81,20 @@ tgtRR      = input.float(2.0, "Reward : Risk", minval=0.5, step=0.5, group=gSet,
 setupMinRR = input.float(2.0, "Skip setups with RR below", minval=0, step=0.1, group=gSet, tooltip="Safety floor. In Fixed R:R mode every trade is exactly your Reward:Risk, so this rarely triggers. In Opposite-range-extreme mode it filters out reclaims whose target is nearer than the stop.")
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
 minStopAtr = input.float(1.0, "Min stop distance (x ATR of range TF)", minval=0, step=0.05, group=gSet, tooltip="Floors how tight the stop can be. Raised from 0.5 to 1.0 after a 6,676-trade pooled test: trades stopped out within 1-6 bars were the single biggest bleed (8.7% win rate in the 1-2 bar bucket), while trades that survived 21+ bars won 42-49%. A wider floor gives the reclaim room to work. This is a HYPOTHESIS to test, not a proven fix — a wider stop also pushes the 2R target further away. Compare runs at 0.5 / 1.0 / 1.5.")
-biasOn     = input.bool(false, "Only trade with higher-TF bias (EMA)", group=gSet, tooltip="Optional trend filter (default OFF so it doesn't change the base behaviour). Longs only when price is above the bias EMA, shorts only when below. CRT reclaims work best in the direction of the higher-TF draw on liquidity.")
+// ---- QUALITY FILTERS -------------------------------------------------------
+// Added after a 6,674-trade pooled audit showed the raw sweep→reclaim entry has
+// essentially ZERO gross edge (+0.0009R/trade). It fired on ANY bar that closed
+// back inside the range — including tiny indecision candles. Real CRT requires
+// the reclaim to be IMPULSIVE (displacement). These filters enforce that.
+gFlt = "Entry quality filters"
+dispOn   = input.bool(true, "Require displacement on the reclaim", group=gFlt, tooltip="THE key filter. A valid CRT reclaim is impulsive — the market rejects the sweep with intent. Without this the strategy takes every limp doji that happens to close back inside the range, which is where the edge disappeared.")
+dispBody = input.float(0.6, "Min reclaim body (× ATR of chart TF)", minval=0, step=0.1, group=gFlt, tooltip="The reclaim candle's BODY (|close-open|) must be at least this many chart-TF ATRs. 0.6 keeps genuinely impulsive candles and rejects noise. Raise for fewer, stronger setups.")
+dispEq   = input.bool(true, "Reclaim must close beyond range 50% (EQ)", group=gFlt, tooltip="A real reclaim drives back through the middle of the range, not just barely inside the edge. Longs must close above EQ, shorts below.")
+kzOn     = input.bool(true, "Only trade killzones", group=gFlt, tooltip="CRT is a session model. Outside the London / New York windows a sweep is usually thin-liquidity noise — the audit found hours 19-01 and 07 consistently negative.")
+kz1      = input.session("0200-0500", "London killzone", group=gFlt)
+kz2      = input.session("0700-1000", "New York killzone", group=gFlt)
+kzTz     = input.string("America/New_York", "Killzone timezone", group=gFlt)
+biasOn     = input.bool(true, "Only trade with higher-TF bias (EMA)", group=gSet, tooltip="Now ON by default. Longs only when price is above the bias EMA, shorts only when below. CRT reclaims work best in the direction of the higher-TF draw on liquidity.")
 biasTf     = input.timeframe("D", "Bias timeframe", group=gSet)
 biasLen    = input.int(50, "Bias EMA length", minval=1, group=gSet)
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
@@ -341,6 +354,9 @@ cOpenT = request.security(sym, tfIn, time[1], lookahead=barmerge.lookahead_off)
 tfMs   = timeframe.in_seconds(tfIn) * 1000
 // range-TF ATR for stop padding. The range itself = the last closed candle (cHigh/cLow).
 atrTf = request.security(sym, tfIn, ta.atr(14)[1], lookahead=barmerge.lookahead_off)
+// chart-TF ATR, used by the displacement filter (declared here so it exists
+// before the setup engine runs further down)
+atrChart = ta.atr(14)
 
 var array<line> hiA   = array.new<line>()
 var array<line> loA   = array.new<line>()
@@ -559,6 +575,8 @@ float sigTp  = na
 float biasEma = na
 if showSetup and biasOn
     biasEma := request.security(sym, biasTf, ta.ema(close, biasLen)[1], lookahead=barmerge.lookahead_off)
+// killzone gate — true when the bar sits inside either session window
+inKZ = not kzOn or not na(time(timeframe.period, kz1, kzTz)) or not na(time(timeframe.period, kz2, kzTz))
 if showSetup and barstate.isconfirmed and array.size(wHi) > 0
     pad = slPadAtr * nz(atrTf, 0)
     k = array.size(wHi) - 1
@@ -585,7 +603,12 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             eqR  = (hi + lo) / 2.0
             canS = swH and close < hi   // swept the high, now reclaimed back inside
             canL = swL and close > lo   // swept the low,  now reclaimed back inside
-            wdir = canS and canL ? (close < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
+            wdirRaw = canS and canL ? (close < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
+            // ---- QUALITY GATE: the reclaim must be an impulsive rejection ----
+            bodyOk = not dispOn or math.abs(close - open) >= dispBody * nz(atrChart, 0)
+            eqOk   = not dispEq or wdirRaw == 0 or (wdirRaw == 1 ? close > eqR : close < eqR)
+            dirOk  = not dispOn or wdirRaw == 0 or (wdirRaw == 1 ? close > open : close < open)
+            wdir = (bodyOk and eqOk and dirOk and inKZ) ? wdirRaw : 0
             if wdir != 0
                 rawSl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
                 // floor the stop distance so a micro-stop can't die to same-bar noise
