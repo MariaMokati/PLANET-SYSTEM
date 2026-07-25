@@ -76,8 +76,12 @@ gSet = "CRT setups  (optional)"
 showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
 setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. Target the opposite extreme; SL beyond the sweep.")
 setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Same live logic but the sweep+reclaim may complete up to two candles after the range instead of one.")
-setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet)
+setupMinRR = input.float(1.5, "Only take setups with RR ≥", minval=0, step=0.1, group=gSet, tooltip="Now enforced on TRADES too, not just the drawing. A reclaim whose target (opposite range extreme) is closer than its stop is skipped — this is what stops the low-quality, sub-1R winners from being traded.")
 slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
+minStopAtr = input.float(0.5, "Min stop distance (x ATR of range TF)", minval=0, step=0.05, group=gSet, tooltip="Floors how tight the stop can be. On a reclaim the entry can sit only a few ticks from the sweep, giving a micro-stop that dies to same-bar noise (0-bar losers). This pushes the stop out to at least this many ATRs so the trade has room to work. Set 0 to disable.")
+biasOn     = input.bool(false, "Only trade with higher-TF bias (EMA)", group=gSet, tooltip="Optional trend filter (default OFF so it doesn't change the base behaviour). Longs only when price is above the bias EMA, shorts only when below. CRT reclaims work best in the direction of the higher-TF draw on liquidity.")
+biasTf     = input.timeframe("D", "Bias timeframe", group=gSet)
+biasLen    = input.int(50, "Bias EMA length", minval=1, group=gSet)
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
 setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSet)
 setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSet)
@@ -383,7 +387,8 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
     risk = math.abs(entry - sl)
     rew  = math.abs(tp - entry)
     rr   = risk > 0 ? rew / risk : 0.0
-    if rr >= setupMinRR and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
+    fired = rr >= setupMinRR and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
+    if fired
         dirC = dir == 1 ? setupLongC : setupShortC
         shortEndX = startX + 4
         // entry / TP / SL all the SAME short dotted length with tiny titles.
@@ -415,6 +420,7 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
             array.shift(sTp)
             array.shift(sSl)
             array.shift(sDone)
+    fired
 
 var label labHi = na
 var label labLo = na
@@ -543,6 +549,9 @@ if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na
 int   sigDir = 0
 float sigSl  = na
 float sigTp  = na
+float biasEma = na
+if showSetup and biasOn
+    biasEma := request.security(sym, biasTf, ta.ema(close, biasLen)[1], lookahead=barmerge.lookahead_off)
 if showSetup and barstate.isconfirmed and array.size(wHi) > 0
     pad = slPadAtr * nz(atrTf, 0)
     k = array.size(wHi) - 1
@@ -571,10 +580,18 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             canL = swL and close > lo   // swept the low,  now reclaimed back inside
             wdir = canS and canL ? (close < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
             if wdir != 0
-                sl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
+                rawSl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
+                // floor the stop distance so a micro-stop can't die to same-bar noise
+                minDist = minStopAtr * nz(atrTf, 0)
+                sl = wdir == -1 ? math.max(rawSl, close + minDist) : math.min(rawSl, close - minDist)
                 tp = wdir == -1 ? lo : hi
-                f_makeSetup(wdir, close, sl, tp, bar_index)
-                if sigDir == 0   // capture the first fired setup this bar for execution
+                // optional higher-TF bias gate (applies to drawing AND trade together)
+                biasOk = not biasOn or na(biasEma) or (wdir == 1 ? close > biasEma : close < biasEma)
+                // fired == the setup passed the RR + direction gate (same as what's drawn)
+                bool fired = false
+                if biasOk
+                    fired := f_makeSetup(wdir, close, sl, tp, bar_index)
+                if fired and sigDir == 0   // trade ONLY the setups that actually qualify
                     sigDir := wdir
                     sigSl  := sl
                     sigTp  := tp
