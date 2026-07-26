@@ -12,7 +12,7 @@
 //      its timeframe, with a 50% EQ line, mitigation, and historical toggle
 //   3. Sweeps & Breaks per timeframe, each marker titled with its own TF
 //   4. Swing High/Low support & resistance + equal highs/lows (own source TF)
-//   4. Supply / demand zones at recent swings (own source TF)
+//   5. Supply / demand zones at recent swings (own source TF)
 // Every element has its own on/off switch, colours, and label size.
 //
 // Non-repainting: HTF data via request.security(closed bars, lookahead_off);
