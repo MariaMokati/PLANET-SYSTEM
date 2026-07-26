@@ -1,0 +1,496 @@
+//@version=6
+// =============================================================================
+// BASIC STRUCTURE — Sessions · Market Structure · Trendlines · Bias Dashboard
+// -----------------------------------------------------------------------------
+// Companion to "Basic CRT". Fully independent — every block below is its own
+// on/off switch, so you can run sessions alone, structure alone, or all of it.
+//
+//   SESSIONS      Asia / London / NY AM / NY PM boxes with high-low tracking
+//   STRUCTURE     Three independent tiers, each with its own pivot length:
+//                   EXTERNAL  HH / HL / LH / LL   (CAPITALS)
+//                   internal  hh / hl / lh / ll   (lowercase)
+//                   Fractal   F HH / F HL / …     (prefixed)
+//                 Each turning point gets a marker, an optional label (with or
+//                 without price), an optional zigzag leg, and optional
+//                 BOS / CHoCH tags so you can see the trend actually turn.
+//   TRENDLINES    Drawn off the last two confirmed swings of a chosen tier.
+//   DASHBOARD     Structure bias 1m → W, plus session / daily / weekly bias.
+//
+// Non-repainting: every swing is a CONFIRMED pivot (it is placed `length` bars
+// back, only once the bars either side exist). Nothing is drawn on a forming
+// bar, so labels never move after they appear.
+// =============================================================================
+indicator("Basic Structure", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// ===================== SESSIONS ==============================================
+gSes = "Sessions"
+sesOn    = input.bool(true,  "Show sessions", group=gSes)
+sesBox   = input.bool(true,  "Draw session box (high → low)", group=gSes)
+sesHL    = input.bool(false, "Draw session high / low lines", group=gSes, tooltip="Extends the session's high and low to the right as levels — useful as liquidity draws once the session closes.")
+sesLbl   = input.bool(true,  "Label sessions", group=gSes)
+sesLblSz = input.string("Tiny", "Session label size", options=["Tiny","Small","Normal"], group=gSes)
+sesKeep  = input.int(10, "Keep last N of each session", minval=1, maxval=60, group=gSes)
+sesTz    = input.string("America/New_York", "Session timezone", group=gSes)
+
+s1On  = input.bool(true, "Asia",     inline="s1", group=gSes)
+s1Txt = input.session("2000-0000",   "", inline="s1", group=gSes)
+s1Col = input.color(color.new(#787B86, 82), "", inline="s1", group=gSes)
+s2On  = input.bool(true, "London",   inline="s2", group=gSes)
+s2Txt = input.session("0200-0500",   "", inline="s2", group=gSes)
+s2Col = input.color(color.new(#2962FF, 82), "", inline="s2", group=gSes)
+s3On  = input.bool(true, "NY AM",    inline="s3", group=gSes)
+s3Txt = input.session("0700-1000",   "", inline="s3", group=gSes)
+s3Col = input.color(color.new(#00897B, 82), "", inline="s3", group=gSes)
+s4On  = input.bool(true, "NY PM",    inline="s4", group=gSes)
+s4Txt = input.session("1300-1600",   "", inline="s4", group=gSes)
+s4Col = input.color(color.new(#FF6D00, 82), "", inline="s4", group=gSes)
+
+// ===================== STRUCTURE — SHARED ====================================
+// A swing is confirmed when `length` bars exist either side of it. Bigger
+// length = more significant swing. The three tiers are the SAME algorithm run
+// at three scales, which is what makes external / internal / fractal agree
+// with each other instead of contradicting.
+gStr = "Structure — shared settings"
+stPrice  = input.bool(false, "Include price in structure labels", group=gStr, tooltip="Off = just 'HH'. On = 'HH 4058.30'.")
+stMark   = input.string("Dot", "Turning-point marker", options=["Dot","Dash","Cross","Triangle","None"], group=gStr)
+stKeep   = input.int(20, "Keep last N swings per tier", minval=2, maxval=100, group=gStr)
+stZig    = input.bool(true, "Draw connecting legs (zigzag)", group=gStr)
+
+// ---- EXTERNAL (major) -------------------------------------------------------
+gExt = "Structure — EXTERNAL (CAPITALS)"
+extOn    = input.bool(true, "Show external structure", group=gExt)
+extLen   = input.int(20, "Pivot length", minval=1, group=gExt, tooltip="Bars required either side of the swing. 20 = major turning points only.")
+extLblOn = input.bool(true, "Show labels", group=gExt)
+extBos   = input.bool(true, "Show BOS / CHoCH", group=gExt, tooltip="BOS = break of structure (trend continues). CHoCH = change of character (trend flipped). This is where you read the turn.")
+extUpC   = input.color(color.new(#089981, 0), "Bullish (HH / HL)", group=gExt)
+extDnC   = input.color(color.new(#F23645, 0), "Bearish (LH / LL)", group=gExt)
+extLblSz = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gExt)
+extW     = input.int(2, "Leg width", minval=1, maxval=4, group=gExt)
+extStyle = input.string("Solid", "Leg style", options=["Solid","Dashed","Dotted"], group=gExt)
+
+// ---- INTERNAL ---------------------------------------------------------------
+gInt = "Structure — internal (lowercase)"
+intOn    = input.bool(true, "Show internal structure", group=gInt)
+intLen   = input.int(5, "Pivot length", minval=1, group=gInt)
+intLblOn = input.bool(true, "Show labels", group=gInt)
+intBos   = input.bool(false, "Show BOS / CHoCH", group=gInt)
+intUpC   = input.color(color.new(#5B9CF6, 0), "Bullish (hh / hl)", group=gInt)
+intDnC   = input.color(color.new(#E1729B, 0), "Bearish (lh / ll)", group=gInt)
+intLblSz = input.string("Tiny", "Label size", options=["Tiny","Small","Normal"], group=gInt)
+intW     = input.int(1, "Leg width", minval=1, maxval=4, group=gInt)
+intStyle = input.string("Dashed", "Leg style", options=["Solid","Dashed","Dotted"], group=gInt)
+
+// ---- FRACTAL ----------------------------------------------------------------
+gFrc = "Structure — Fractal (F prefix)"
+frcOn    = input.bool(false, "Show fractal structure", group=gFrc)
+frcLen   = input.int(2, "Pivot length", minval=1, group=gFrc, tooltip="2 = classic Williams fractal. This is the noisiest tier — off by default.")
+frcLblOn = input.bool(true, "Show labels", group=gFrc)
+frcBos   = input.bool(false, "Show BOS / CHoCH", group=gFrc)
+frcUpC   = input.color(color.new(#9C27B0, 0), "Bullish (F HH / F HL)", group=gFrc)
+frcDnC   = input.color(color.new(#FF9800, 0), "Bearish (F LH / F LL)", group=gFrc)
+frcLblSz = input.string("Tiny", "Label size", options=["Tiny","Small","Normal"], group=gFrc)
+frcW     = input.int(1, "Leg width", minval=1, maxval=4, group=gFrc)
+frcStyle = input.string("Dotted", "Leg style", options=["Solid","Dashed","Dotted"], group=gFrc)
+
+// ===================== TRENDLINES ============================================
+gTl = "Trendlines"
+tlOn   = input.bool(false, "Show trendlines", group=gTl)
+tlSrc  = input.string("External", "Built from", options=["External","Internal","Fractal"], group=gTl, tooltip="Which structure tier's swings anchor the trendlines. External = the big, meaningful lines.")
+tlExt  = input.int(30, "Extend right (bars)", minval=0, maxval=500, group=gTl)
+tlUpC  = input.color(color.new(#089981, 0), "Support (rising lows)", group=gTl)
+tlDnC  = input.color(color.new(#F23645, 0), "Resistance (falling highs)", group=gTl)
+tlW    = input.int(1, "Width", minval=1, maxval=4, group=gTl)
+tlStyle= input.string("Solid", "Style", options=["Solid","Dashed","Dotted"], group=gTl)
+tlOnly = input.bool(true, "Only draw when sloping the right way", group=gTl, tooltip="A 'support' line built from two FALLING lows is not support. On = skip those, so what you see is always a real trendline.")
+
+// ===================== DASHBOARD =============================================
+gDash = "Bias dashboard"
+dashOn   = input.bool(true, "Show dashboard", group=gDash)
+dashPos  = input.string("Top right", "Position", options=["Top right","Top left","Bottom right","Bottom left","Middle right"], group=gDash)
+dashSz   = input.string("Small", "Text size", options=["Tiny","Small","Normal"], group=gDash)
+dashLen  = input.int(5, "Structure pivot length used per timeframe", minval=1, group=gDash, tooltip="The swing length the dashboard uses on EVERY timeframe row. 5 reads structure; raise it for a slower, more major read.")
+dashBias = input.bool(true, "Show session / daily / weekly bias rows", group=gDash)
+d1On  = input.bool(true,  "1m",  inline="d1", group=gDash)
+d5On  = input.bool(true,  "5m",  inline="d1", group=gDash)
+d15On = input.bool(true,  "15m", inline="d1", group=gDash)
+d30On = input.bool(true,  "30m", inline="d2", group=gDash)
+d60On = input.bool(true,  "1H",  inline="d2", group=gDash)
+d240On= input.bool(true,  "4H",  inline="d2", group=gDash)
+dDOn  = input.bool(true,  "D",   inline="d3", group=gDash)
+dWOn  = input.bool(true,  "W",   inline="d3", group=gDash)
+dBull = input.color(color.new(#089981, 0), "Bullish", inline="dc", group=gDash)
+dBear = input.color(color.new(#F23645, 0), "Bearish", inline="dc", group=gDash)
+dFlat = input.color(color.new(#787B86, 0), "Range",   inline="dc", group=gDash)
+
+// ===================== HELPERS ===============================================
+f_sz(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+f_ls(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+f_pos(string s) =>
+    s == "Top left" ? position.top_left : s == "Bottom right" ? position.bottom_right : s == "Bottom left" ? position.bottom_left : s == "Middle right" ? position.middle_right : position.top_right
+TRANSP = color.new(color.gray, 100)
+
+sym = syminfo.tickerid
+
+// ===================== STRUCTURE ENGINE ======================================
+// State is held in 3-slot arrays: 0 = fractal, 1 = internal, 2 = external.
+// Arrays are reference types, so a plain function can mutate them — that keeps
+// one implementation serving all three tiers instead of three copies that
+// drift out of sync.
+var array<float> stPH    = array.new<float>(3, na)   // last confirmed swing high
+var array<float> stPL    = array.new<float>(3, na)   // last confirmed swing low
+var array<int>   stPHbar = array.new<int>(3, na)
+var array<int>   stPLbar = array.new<int>(3, na)
+var array<float> stPvY   = array.new<float>(3, na)   // last pivot of EITHER kind
+var array<int>   stPvX   = array.new<int>(3, na)     //   (anchor for the zigzag)
+var array<int>   stTrend = array.new<int>(3, 0)      // 1 bull, -1 bear, 0 unset
+var array<bool>  stBrkH  = array.new<bool>(3, false) // last high already broken?
+var array<bool>  stBrkL  = array.new<bool>(3, false)
+// previous swing values, needed to classify HH vs LH / HL vs LL
+var array<float> stPrevH = array.new<float>(3, na)
+var array<float> stPrevL = array.new<float>(3, na)
+// trendline anchors: the two most recent highs and lows per tier
+var array<float> tlH1 = array.new<float>(3, na)
+var array<float> tlH2 = array.new<float>(3, na)
+var array<int>   tlH1x= array.new<int>(3, na)
+var array<int>   tlH2x= array.new<int>(3, na)
+var array<float> tlL1 = array.new<float>(3, na)
+var array<float> tlL2 = array.new<float>(3, na)
+var array<int>   tlL1x= array.new<int>(3, na)
+var array<int>   tlL2x= array.new<int>(3, na)
+
+// drawn-object stores, pruned per tier
+var array<label> dLbl0 = array.new<label>()
+var array<label> dLbl1 = array.new<label>()
+var array<label> dLbl2 = array.new<label>()
+var array<line>  dLeg0 = array.new<line>()
+var array<line>  dLeg1 = array.new<line>()
+var array<line>  dLeg2 = array.new<line>()
+
+f_pushLbl(int tier, label lb) =>
+    a = tier == 0 ? dLbl0 : tier == 1 ? dLbl1 : dLbl2
+    array.push(a, lb)
+    while array.size(a) > stKeep * 3
+        label.delete(array.shift(a))
+f_pushLeg(int tier, line ln) =>
+    a = tier == 0 ? dLeg0 : tier == 1 ? dLeg1 : dLeg2
+    array.push(a, ln)
+    while array.size(a) > stKeep * 2
+        line.delete(array.shift(a))
+
+f_markStyle() =>
+    stMark == "Dash" ? label.style_label_center : stMark == "Cross" ? label.style_cross : stMark == "Triangle" ? label.style_triangleup : label.style_circle
+
+// Draw one confirmed swing: marker + label + zigzag leg, and update the tier's
+// state so the NEXT swing can be classified against it.
+f_swing(int tier, bool isHigh, float y, int x, bool lblOn, color cUp, color cDn, string lblSz, int wid, string sty) =>
+    prev = isHigh ? array.get(stPrevH, tier) : array.get(stPrevL, tier)
+    // HH / LH for highs, HL / LL for lows. First swing of a tier has no
+    // predecessor, so it is left unlabelled rather than guessed at.
+    higher = na(prev) ? na : y > prev
+    string core = na(higher) ? "" : isHigh ? (higher ? "HH" : "LH") : (higher ? "HL" : "LL")
+    bull = na(higher) ? isHigh : (isHigh ? higher : higher)
+    col  = core == "HH" or core == "HL" ? cUp : core == "" ? color.gray : cDn
+    // tier styling: fractal prefixes, internal lowercase, external CAPITALS
+    txt = core == "" ? "" : tier == 0 ? "F " + core : tier == 1 ? str.lower(core) : core
+    if stPrice and txt != ""
+        txt := txt + " " + str.tostring(y, format.mintick)
+    // connecting leg from the previous pivot of either kind
+    if stZig and not na(array.get(stPvX, tier))
+        ln = line.new(array.get(stPvX, tier), array.get(stPvY, tier), x, y, xloc=xloc.bar_index, color=color.new(col, 35), width=wid, style=f_ls(sty))
+        f_pushLeg(tier, ln)
+    // turning-point marker
+    if stMark != "None"
+        mk = label.new(x, y, stMark == "Dash" ? "—" : "", xloc=xloc.bar_index, style=f_markStyle(), color=col, textcolor=col, size=size.tiny, yloc=isHigh ? yloc.abovebar : yloc.belowbar)
+        f_pushLbl(tier, mk)
+    if lblOn and txt != ""
+        lb = label.new(x, y, txt, xloc=xloc.bar_index, style=isHigh ? label.style_label_down : label.style_label_up, color=TRANSP, textcolor=col, size=f_sz(lblSz))
+        f_pushLbl(tier, lb)
+    // roll state forward
+    if isHigh
+        array.set(stPrevH, tier, y)
+        array.set(stPH, tier, y)
+        array.set(stPHbar, tier, x)
+        array.set(stBrkH, tier, false)
+        array.set(tlH2, tier, array.get(tlH1, tier))
+        array.set(tlH2x, tier, array.get(tlH1x, tier))
+        array.set(tlH1, tier, y)
+        array.set(tlH1x, tier, x)
+    else
+        array.set(stPrevL, tier, y)
+        array.set(stPL, tier, y)
+        array.set(stPLbar, tier, x)
+        array.set(stBrkL, tier, false)
+        array.set(tlL2, tier, array.get(tlL1, tier))
+        array.set(tlL2x, tier, array.get(tlL1x, tier))
+        array.set(tlL1, tier, y)
+        array.set(tlL1x, tier, x)
+    array.set(stPvY, tier, y)
+    array.set(stPvX, tier, x)
+
+// BOS / CHoCH. A close beyond the last confirmed swing breaks it. If that break
+// runs WITH the existing trend it is a BOS; if it flips the trend it is a CHoCH
+// — that is the turn the trader actually wants flagged.
+f_break(int tier, bool en, color cUp, color cDn, string lblSz) =>
+    lvlH = array.get(stPH, tier)
+    lvlL = array.get(stPL, tier)
+    if not na(lvlH) and close > lvlH and not array.get(stBrkH, tier)
+        array.set(stBrkH, tier, true)
+        was = array.get(stTrend, tier)
+        array.set(stTrend, tier, 1)
+        if en
+            tag = was == -1 ? "CHoCH" : "BOS"
+            ln = line.new(array.get(stPHbar, tier), lvlH, bar_index, lvlH, xloc=xloc.bar_index, color=cUp, width=1, style=line.style_dashed)
+            f_pushLeg(tier, ln)
+            lb = label.new(bar_index, lvlH, tier == 1 ? str.lower(tag) : tag, xloc=xloc.bar_index, style=label.style_label_down, color=TRANSP, textcolor=cUp, size=f_sz(lblSz))
+            f_pushLbl(tier, lb)
+    if not na(lvlL) and close < lvlL and not array.get(stBrkL, tier)
+        array.set(stBrkL, tier, true)
+        was = array.get(stTrend, tier)
+        array.set(stTrend, tier, -1)
+        if en
+            tag = was == 1 ? "CHoCH" : "BOS"
+            ln = line.new(array.get(stPLbar, tier), lvlL, bar_index, lvlL, xloc=xloc.bar_index, color=cDn, width=1, style=line.style_dashed)
+            f_pushLeg(tier, ln)
+            lb = label.new(bar_index, lvlL, tier == 1 ? str.lower(tag) : tag, xloc=xloc.bar_index, style=label.style_label_up, color=TRANSP, textcolor=cDn, size=f_sz(lblSz))
+            f_pushLbl(tier, lb)
+
+// pivots for all three tiers (lengths must be simple ints, so these are three
+// separate calls rather than a loop)
+phF = ta.pivothigh(frcLen, frcLen)
+plF = ta.pivotlow(frcLen, frcLen)
+phI = ta.pivothigh(intLen, intLen)
+plI = ta.pivotlow(intLen, intLen)
+phE = ta.pivothigh(extLen, extLen)
+plE = ta.pivotlow(extLen, extLen)
+
+if frcOn and not na(phF)
+    f_swing(0, true,  phF, bar_index - frcLen, frcLblOn, frcUpC, frcDnC, frcLblSz, frcW, frcStyle)
+if frcOn and not na(plF)
+    f_swing(0, false, plF, bar_index - frcLen, frcLblOn, frcUpC, frcDnC, frcLblSz, frcW, frcStyle)
+if intOn and not na(phI)
+    f_swing(1, true,  phI, bar_index - intLen, intLblOn, intUpC, intDnC, intLblSz, intW, intStyle)
+if intOn and not na(plI)
+    f_swing(1, false, plI, bar_index - intLen, intLblOn, intUpC, intDnC, intLblSz, intW, intStyle)
+if extOn and not na(phE)
+    f_swing(2, true,  phE, bar_index - extLen, extLblOn, extUpC, extDnC, extLblSz, extW, extStyle)
+if extOn and not na(plE)
+    f_swing(2, false, plE, bar_index - extLen, extLblOn, extUpC, extDnC, extLblSz, extW, extStyle)
+
+if frcOn
+    f_break(0, frcBos, frcUpC, frcDnC, frcLblSz)
+if intOn
+    f_break(1, intBos, intUpC, intDnC, intLblSz)
+if extOn
+    f_break(2, extBos, extUpC, extDnC, extLblSz)
+
+// ===================== TRENDLINES ============================================
+// Anchored on the last two confirmed swings of the chosen tier, so the line is
+// always drawn through real, non-repainting pivots.
+tlTier = tlSrc == "Internal" ? 1 : tlSrc == "Fractal" ? 0 : 2
+var line tlUp = na
+var line tlDn = na
+if tlOn
+    h1 = array.get(tlH1, tlTier)
+    h2 = array.get(tlH2, tlTier)
+    h1x = array.get(tlH1x, tlTier)
+    h2x = array.get(tlH2x, tlTier)
+    if not na(h1) and not na(h2) and h1x != h2x
+        ok = not tlOnly or h1 < h2       // resistance needs FALLING highs
+        if not na(tlDn)
+            line.delete(tlDn)
+        if ok
+            slope = (h1 - h2) / (h1x - h2x)
+            tlDn := line.new(h2x, h2, bar_index + tlExt, h1 + slope * (bar_index + tlExt - h1x), xloc=xloc.bar_index, color=tlDnC, width=tlW, style=f_ls(tlStyle))
+    l1 = array.get(tlL1, tlTier)
+    l2 = array.get(tlL2, tlTier)
+    l1x = array.get(tlL1x, tlTier)
+    l2x = array.get(tlL2x, tlTier)
+    if not na(l1) and not na(l2) and l1x != l2x
+        ok = not tlOnly or l1 > l2       // support needs RISING lows
+        if not na(tlUp)
+            line.delete(tlUp)
+        if ok
+            slope = (l1 - l2) / (l1x - l2x)
+            tlUp := line.new(l2x, l2, bar_index + tlExt, l1 + slope * (bar_index + tlExt - l1x), xloc=xloc.bar_index, color=tlUpC, width=tlW, style=f_ls(tlStyle))
+
+// ===================== SESSIONS ==============================================
+var array<box>   sBox = array.new<box>()
+var array<label> sLab = array.new<label>()
+var array<line>  sLin = array.new<line>()
+
+// per-session live state (4 slots)
+var array<float> sHi  = array.new<float>(4, na)
+var array<float> sLo  = array.new<float>(4, na)
+var array<int>   sSt  = array.new<int>(4, na)
+var array<box>   sCur = array.new<box>(4, na)
+
+f_sesTrack(int i, bool en, string txt, color col, string name) =>
+    inSes = en and sesOn and not na(time(timeframe.period, txt, sesTz))
+    started = inSes and not (na(time(timeframe.period, txt, sesTz)[1]) or not en)
+    if inSes
+        if na(array.get(sSt, i)) or na(time(timeframe.period, txt, sesTz)[1])
+            // first bar of this session instance
+            array.set(sSt, i, bar_index)
+            array.set(sHi, i, high)
+            array.set(sLo, i, low)
+            b = sesBox ? box.new(bar_index, high, bar_index, low, xloc=xloc.bar_index, border_color=TRANSP, bgcolor=col) : na
+            array.set(sCur, i, b)
+            if not na(b)
+                array.push(sBox, b)
+            if sesLbl
+                lb = label.new(bar_index, high, name, xloc=xloc.bar_index, style=label.style_label_down, color=TRANSP, textcolor=color.new(col, 0), size=f_sz(sesLblSz))
+                array.push(sLab, lb)
+        else
+            array.set(sHi, i, math.max(nz(array.get(sHi, i), high), high))
+            array.set(sLo, i, math.min(nz(array.get(sLo, i), low), low))
+        bx = array.get(sCur, i)
+        if not na(bx)
+            box.set_top(bx, array.get(sHi, i))
+            box.set_bottom(bx, array.get(sLo, i))
+            box.set_right(bx, bar_index)
+    else if not na(array.get(sSt, i))
+        // session just closed — optionally leave its high/low as levels
+        if sesHL and sesOn and en
+            hv = array.get(sHi, i)
+            lv = array.get(sLo, i)
+            st = array.get(sSt, i)
+            if not na(hv) and not na(lv) and not na(st)
+                array.push(sLin, line.new(st, hv, bar_index, hv, xloc=xloc.bar_index, color=color.new(col, 20), width=1, style=line.style_dotted))
+                array.push(sLin, line.new(st, lv, bar_index, lv, xloc=xloc.bar_index, color=color.new(col, 20), width=1, style=line.style_dotted))
+        array.set(sSt, i, na)
+        array.set(sCur, i, na)
+    while array.size(sBox) > sesKeep * 4
+        box.delete(array.shift(sBox))
+    while array.size(sLab) > sesKeep * 4
+        label.delete(array.shift(sLab))
+    while array.size(sLin) > sesKeep * 8
+        line.delete(array.shift(sLin))
+
+if sesOn
+    f_sesTrack(0, s1On, s1Txt, s1Col, "Asia")
+    f_sesTrack(1, s2On, s2Txt, s2Col, "London")
+    f_sesTrack(2, s3On, s3Txt, s3Col, "NY AM")
+    f_sesTrack(3, s4On, s4Txt, s4Col, "NY PM")
+
+// ===================== DASHBOARD =============================================
+// Structure bias per timeframe: price closing beyond the last confirmed swing
+// high turns it bullish, beyond the last swing low turns it bearish. Same idea
+// as the on-chart engine, evaluated on each requested timeframe.
+f_tfBias(int L) =>
+    ph = ta.pivothigh(L, L)
+    pl = ta.pivotlow(L, L)
+    var float lph = na
+    var float lpl = na
+    var int t = 0
+    if not na(ph)
+        lph := ph
+    if not na(pl)
+        lpl := pl
+    if not na(lph) and close > lph
+        t := 1
+    if not na(lpl) and close < lpl
+        t := -1
+    t
+
+// each request.security is gated by its own toggle so disabled rows cost nothing
+int b1 = 0
+int b5 = 0
+int b15 = 0
+int b30 = 0
+int b60 = 0
+int b240 = 0
+int bD = 0
+int bW = 0
+if dashOn and d1On
+    b1 := request.security(sym, "1", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if dashOn and d5On
+    b5 := request.security(sym, "5", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if dashOn and d15On
+    b15 := request.security(sym, "15", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if dashOn and d30On
+    b30 := request.security(sym, "30", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if dashOn and d60On
+    b60 := request.security(sym, "60", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if dashOn and d240On
+    b240 := request.security(sym, "240", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if dashOn and dDOn
+    bD := request.security(sym, "1D", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if dashOn and dWOn
+    bW := request.security(sym, "1W", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+
+// simple open-relative bias for the session / day / week rows
+dOpen = request.security(sym, "1D", open, lookahead=barmerge.lookahead_off)
+wOpen = request.security(sym, "1W", open, lookahead=barmerge.lookahead_off)
+var float curSesOpen = na
+anySes = (s1On and not na(time(timeframe.period, s1Txt, sesTz))) or (s2On and not na(time(timeframe.period, s2Txt, sesTz))) or (s3On and not na(time(timeframe.period, s3Txt, sesTz))) or (s4On and not na(time(timeframe.period, s4Txt, sesTz)))
+if anySes and not anySes[1]
+    curSesOpen := open
+if not anySes
+    curSesOpen := na
+
+f_word(int b) =>
+    b == 1 ? "BULLISH" : b == -1 ? "BEARISH" : "RANGE"
+f_col(int b) =>
+    b == 1 ? dBull : b == -1 ? dBear : dFlat
+
+var table dash = na
+if dashOn and barstate.islast
+    rows = 1 + (d1On?1:0) + (d5On?1:0) + (d15On?1:0) + (d30On?1:0) + (d60On?1:0) + (d240On?1:0) + (dDOn?1:0) + (dWOn?1:0) + (dashBias?4:0)
+    if na(dash)
+        dash := table.new(f_pos(dashPos), 2, 14, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    table.clear(dash, 0, 0, 1, 13)
+    bgh = color.new(color.gray, 85)
+    bgc = color.new(color.gray, 92)
+    table.cell(dash, 0, 0, "BIAS", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
+    table.cell(dash, 1, 0, "STRUCTURE", text_size=f_sz(dashSz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh)
+    r = 1
+    if dWOn
+        table.cell(dash, 0, r, "W",   text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(bW), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(bW), bgcolor=bgc)
+        r += 1
+    if dDOn
+        table.cell(dash, 0, r, "D",   text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(bD), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(bD), bgcolor=bgc)
+        r += 1
+    if d240On
+        table.cell(dash, 0, r, "4H",  text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(b240), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b240), bgcolor=bgc)
+        r += 1
+    if d60On
+        table.cell(dash, 0, r, "1H",  text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(b60), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b60), bgcolor=bgc)
+        r += 1
+    if d30On
+        table.cell(dash, 0, r, "30m", text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(b30), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b30), bgcolor=bgc)
+        r += 1
+    if d15On
+        table.cell(dash, 0, r, "15m", text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(b15), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b15), bgcolor=bgc)
+        r += 1
+    if d5On
+        table.cell(dash, 0, r, "5m",  text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(b5), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b5), bgcolor=bgc)
+        r += 1
+    if d1On
+        table.cell(dash, 0, r, "1m",  text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgc)
+        table.cell(dash, 1, r, f_word(b1), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b1), bgcolor=bgc)
+        r += 1
+    if dashBias
+        sB = na(curSesOpen) ? 0 : close > curSesOpen ? 1 : close < curSesOpen ? -1 : 0
+        dB = na(dOpen) ? 0 : close > dOpen ? 1 : close < dOpen ? -1 : 0
+        wB = na(wOpen) ? 0 : close > wOpen ? 1 : close < wOpen ? -1 : 0
+        eB = array.get(stTrend, 2)
+        table.cell(dash, 0, r, "Session", text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgh)
+        table.cell(dash, 1, r, na(curSesOpen) ? "—" : f_word(sB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=na(curSesOpen) ? dFlat : f_col(sB), bgcolor=bgh)
+        r += 1
+        table.cell(dash, 0, r, "Daily",   text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgh)
+        table.cell(dash, 1, r, f_word(dB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(dB), bgcolor=bgh)
+        r += 1
+        table.cell(dash, 0, r, "Weekly",  text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgh)
+        table.cell(dash, 1, r, f_word(wB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(wB), bgcolor=bgh)
+        r += 1
+        table.cell(dash, 0, r, "Chart structure", text_size=f_sz(dashSz), text_halign=text.align_left,  text_color=color.gray, bgcolor=bgh)
+        table.cell(dash, 1, r, f_word(eB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(eB), bgcolor=bgh)
