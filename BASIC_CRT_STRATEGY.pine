@@ -106,6 +106,17 @@ setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSe
 setupLineW = input.int(2, "TP / SL line width", minval=1, maxval=4, group=gSet, tooltip="Raise for bolder, more visible TP / SL dotted lines.")
 setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 
+// ---- BREAK-EVEN -------------------------------------------------------------
+// Trigger = the range EQ (50% of the CRT range). When price reaches it the stop
+// is MOVED — both on the chart and on the live order, so the backtest measures
+// exactly what you see. Stop goes to entry +/- a share of the original risk.
+gBE = "Break-even"
+beOn   = input.bool(true, "Break-even at range EQ", group=gBE, tooltip="Draws a BE line at the range equilibrium AND moves the real stop when price reaches it. The original SL fades and a second stop line appears.")
+beTxt  = input.string("BE", "BE label text", options=["BE","Break-even"], group=gBE)
+bePct  = input.float(10, "BE stop offset (% of original risk)", minval=0, maxval=90, step=1, group=gBE, tooltip="How far past ENTRY the moved stop sits, as a share of the original entry-to-SL distance. Longs above entry, shorts below. 10% locks a small win rather than a pure scratch and scales across instruments.")
+beCol  = input.color(color.new(#FF9800, 0), "Break-even colour", group=gBE)
+beFade = input.int(70, "Faded original SL transparency", minval=0, maxval=95, group=gBE)
+
 // ===================== STRATEGY EXECUTION ====================================
 // Turns each fired CRT setup into a real order. One position at a time
 // (pyramiding=0). Entry at the reclaim close, bracketed by the setup's SL & TP.
@@ -376,6 +387,14 @@ var array<int>   sDir     = array.new<int>()
 var array<float> sTp      = array.new<float>()
 var array<float> sSl      = array.new<float>()
 var array<bool>  sDone    = array.new<bool>()
+// break-even state, one slot per setup (parallel to the stores above)
+var array<float> sBeLvl   = array.new<float>()
+var array<float> sBeStop  = array.new<float>()
+var array<bool>  sBeArm   = array.new<bool>()
+var array<line>  sBeLn    = array.new<line>()
+var array<label> sBeLb    = array.new<label>()
+var array<line>  sBeSLn   = array.new<line>()
+var array<label> sBeSLb   = array.new<label>()
 // live setup watches: each = a closed HTF range being watched for a sweep+reclaim
 var array<float> wHi   = array.new<float>()
 var array<float> wLo   = array.new<float>()
@@ -404,7 +423,7 @@ f_sweepScan(float aLoV, float aHiV, float bLoV, float bHiV, float bC, int bT, bo
 
 // build one setup (RR-gated): entry line + short titled TP/SL, tracked for hits.
 // Anchored on the live entry bar (bar_index) with a fixed short projection.
-f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
+f_makeSetup(int dir, float entry, float sl, float tp, float eqLvl, int startX) =>
     risk = math.abs(entry - sl)
     rew  = math.abs(tp - entry)
     rr   = risk > 0 ? rew / risk : 0.0
@@ -432,6 +451,27 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
         array.push(sTp, tp)
         array.push(sSl, sl)
         array.push(sDone, false)
+        // ---- break-even leg ----
+        // Only valid when the range EQ genuinely sits BETWEEN entry and target.
+        float beLvl = na
+        float beStp = na
+        if beOn and ((dir == 1 and eqLvl > entry and eqLvl < tp) or (dir == -1 and eqLvl < entry and eqLvl > tp))
+            beLvl := eqLvl
+            beStp := dir == 1 ? entry + risk * bePct / 100.0 : entry - risk * bePct / 100.0
+        line  lnB = na
+        label lbB = na
+        if not na(beLvl)
+            lnB := line.new(startX, beLvl, shortEndX, beLvl, color=beCol, width=setupLineW, style=line.style_dotted)
+            lbB := label.new(shortEndX, beLvl, beTxt, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=beCol, size=size.tiny)
+        line  naLn = na
+        label naLb = na
+        array.push(sBeLvl, beLvl)
+        array.push(sBeStop, beStp)
+        array.push(sBeArm, false)
+        array.push(sBeLn, lnB)
+        array.push(sBeLb, lbB)
+        array.push(sBeSLn, naLn)
+        array.push(sBeSLb, naLb)
         while array.size(sEntryLn) > setKeep
             line.delete(array.shift(sEntryLn))
             line.delete(array.shift(sTpLn))
@@ -439,6 +479,21 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
             label.delete(array.shift(sTpLb))
             label.delete(array.shift(sSlLb))
             label.delete(array.shift(sRrLb))
+            lnBo = array.shift(sBeLn)
+            if not na(lnBo)
+                line.delete(lnBo)
+            lbBo = array.shift(sBeLb)
+            if not na(lbBo)
+                label.delete(lbBo)
+            lnSo = array.shift(sBeSLn)
+            if not na(lnSo)
+                line.delete(lnSo)
+            lbSo = array.shift(sBeSLb)
+            if not na(lbSo)
+                label.delete(lbSo)
+            array.shift(sBeLvl)
+            array.shift(sBeStop)
+            array.shift(sBeArm)
             array.shift(sDir)
             array.shift(sTp)
             array.shift(sSl)
@@ -582,6 +637,8 @@ if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na
 int   sigDir = 0
 float sigSl  = na
 float sigTp  = na
+float sigBeL = na
+float sigBeS = na
 float biasEma = na
 if showSetup and biasOn
     biasEma := request.security(sym, biasTf, ta.ema(close, biasLen)[1], lookahead=barmerge.lookahead_off)
@@ -643,7 +700,7 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
                 // fired == the setup passed the RR + direction gate (same as what's drawn)
                 bool fired = false
                 if biasOk
-                    fired := f_makeSetup(wdir, close, sl, tp, bar_index)
+                    fired := f_makeSetup(wdir, close, sl, tp, eqR, bar_index)
                 else
                     dRejBias += 1
                 if fired
@@ -654,6 +711,10 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
                     sigDir := wdir
                     sigSl  := sl
                     sigTp  := tp
+                    // carry the BE plan onto the order, same rule as the drawing
+                    if beOn and ((wdir == 1 and eqR > close and eqR < tp) or (wdir == -1 and eqR < close and eqR > tp))
+                        sigBeL := eqR
+                        sigBeS := wdir == 1 ? close + math.abs(close - sl) * bePct / 100.0 : close - math.abs(close - sl) * bePct / 100.0
                 array.remove(wHi, k)
                 array.remove(wLo, k)
                 array.remove(wDead, k)
@@ -662,6 +723,14 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
                 array.remove(wExtH, k)
                 array.remove(wExtL, k)
         k := k - 1
+
+// ---- live position state, so break-even can move the real stop --------------
+var int   pDir    = 0
+var float pSl     = na
+var float pTp     = na
+var float pBeLvl  = na
+var float pBeStop = na
+var bool  pBeArm  = false
 
 // ---- execute the trade for this bar's signal (one position at a time) --------
 inWin = not useWindow or not na(time(timeframe.period, sessWin, sessTz))
@@ -675,9 +744,43 @@ if tradeOn and sigDir != 0 and strategy.position_size == 0 and inWin
         if sigDir == 1 and allowLong
             strategy.entry("Long", strategy.long, qty=qty)
             strategy.exit("Exit Long", "Long", stop=sigSl, limit=sigTp)
+            pDir := 1
+            pSl := sigSl
+            pTp := sigTp
+            pBeLvl := sigBeL
+            pBeStop := sigBeS
+            pBeArm := false
         else if sigDir == -1 and allowShort
             strategy.entry("Short", strategy.short, qty=qty)
             strategy.exit("Exit Short", "Short", stop=sigSl, limit=sigTp)
+            pDir := -1
+            pSl := sigSl
+            pTp := sigTp
+            pBeLvl := sigBeL
+            pBeStop := sigBeS
+            pBeArm := false
+
+// ---- BREAK-EVEN on the LIVE position ----------------------------------------
+// Once price reaches the EQ trigger, re-issue strategy.exit with the moved stop.
+// Same id, so the emulator replaces the resting order rather than stacking one.
+// Arming is checked BEFORE re-issuing, and the original stop stays in force for
+// the bar that arms it — a bar that both reaches the EQ and trades through the
+// original stop resolves as a stop-out, since intrabar order is unknowable.
+if strategy.position_size != 0 and pDir != 0
+    wasArmed = pBeArm
+    if beOn and not wasArmed and not na(pBeLvl) and (pDir == 1 ? high >= pBeLvl : low <= pBeLvl)
+        pBeArm := true
+    effSl = pBeArm and not na(pBeStop) ? pBeStop : pSl
+    if pDir == 1
+        strategy.exit("Exit Long", "Long", stop=effSl, limit=pTp)
+    else
+        strategy.exit("Exit Short", "Short", stop=effSl, limit=pTp)
+else if strategy.position_size == 0
+    pDir := 0
+    pBeArm := false
+    pBeLvl := na
+    pBeStop := na
+
 // optional: flatten when the session window closes
 if useWindow and closeEod and strategy.position_size != 0 and not inWin
     strategy.close_all("Window end")
@@ -690,14 +793,40 @@ if showSetup and array.size(sTp) > 0
             dir = array.get(sDir, j)
             tpv = array.get(sTp, j)
             slv = array.get(sSl, j)
+            // stop in force for THIS bar is the one already armed at bar open
+            wasArm = array.get(sBeArm, j)
+            eff = wasArm ? array.get(sBeStop, j) : slv
             hitTp = dir == 1 ? high >= tpv : low  <= tpv
-            hitSl = dir == 1 ? low  <= slv : high >= slv
+            hitSl = dir == 1 ? low  <= eff : high >= eff
             if hitSl
-                label.set_text(array.get(sSlLb, j), "SL ✗")
+                if wasArm
+                    lbS = array.get(sBeSLb, j)
+                    if not na(lbS)
+                        label.set_text(lbS, beTxt + " ✓")
+                else
+                    label.set_text(array.get(sSlLb, j), "SL ✗")
                 array.set(sDone, j, true)
             else if hitTp
                 label.set_text(array.get(sTpLb, j), "TP ✓")
                 array.set(sDone, j, true)
+            else
+                bl = array.get(sBeLvl, j)
+                if not na(bl) and not wasArm and (dir == 1 ? high >= bl : low <= bl)
+                    array.set(sBeArm, j, true)
+                    oln = array.get(sSlLn, j)
+                    if not na(oln)
+                        line.set_color(oln, color.new(setupSlC, beFade))
+                    olb = array.get(sSlLb, j)
+                    if not na(olb)
+                        label.set_textcolor(olb, color.new(setupSlC, beFade))
+                    bs = array.get(sBeStop, j)
+                    if not na(bs) and not na(oln)
+                        x1 = line.get_x1(oln)
+                        x2 = line.get_x2(oln)
+                        nln = line.new(x1, bs, x2, bs, color=beCol, width=setupLineW, style=line.style_dotted)
+                        nlb = label.new(x2, bs, beTxt + " SL", style=label.style_label_left, color=color.new(color.gray, 100), textcolor=beCol, size=size.tiny)
+                        array.set(sBeSLn, j, nln)
+                        array.set(sBeSLb, j, nlb)
         j := j - 1
 
 // ---- diagnostics table: never guess why there are no trades again -----------
