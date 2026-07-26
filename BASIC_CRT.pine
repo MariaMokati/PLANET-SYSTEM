@@ -109,13 +109,41 @@ showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=g
 setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. Target the opposite extreme; SL beyond the sweep.")
 setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Same live logic but the sweep+reclaim may complete up to two candles after the range instead of one.")
 setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet)
-slPadAtr   = input.float(0.1, "SL pad (x ATR of range TF)", minval=0, step=0.05, group=gSet)
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
 setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSet)
 setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSet)
 setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSet)
 setupLineW = input.int(2, "TP / SL line width", minval=1, maxval=4, group=gSet, tooltip="Raise for bolder, more visible TP / SL dotted lines.")
 setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
+
+// ---- STOP LOSS --------------------------------------------------------------
+// How the stop is built, in three independent stages:
+//
+//   1. ANCHOR   — the price the stop sits beyond. "Swept extreme" is the furthest
+//                 price traded past the range since the range candle closed (the
+//                 actual sweep wick). "Range boundary" is the CRT high/low itself,
+//                 which is TIGHTER — it ignores how far the wick ran.
+//   2. PAD      — how far past the anchor, in units you choose. The original
+//                 behaviour was 0.1 x ATR of the range TF, which on a 4H gold
+//                 range is only a point or two — thin enough that an ordinary
+//                 retest of the swept level takes the stop out.
+//   3. MINIMUM  — an absolute floor measured from ENTRY, as a share of the range
+//                 height. This is the one that fixes "stopped out then it ran":
+//                 when the reclaim closes right next to the swept wick the
+//                 entry-to-stop distance collapses to almost nothing, and no pad
+//                 measured from the wick can rescue it. The floor is measured
+//                 from where you actually got in.
+//
+// WIDER STOPS COST RR. The target is fixed at the opposite range extreme, so
+// every point added to the stop lowers the natural R:R and some setups will stop
+// passing "Only show setups with RR >=". That is a real trade-off, not a bug.
+gSL = "Stop loss"
+slRef     = input.string("Swept extreme", "Stop anchored to", options=["Swept extreme","Range boundary"], group=gSL, tooltip="Swept extreme = beyond the actual sweep wick (default, and what CRT normally means). Range boundary = beyond the CRT high/low itself, ignoring how far the wick ran — tighter, and usually the wrong direction if you are being wicked out.")
+slPadMode = input.string("ATR of range TF", "Stop pad units", options=["ATR of range TF","ATR of chart TF","% of range height","% of price","Points"], group=gSL, tooltip="What the pad amount below is measured in. '% of range height' scales itself to every instrument and timeframe automatically, which is usually the easiest to reason about.")
+slPadVal  = input.float(0.1, "Stop pad amount", minval=0, step=0.05, group=gSL, tooltip="0.1 with 'ATR of range TF' reproduces the original behaviour. With '% of range height' try 10-15. With 'Points' this is in the 'Price per point' unit set in the Equilibrium group.")
+slMinOn   = input.bool(false, "Enforce a minimum stop distance", group=gSL, tooltip="Turn this on first if you are being stopped out by noise. It guarantees a floor on entry-to-stop distance regardless of how close the reclaim closed to the swept wick.")
+slMinPct  = input.float(20, "Minimum stop (% of range height)", minval=0, maxval=200, step=1, group=gSL, tooltip="Measured from ENTRY, not from the wick. 20 means the stop is never closer than a fifth of the CRT range height. Raise it until the noise stops taking you out; watch the setup count fall as RR drops.")
+slBuffTk  = input.float(0, "Extra buffer (ticks)", minval=0, step=1, group=gSL, tooltip="Flat spread allowance added on top of everything else. Useful on wide-spread instruments where the stop sits exactly on a level everyone can see.")
 
 // ---- TIME-OF-DAY FILTER -----------------------------------------------------
 // Two independent windows, both entered in whatever timezone you pick (default
@@ -382,6 +410,8 @@ cOpenT = request.security(sym, tfIn, time[1], lookahead=barmerge.lookahead_off)
 tfMs   = timeframe.in_seconds(tfIn) * 1000
 // range-TF ATR for stop padding. The range itself = the last closed candle (cHigh/cLow).
 atrTf = request.security(sym, tfIn, ta.atr(14)[1], lookahead=barmerge.lookahead_off)
+// chart-TF ATR — an alternative pad unit, and the tolerance for equal highs/lows
+atrChart = ta.atr(14)
 
 var array<line> hiA   = array.new<line>()
 var array<line> loA   = array.new<line>()
@@ -469,6 +499,18 @@ f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float 
                     f_sweepMark(false, swT, bHiV, tfName)
             else if brEn
                 f_breakMark(true, brT, bHiV, tfName)
+
+// how far past the stop anchor to sit, in whichever unit is selected, plus the
+// flat tick buffer. rngH is the height of the CRT range this setup came from, so
+// the "% of range height" mode scales itself to the instrument and timeframe.
+f_slPad(float rngH) =>
+    ptSzSl = pointSize > 0 ? pointSize : syminfo.mintick
+    base = slPadMode == "ATR of range TF"   ? slPadVal * nz(atrTf, 0) :
+           slPadMode == "ATR of chart TF"   ? slPadVal * nz(atrChart, 0) :
+           slPadMode == "% of range height" ? slPadVal / 100.0 * rngH :
+           slPadMode == "% of price"        ? slPadVal / 100.0 * close :
+           slPadVal * ptSzSl
+    base + slBuffTk * syminfo.mintick
 
 // build one setup (RR-gated): entry line + short titled TP/SL, tracked for hits.
 // Anchored on the live entry bar (bar_index) with a fixed short projection.
@@ -704,7 +746,6 @@ if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na
         array.shift(wExtL)
 
 if showSetup and barstate.isconfirmed and array.size(wHi) > 0
-    pad = slPadAtr * nz(atrTf, 0)
     k = array.size(wHi) - 1
     while k >= 0
         if time > array.get(wDead, k)
@@ -731,7 +772,17 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             canL = swL and close > lo   // swept the low,  now reclaimed back inside
             wdir = canS and canL ? (close < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
             if wdir != 0 and setupTimeOk
-                sl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
+                rngH = hi - lo
+                pad  = f_slPad(rngH)
+                // anchor: the swept wick, or the range boundary if you want the
+                // stop to ignore how far the sweep actually ran
+                anchor = wdir == -1 ? (slRef == "Range boundary" ? hi : array.get(wExtH, k)) : (slRef == "Range boundary" ? lo : array.get(wExtL, k))
+                float sl = wdir == -1 ? anchor + pad : anchor - pad
+                // floor measured from ENTRY, so a reclaim that closes right on
+                // top of the swept wick still gets a survivable stop
+                if slMinOn
+                    minD = slMinPct / 100.0 * rngH
+                    sl := wdir == -1 ? math.max(sl, close + minD) : math.min(sl, close - minD)
                 tp = wdir == -1 ? lo : hi
                 f_makeSetup(wdir, close, sl, tp, eqR, bar_index)
                 array.remove(wHi, k)
@@ -898,7 +949,6 @@ if showOB
     f_maintainT(obD, obDm, obDh, false, obDnC)
 
 // ===================== OPTIONAL: Swing S/R + Equal H/L ========================
-atrRef = ta.atr(14)
 srUseTF = srTF == "" ? timeframe.period : srTF
 [srPh, srPl] = request.security(sym, srUseTF, [ta.pivothigh(srLen, srLen), ta.pivotlow(srLen, srLen)], lookahead=barmerge.lookahead_off)
 var float lastPH = na
@@ -926,7 +976,7 @@ if not na(srPh)
             line.delete(resLine)
         resLine := line.new(bar_index - srLen, srPh, bar_index, srPh, color=resCol, width=2)
         resBar  := bar_index - srLen
-    if showEQL and not na(prevPH) and math.abs(lastPH - prevPH) <= eqlTol * atrRef
+    if showEQL and not na(prevPH) and math.abs(lastPH - prevPH) <= eqlTol * atrChart
         if not na(eqhLine)
             line.delete(eqhLine)
         eqhLine := line.new(bar_index - srLen, math.max(lastPH, prevPH), bar_index, math.max(lastPH, prevPH), color=eqlCol, style=line.style_dotted)
@@ -939,7 +989,7 @@ if not na(srPl)
             line.delete(supLine)
         supLine := line.new(bar_index - srLen, srPl, bar_index, srPl, color=supCol, width=2)
         supBar  := bar_index - srLen
-    if showEQL and not na(prevPL) and math.abs(lastPL - prevPL) <= eqlTol * atrRef
+    if showEQL and not na(prevPL) and math.abs(lastPL - prevPL) <= eqlTol * atrChart
         if not na(eqlLine)
             line.delete(eqlLine)
         eqlLine := line.new(bar_index - srLen, math.min(lastPL, prevPL), bar_index, math.min(lastPL, prevPL), color=eqlCol, style=line.style_dotted)
