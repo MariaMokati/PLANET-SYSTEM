@@ -20,7 +20,7 @@
 // back, only once the bars either side exist). Nothing is drawn on a forming
 // bar, so labels never move after they appear.
 // =============================================================================
-indicator("Basic Structure", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+indicator("Basic Market Structure", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
 
 // ===================== SESSIONS ==============================================
 gSes = "Sessions"
@@ -188,8 +188,9 @@ f_swing(int tier, bool isHigh, float y, int x, bool lblOn, color cUp, color cDn,
     prev = isHigh ? array.get(stPrevH, tier) : array.get(stPrevL, tier)
     // HH / LH for highs, HL / LL for lows. First swing of a tier has no
     // predecessor, so it is left unlabelled rather than guessed at.
-    higher = na(prev) ? na : y > prev
-    string core = na(higher) ? "" : isHigh ? (higher ? "HH" : "LH") : (higher ? "HL" : "LL")
+    // 0 = no predecessor yet, 1 = higher than previous swing, -1 = lower.
+    int cls = na(prev) ? 0 : y > prev ? 1 : -1
+    string core = cls == 0 ? "" : isHigh ? (cls == 1 ? "HH" : "LH") : (cls == 1 ? "HL" : "LL")
     bull = na(higher) ? isHigh : (isHigh ? higher : higher)
     col  = core == "HH" or core == "HL" ? cUp : core == "" ? color.gray : cDn
     // tier styling: fractal prefixes, internal lowercase, external CAPITALS
