@@ -733,6 +733,10 @@ var float pBeStop = na
 var bool  pBeArm  = false
 
 // ---- execute the trade for this bar's signal (one position at a time) --------
+// NOTE: with process_orders_on_close the entry fills at THIS bar's close, so
+// strategy.position_size is still 0 for the rest of this bar's script run. The
+// justEnt flag stops the "flat" branch below from wiping the BE plan we just set.
+bool justEnt = false
 inWin = not useWindow or not na(time(timeframe.period, sessWin, sessTz))
 if tradeOn and sigDir != 0 and strategy.position_size == 0 and inWin
     stopDist = math.abs(close - sigSl)
@@ -750,6 +754,7 @@ if tradeOn and sigDir != 0 and strategy.position_size == 0 and inWin
             pBeLvl := sigBeL
             pBeStop := sigBeS
             pBeArm := false
+            justEnt := true
         else if sigDir == -1 and allowShort
             strategy.entry("Short", strategy.short, qty=qty)
             strategy.exit("Exit Short", "Short", stop=sigSl, limit=sigTp)
@@ -759,6 +764,7 @@ if tradeOn and sigDir != 0 and strategy.position_size == 0 and inWin
             pBeLvl := sigBeL
             pBeStop := sigBeS
             pBeArm := false
+            justEnt := true
 
 // ---- BREAK-EVEN on the LIVE position ----------------------------------------
 // Once price reaches the EQ trigger, re-issue strategy.exit with the moved stop.
@@ -775,7 +781,7 @@ if strategy.position_size != 0 and pDir != 0
         strategy.exit("Exit Long", "Long", stop=effSl, limit=pTp)
     else
         strategy.exit("Exit Short", "Short", stop=effSl, limit=pTp)
-else if strategy.position_size == 0
+else if strategy.position_size == 0 and not justEnt
     pDir := 0
     pBeArm := false
     pBeLvl := na
