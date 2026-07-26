@@ -88,6 +88,26 @@ setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSe
 setupLineW = input.int(2, "TP / SL line width", minval=1, maxval=4, group=gSet, tooltip="Raise for bolder, more visible TP / SL dotted lines.")
 setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 
+// ---- TIME-OF-DAY FILTER -----------------------------------------------------
+// Two independent windows, both entered in whatever timezone you pick (default
+// South African time, SAST = UTC+2), both individually switchable:
+//   BLOCK  — setups whose reclaim bar falls inside this window are suppressed.
+//   ALLOW  — when on, ONLY setups inside this window are shown.
+// Leaving both off = every setup shows, exactly as before. Turning both on is
+// legal: the block window wins on any overlap.
+// The watch itself is NOT consumed, so a range that sweeps inside a blocked
+// window can still fire later when price reclaims inside an allowed one.
+gTime = "Setup time filter"
+tfltOn  = input.bool(false, "Enable setup time filter", group=gTime, tooltip="Master switch. Off = setups show at all hours (original behaviour).")
+tfltTz  = input.string("Africa/Johannesburg", "Timezone for the windows below", options=["Africa/Johannesburg","America/New_York","Europe/London","Asia/Tokyo","UTC","Exchange"], group=gTime, tooltip="Times are read in this zone. Africa/Johannesburg = SAST (UTC+2), so you type the hours exactly as you see them locally.")
+blkOn   = input.bool(true,  "Block setups in this window", group=gTime, tooltip="Suppresses setups that trigger inside the window — e.g. the 19:00–00:00 SAST dead zone.")
+blkSess = input.session("1900-0000", "Blocked window", group=gTime, tooltip="Default 1900-0000 = 7pm to midnight SAST.")
+alwOn   = input.bool(false, "Only show setups in this window", group=gTime, tooltip="When on, everything OUTSIDE this window is hidden. Use it to isolate Asia through the New York volatility window.")
+alwSess = input.session("0300-0700", "Allowed window", group=gTime, tooltip="Default 0300-0700 = 3am to 7am SAST (Asia into the New York volatility run).")
+tfltDays= input.string("1234567", "Days the windows apply to", group=gTime, tooltip="1=Sunday … 7=Saturday. Leave as 1234567 for every day.")
+tfltShade = input.bool(false, "Shade the blocked hours on the chart", group=gTime)
+tfltShadeC= input.color(color.new(color.red, 92), "Blocked-hours shade", group=gTime)
+
 // ---- BREAK-EVEN -------------------------------------------------------------
 // The range EQ (50% of the CRT range) is the trigger. When price reaches it the
 // stop is moved to just past entry, locking in a small profit instead of a true
@@ -561,6 +581,19 @@ if showSweep and swpWOn
     [al,ah,bl,bh,bc,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
     f_sweepScan(al, ah, bl, bh, bc, int(bt), not na(bt) and bt != bt[1])
 
+// ===================== SETUP TIME FILTER =====================================
+// Evaluated on the CURRENT chart bar — i.e. the bar the reclaim happens on, which
+// is the bar the trade would actually start on. A blocked bar does NOT consume the
+// watch: if the same range is still swept when an allowed bar arrives, the setup
+// fires then instead of being lost.
+tzUse   = tfltTz == "Exchange" ? syminfo.timezone : tfltTz
+daysUse = tfltDays == "" ? "1234567" : tfltDays
+inBlk   = not na(time(timeframe.period, blkSess + ":" + daysUse, tzUse))
+inAlw   = not na(time(timeframe.period, alwSess + ":" + daysUse, tzUse))
+// Block wins on overlap. With the master switch off nothing is filtered.
+setupTimeOk = not tfltOn or ((not (blkOn and inBlk)) and (not alwOn or inAlw))
+bgcolor(tfltOn and tfltShade and blkOn and inBlk ? tfltShadeC : na, title="Blocked hours")
+
 // ===================== OPTIONAL: CRT setups (live sweep → reclaim) ============
 // The range = the last CLOSED range-TF candle. The MOMENT it closes we arm a
 // watch and then track live chart-TF bars: when price sweeps the range high/low
@@ -612,7 +645,7 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             canS = swH and close < hi   // swept the high, now reclaimed back inside
             canL = swL and close > lo   // swept the low,  now reclaimed back inside
             wdir = canS and canL ? (close < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
-            if wdir != 0
+            if wdir != 0 and setupTimeOk
                 sl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
                 tp = wdir == -1 ? lo : hi
                 f_makeSetup(wdir, close, sl, tp, eqR, bar_index)
