@@ -505,11 +505,7 @@ f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float 
 // the "% of range height" mode scales itself to the instrument and timeframe.
 f_slPad(float rngH) =>
     ptSzSl = pointSize > 0 ? pointSize : syminfo.mintick
-    base = slPadMode == "ATR of range TF"   ? slPadVal * nz(atrTf, 0) :
-           slPadMode == "ATR of chart TF"   ? slPadVal * nz(atrChart, 0) :
-           slPadMode == "% of range height" ? slPadVal / 100.0 * rngH :
-           slPadMode == "% of price"        ? slPadVal / 100.0 * close :
-           slPadVal * ptSzSl
+    base = slPadMode == "ATR of range TF" ? slPadVal * nz(atrTf, 0) : slPadMode == "ATR of chart TF" ? slPadVal * nz(atrChart, 0) : slPadMode == "% of range height" ? slPadVal / 100.0 * rngH : slPadMode == "% of price" ? slPadVal / 100.0 * close : slPadVal * ptSzSl
     base + slBuffTk * syminfo.mintick
 
 // build one setup (RR-gated): entry line + short titled TP/SL, tracked for hits.
