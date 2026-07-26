@@ -88,6 +88,17 @@ setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSe
 setupLineW = input.int(2, "TP / SL line width", minval=1, maxval=4, group=gSet, tooltip="Raise for bolder, more visible TP / SL dotted lines.")
 setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 
+// ---- BREAK-EVEN -------------------------------------------------------------
+// The range EQ (50% of the CRT range) is the trigger. When price reaches it the
+// stop is moved to just past entry, locking in a small profit instead of a true
+// scratch. Marked with the same short dotted line + tiny label as TP / SL.
+gBE = "Break-even"
+beOn   = input.bool(true, "Break-even at range EQ", group=gBE, tooltip="Draws a BE line at the range equilibrium. When price reaches it, the stop moves to just past entry and a second stop line appears; the original SL fades out.")
+beTxt  = input.string("BE", "BE label text", options=["BE","Break-even"], group=gBE)
+bePct  = input.float(10, "BE stop offset (% of original risk)", minval=0, maxval=90, step=1, group=gBE, tooltip="How far past ENTRY the moved stop sits, as a share of the original entry-to-SL distance. Longs go above entry, shorts below. 10% locks in a small win rather than a pure scratch, and scales automatically across instruments.")
+beCol  = input.color(color.new(#FF9800, 0), "Break-even colour", group=gBE)
+beFade = input.int(70, "Faded original SL transparency", minval=0, maxval=95, group=gBE, tooltip="Once BE arms, the original stop line dims to this transparency so you can still see where it started.")
+
 // ===================== EQUILIBRIUM (all ranges) ==============================
 gEQ = "Equilibrium (all ranges)"
 showEqLn  = input.bool(true, "Show equilibrium line", group=gEQ)
@@ -339,6 +350,14 @@ var array<int>   sDir     = array.new<int>()
 var array<float> sTp      = array.new<float>()
 var array<float> sSl      = array.new<float>()
 var array<bool>  sDone    = array.new<bool>()
+// break-even state, one slot per setup (parallel to the stores above)
+var array<float> sBeLvl   = array.new<float>()   // trigger price (range EQ), na = no BE
+var array<float> sBeStop  = array.new<float>()   // where the stop moves to
+var array<bool>  sBeArm   = array.new<bool>()    // has the trigger been reached?
+var array<line>  sBeLn    = array.new<line>()    // the EQ trigger line
+var array<label> sBeLb    = array.new<label>()   // its "BE" tag
+var array<line>  sBeSLn   = array.new<line>()    // the moved stop line (drawn on arm)
+var array<label> sBeSLb   = array.new<label>()
 // live setup watches: each = a closed HTF range being watched for a sweep+reclaim
 var array<float> wHi   = array.new<float>()
 var array<float> wLo   = array.new<float>()
@@ -367,7 +386,7 @@ f_sweepScan(float aLoV, float aHiV, float bLoV, float bHiV, float bC, int bT, bo
 
 // build one setup (RR-gated): entry line + short titled TP/SL, tracked for hits.
 // Anchored on the live entry bar (bar_index) with a fixed short projection.
-f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
+f_makeSetup(int dir, float entry, float sl, float tp, float eqLvl, int startX) =>
     risk = math.abs(entry - sl)
     rew  = math.abs(tp - entry)
     rr   = risk > 0 ? rew / risk : 0.0
@@ -392,6 +411,29 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
         array.push(sTp, tp)
         array.push(sSl, sl)
         array.push(sDone, false)
+        // ---- break-even setup ----
+        // Only valid when the range EQ actually sits BETWEEN entry and target.
+        // If the reclaim let us in beyond the EQ there is nothing to arm, so the
+        // setup simply runs without a BE leg rather than triggering instantly.
+        float beLvl = na
+        float beStp = na
+        if beOn and ((dir == 1 and eqLvl > entry and eqLvl < tp) or (dir == -1 and eqLvl < entry and eqLvl > tp))
+            beLvl := eqLvl
+            beStp := dir == 1 ? entry + risk * bePct / 100.0 : entry - risk * bePct / 100.0
+        line  lnB = na
+        label lbB = na
+        if not na(beLvl)
+            lnB := line.new(startX, beLvl, shortEndX, beLvl, color=beCol, width=setupLineW, style=line.style_dotted)
+            lbB := label.new(shortEndX, beLvl, beTxt, style=label.style_label_left, color=color.new(color.gray, 100), textcolor=beCol, size=size.tiny)
+        array.push(sBeLvl, beLvl)
+        array.push(sBeStop, beStp)
+        array.push(sBeArm, false)
+        line  naLn = na
+        label naLb = na
+        array.push(sBeLn, lnB)
+        array.push(sBeLb, lbB)
+        array.push(sBeSLn, naLn)
+        array.push(sBeSLb, naLb)
         while array.size(sEntryLn) > setKeep
             line.delete(array.shift(sEntryLn))
             line.delete(array.shift(sTpLn))
@@ -399,6 +441,21 @@ f_makeSetup(int dir, float entry, float sl, float tp, int startX) =>
             label.delete(array.shift(sTpLb))
             label.delete(array.shift(sSlLb))
             label.delete(array.shift(sRrLb))
+            lnBo = array.shift(sBeLn)
+            if not na(lnBo)
+                line.delete(lnBo)
+            lbBo = array.shift(sBeLb)
+            if not na(lbBo)
+                label.delete(lbBo)
+            lnSo = array.shift(sBeSLn)
+            if not na(lnSo)
+                line.delete(lnSo)
+            lbSo = array.shift(sBeSLb)
+            if not na(lbSo)
+                label.delete(lbSo)
+            array.shift(sBeLvl)
+            array.shift(sBeStop)
+            array.shift(sBeArm)
             array.shift(sDir)
             array.shift(sTp)
             array.shift(sSl)
@@ -558,7 +615,7 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             if wdir != 0
                 sl = wdir == -1 ? array.get(wExtH, k) + pad : array.get(wExtL, k) - pad
                 tp = wdir == -1 ? lo : hi
-                f_makeSetup(wdir, close, sl, tp, bar_index)
+                f_makeSetup(wdir, close, sl, tp, eqR, bar_index)
                 array.remove(wHi, k)
                 array.remove(wLo, k)
                 array.remove(wDead, k)
@@ -576,14 +633,46 @@ if showSetup and array.size(sTp) > 0
             dir = array.get(sDir, j)
             tpv = array.get(sTp, j)
             slv = array.get(sSl, j)
+            // The stop in force for THIS bar is the one that was already armed
+            // when the bar opened. If a single bar both reaches the EQ trigger
+            // and trades through the original stop we cannot know the order, so
+            // we resolve it as a stop-out rather than flattering the result.
+            wasArm = array.get(sBeArm, j)
+            eff = wasArm ? array.get(sBeStop, j) : slv
             hitTp = dir == 1 ? high >= tpv : low  <= tpv
-            hitSl = dir == 1 ? low  <= slv : high >= slv
+            hitSl = dir == 1 ? low  <= eff : high >= eff
             if hitSl
-                label.set_text(array.get(sSlLb, j), "SL ✗")
+                if wasArm
+                    lbS = array.get(sBeSLb, j)
+                    if not na(lbS)
+                        label.set_text(lbS, beTxt + " ✓")
+                else
+                    label.set_text(array.get(sSlLb, j), "SL ✗")
                 array.set(sDone, j, true)
             else if hitTp
                 label.set_text(array.get(sTpLb, j), "TP ✓")
                 array.set(sDone, j, true)
+            else
+                // not resolved this bar — arm break-even if the EQ was reached
+                bl = array.get(sBeLvl, j)
+                if not na(bl) and not wasArm and (dir == 1 ? high >= bl : low <= bl)
+                    array.set(sBeArm, j, true)
+                    // fade the original stop so its starting point stays visible
+                    oln = array.get(sSlLn, j)
+                    if not na(oln)
+                        line.set_color(oln, color.new(setupSlC, beFade))
+                    olb = array.get(sSlLb, j)
+                    if not na(olb)
+                        label.set_textcolor(olb, color.new(setupSlC, beFade))
+                    // draw the moved stop alongside it, same length and style
+                    bs = array.get(sBeStop, j)
+                    if not na(bs) and not na(oln)
+                        x1 = line.get_x1(oln)
+                        x2 = line.get_x2(oln)
+                        nln = line.new(x1, bs, x2, bs, color=beCol, width=setupLineW, style=line.style_dotted)
+                        nlb = label.new(x2, bs, beTxt + " SL", style=label.style_label_left, color=color.new(color.gray, 100), textcolor=beCol, size=size.tiny)
+                        array.set(sBeSLn, j, nln)
+                        array.set(sBeSLb, j, nlb)
         j := j - 1
 
 // ===================== OPTIONAL: Daily / Weekly CRT ranges ====================
