@@ -217,8 +217,10 @@ setTpC    = input.color(color.new(color.green, 0), "Target", inline="sc2", group
 setSlC    = input.color(color.new(color.red, 0),   "Stop", inline="sc2", group=gSet)
 setEqC    = input.color(color.new(#FF9800, 0),     "Equilibrium", inline="sc2", group=gSet)
 setW      = input.int(2, "Line width", minval=1, maxval=4, group=gSet)
-setProj   = input.int(4, "Project lines N candles right", minval=1, maxval=20, group=gSet)
+setProj   = input.int(4, "Line length (chart bars)", minval=1, maxval=50, group=gSet, tooltip="Entry, stop, target and break-even are drawn as short dotted lines of this length, starting on the entry bar — the original layout. Measured in bars of the chart you are looking at, so they stay the same size whatever timeframe you view.")
+bePct     = input.float(10, "BE stop offset (% of original risk)", minval=0, maxval=90, step=1, group=gSet, tooltip="How far past ENTRY the stop moves once the equilibrium portion is banked. Longs go above entry, shorts below, so a scratch locks a small gain instead of nothing.")
 setKeep   = input.int(8, "Keep last N setups", minval=1, maxval=40, group=gSet)
+beFade    = input.int(70, "Faded original stop transparency", minval=0, maxval=95, group=gSet)
 
 // ===================== EQUILIBRIUM ===========================================
 gEQ       = "Equilibrium"
@@ -567,6 +569,10 @@ var array<line>  uEq = array.new<line>()
 var array<label> uEnL = array.new<label>()
 var array<label> uSlL = array.new<label>()
 var array<label> uTpL = array.new<label>()
+var array<label> uEqL = array.new<label>()
+var array<float> uBeS  = array.new<float>()   // where the stop goes once EQ is banked
+var array<line>  uBeLn = array.new<line>()
+var array<label> uBeLb = array.new<label>()
 var array<int>   uDir = array.new<int>()
 var array<float> uEnP = array.new<float>()
 var array<float> uSlP = array.new<float>()
@@ -575,20 +581,28 @@ var array<float> uEqP = array.new<float>()
 var array<bool>  uBE  = array.new<bool>()     // has the EQ portion been banked?
 var array<bool>  uDone = array.new<bool>()
 
-f_setupDraw(int dir, float entry, float stop, float tp, float eqv, int t0, int t1) =>
+f_setupDraw(int dir, float entry, float stop, float tp, float eqv, int x0) =>
     dirC = dir == 1 ? setLongC : setShortC
-    array.push(uEn, line.new(t0, entry, t1, entry, xloc=xloc.bar_time, color=dirC, width=setW, style=line.style_dotted))
-    array.push(uSl, line.new(t0, stop,  t1, stop,  xloc=xloc.bar_time, color=setSlC, width=setW, style=line.style_dotted))
-    array.push(uTp, line.new(t0, tp,    t1, tp,    xloc=xloc.bar_time, color=setTpC, width=setW, style=line.style_dotted))
-    array.push(uEq, tpPart ? line.new(t0, eqv, t1, eqv, xloc=xloc.bar_time, color=setEqC, width=setW, style=line.style_dotted) : na)
-    array.push(uEnL, label.new(t1, entry, dir == 1 ? "LE" : "SE", xloc=xloc.bar_time, style=label.style_label_left, color=HIDE, textcolor=dirC, size=size.tiny))
-    array.push(uSlL, label.new(t1, stop, "SL", xloc=xloc.bar_time, style=label.style_label_left, color=HIDE, textcolor=setSlC, size=size.tiny))
-    array.push(uTpL, label.new(t1, tp, "TP", xloc=xloc.bar_time, style=label.style_label_left, color=HIDE, textcolor=setTpC, size=size.tiny))
+    x1 = x0 + setProj
+    // entry / stop / target / BE all the SAME short dotted length, tiny tags at
+    // the right end. Drawn in BAR INDEX space so the length is four bars of the
+    // chart you are on, not four candles of the range timeframe.
+    array.push(uEn, line.new(x0, entry, x1, entry, color=dirC, width=setW, style=line.style_dotted))
+    array.push(uSl, line.new(x0, stop,  x1, stop,  color=setSlC, width=setW, style=line.style_dotted))
+    array.push(uTp, line.new(x0, tp,    x1, tp,    color=setTpC, width=setW, style=line.style_dotted))
+    array.push(uEq, tpPart ? line.new(x0, eqv, x1, eqv, color=setEqC, width=setW, style=line.style_dotted) : na)
+    array.push(uEnL, label.new(x1, entry, dir == 1 ? "LE" : "SE", style=label.style_label_left, color=HIDE, textcolor=dirC, size=size.tiny))
+    array.push(uSlL, label.new(x1, stop, "SL", style=label.style_label_left, color=HIDE, textcolor=setSlC, size=size.tiny))
+    array.push(uTpL, label.new(x1, tp, "TP", style=label.style_label_left, color=HIDE, textcolor=setTpC, size=size.tiny))
+    array.push(uEqL, tpPart ? label.new(x1, eqv, "BE", style=label.style_label_left, color=HIDE, textcolor=setEqC, size=size.tiny) : na)
     array.push(uDir, dir)
     array.push(uEnP, entry)
     array.push(uSlP, stop)
     array.push(uTpP, tp)
     array.push(uEqP, tpPart ? eqv : na)
+    array.push(uBeS, dir == 1 ? entry + math.abs(entry - stop) * bePct / 100.0 : entry - math.abs(entry - stop) * bePct / 100.0)
+    array.push(uBeLn, na)
+    array.push(uBeLb, na)
     array.push(uBE, false)
     array.push(uDone, false)
     while array.size(uEn) > setKeep
@@ -601,11 +615,21 @@ f_setupDraw(int dir, float entry, float stop, float tp, float eqv, int t0, int t
         label.delete(array.shift(uEnL))
         label.delete(array.shift(uSlL))
         label.delete(array.shift(uTpL))
+        eql = array.shift(uEqL)
+        if not na(eql)
+            label.delete(eql)
+        bln = array.shift(uBeLn)
+        if not na(bln)
+            line.delete(bln)
+        blb = array.shift(uBeLb)
+        if not na(blb)
+            label.delete(blb)
         array.shift(uDir)
         array.shift(uEnP)
         array.shift(uSlP)
         array.shift(uTpP)
         array.shift(uEqP)
+        array.shift(uBeS)
         array.shift(uBE)
         array.shift(uDone)
 
@@ -647,8 +671,7 @@ if showSetup and newRange and not na(rOpen) and not na(rClose)
                 eqv = (hiW + loW) / 2.0
                 ok = dir == -1 ? (stop > entry and tp < entry) : (stop < entry and tp > entry)
                 if ok
-                    t0 = math.min(bT + math.max(0, tfMs - chartMs), time)
-                    f_setupDraw(dir, entry, stop, tp, eqv, t0, bT + (setProj + 1) * tfMs)
+                    f_setupDraw(dir, entry, stop, tp, eqv, bar_index)
         k := k - 1
     // this candle now becomes a range in its own right
     array.push(wHi, rHigh)
@@ -668,30 +691,41 @@ if showSetup and array.size(uEn) > 0
     while j >= 0
         if not array.get(uDone, j)
             dir = array.get(uDir, j)
-            en  = array.get(uEnP, j)
             tp  = array.get(uTpP, j)
             eqv = array.get(uEqP, j)
             banked = array.get(uBE, j)
-            // once the EQ portion is banked the stop sits at entry
-            eff = banked ? en : array.get(uSlP, j)
+            // once the equilibrium portion is banked the stop sits just past entry
+            eff = banked ? array.get(uBeS, j) : array.get(uSlP, j)
             hitSl = dir == 1 ? low <= eff : high >= eff
             hitTp = dir == 1 ? high >= tp : low <= tp
             if hitSl
-                label.set_text(array.get(uSlL, j), banked ? "BE ✓" : "SL ✗")
                 if banked
-                    label.set_textcolor(array.get(uSlL, j), setEqC)
+                    lb = array.get(uBeLb, j)
+                    if not na(lb)
+                        label.set_text(lb, "BE ✓")
+                else
+                    label.set_text(array.get(uSlL, j), "SL ✗")
                 array.set(uDone, j, true)
             else if hitTp
                 label.set_text(array.get(uTpL, j), "TP ✓")
                 array.set(uDone, j, true)
             else if not banked and not na(eqv) and (dir == 1 ? high >= eqv : low <= eqv)
-                // part banked at equilibrium, stop moves to entry
+                // equilibrium reached: part banked, stop moves to just past entry.
+                // The original stop dims so its starting point stays visible.
                 array.set(uBE, j, true)
-                sl = array.get(uSl, j)
-                line.set_color(sl, color.new(setSlC, 70))
-                label.set_textcolor(array.get(uSlL, j), color.new(setSlC, 70))
-                eqn = array.get(uEq, j)
-                if not na(eqn)
-                    line.set_color(eqn, setEqC)
-                label.set_text(array.get(uEnL, j), (dir == 1 ? "LE" : "SE") + "  " + str.tostring(tpPartPct, "#") + "% @ EQ, stop to BE")
+                oln = array.get(uSl, j)
+                if not na(oln)
+                    line.set_color(oln, color.new(setSlC, beFade))
+                olb = array.get(uSlL, j)
+                if not na(olb)
+                    label.set_textcolor(olb, color.new(setSlC, beFade))
+                eqL = array.get(uEqL, j)
+                if not na(eqL)
+                    label.set_text(eqL, "BE ✓")
+                bs = array.get(uBeS, j)
+                if not na(bs) and not na(oln)
+                    x1 = int(line.get_x1(oln))
+                    x2 = int(line.get_x2(oln))
+                    array.set(uBeLn, j, line.new(x1, bs, x2, bs, color=setEqC, width=setW, style=line.style_dotted))
+                    array.set(uBeLb, j, label.new(x2, bs, "BE SL", style=label.style_label_left, color=HIDE, textcolor=setEqC, size=size.tiny))
         j := j - 1
