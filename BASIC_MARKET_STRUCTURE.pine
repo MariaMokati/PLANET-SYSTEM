@@ -1,6 +1,6 @@
 //@version=6
 // =============================================================================
-// BASIC MARKET STRUCTURE — Sessions · Structure · Trendlines · Bias Dashboard
+// BASIC MARKET STRUCTURE — Sessions · Structure · Trendlines · Bias Dashboards
 // -----------------------------------------------------------------------------
 // Companion to "Basic CRT". Every block is independently switchable.
 //
@@ -11,8 +11,15 @@
 //                 Fractal   F HH / F HL / …     (prefixed)
 //               Small dash on every turning point, clean text-only labels,
 //               BOS / CHoCH where the trend breaks or flips.
+//   TF TAGS     A turning point that is ALSO a confirmed swing on a higher
+//               timeframe gets that timeframe stamped on its label:
+//               "HH ·1H ·4H" = the same point is a 1H swing and a 4H swing.
 //   TRENDLINES  Last two confirmed swings — CURRENT WEEK ONLY.
-//   DASHBOARD   Structure bias 1m → W, plus session / daily / weekly.
+//   DASHBOARDS  Two independent panels:
+//                 1. Structure bias per timeframe, 1m → W
+//                 2. Session / Daily / Weekly bias + overall trend
+//               Both read CONFIRMED bars by default (no intra-bar repaint),
+//               matching the Basic CRT trend filter exactly.
 //
 // All labels use style_none: text only, no bubbles, no background boxes.
 // Non-repainting: swings are CONFIRMED pivots, placed `length` bars back.
@@ -89,6 +96,24 @@ frcW     = input.int(1, "Leg width", minval=1, maxval=4, group=gFrc)
 frcStyle = input.string("Dotted", "Leg style", options=["Solid","Dashed","Dotted"], group=gFrc)
 frcFade  = input.int(70, "Leg transparency", minval=0, maxval=95, group=gFrc)
 
+// ---- TIMEFRAME TAGS ---------------------------------------------------------
+// Stamps every swing label whose turning point is ALSO a confirmed swing on a
+// higher timeframe. "hh ·1H" = this internal swing is a 1H swing too.
+// "HH ·1H ·4H" = the point is a swing on both. Works on all three tiers.
+// Higher-timeframe pivots confirm LATER than chart-tier ones (tagLen bars of
+// THAT timeframe later), so stamps are applied retroactively to the label the
+// moment the higher timeframe confirms — the label text simply grows.
+gTag = "Structure — timeframe tags"
+tagOn   = input.bool(true, "Tag turning points with their timeframes", group=gTag, tooltip="Appends the timeframe to a swing label when the same point is a confirmed swing there. Tags attach to the swing labels, so the tier's labels must be on. Use timeframes AT or ABOVE your chart.")
+tag15On = input.bool(false, "15m", inline="tg1", group=gTag)
+tag30On = input.bool(false, "30m", inline="tg1", group=gTag)
+tag1On  = input.bool(true,  "1H",  inline="tg1", group=gTag)
+tag4On  = input.bool(true,  "4H",  inline="tg2", group=gTag)
+tagDOn  = input.bool(false, "D",   inline="tg2", group=gTag)
+tagWOn  = input.bool(false, "W",   inline="tg2", group=gTag)
+tagLen  = input.int(3, "Higher-timeframe pivot length", minval=1, group=gTag, tooltip="Bars either side of the swing on each tagged timeframe. 1H with length 3 = the point is the extreme of a 7-hour window. Raise for stricter tags.")
+tagTol  = input.int(2, "Price match tolerance (ticks)", minval=0, maxval=50, group=gTag, tooltip="How close in price the chart swing and the higher-timeframe swing must be to count as the same turning point.")
+
 // ===================== TRENDLINES ============================================
 gTl = "Trendlines"
 tlOn   = input.bool(true, "Show trendlines", group=gTl)
@@ -101,13 +126,13 @@ tlW    = input.int(1, "Width", minval=1, maxval=4, group=gTl)
 tlStyle= input.string("Solid", "Style", options=["Solid","Dashed","Dotted"], group=gTl)
 tlOnly = input.bool(true, "Only draw when sloping the right way", group=gTl, tooltip="Support needs RISING lows, resistance FALLING highs. Anything else is skipped.")
 
-// ===================== DASHBOARD =============================================
-gDash = "Bias dashboard"
-dashOn   = input.bool(true, "Show dashboard", group=gDash)
+// ===================== DASHBOARD 1 — STRUCTURE BIAS ==========================
+gDash = "Structure bias dashboard (top)"
+dashOn   = input.bool(true, "Show structure dashboard", group=gDash)
 dashPos  = input.string("Top right", "Position", options=["Top right","Top left","Bottom right","Bottom left","Middle right"], group=gDash)
 dashSz   = input.string("Small", "Text size", options=["Tiny","Small","Normal"], group=gDash)
 dashLen  = input.int(5, "Structure pivot length used per timeframe", minval=1, group=gDash)
-dashBias = input.bool(true, "Show session / daily / weekly rows", group=gDash)
+dashConf = input.bool(true, "Confirmed bars only (no repaint)", group=gDash, tooltip="Read each timeframe's bias from its last CLOSED bar — the same reading the Basic CRT trend filter uses, so the two tools always agree. Off = include the forming bar, which can flip mid-candle.")
 d1On  = input.bool(true,  "1m",  inline="d1", group=gDash)
 d5On  = input.bool(true,  "5m",  inline="d1", group=gDash)
 d15On = input.bool(true,  "15m", inline="d1", group=gDash)
@@ -119,6 +144,19 @@ dWOn  = input.bool(true,  "W",   inline="d3", group=gDash)
 dBull = input.color(color.new(#089981, 0), "Bullish", inline="dc", group=gDash)
 dBear = input.color(color.new(#F23645, 0), "Bearish", inline="dc", group=gDash)
 dFlat = input.color(color.new(#787B86, 0), "Range",   inline="dc", group=gDash)
+
+// ===================== DASHBOARD 2 — SESSION / DAILY / WEEKLY ================
+// Its own panel so it can sit at the bottom while the structure table sits at
+// the top. Every row individually switchable.
+gDash2 = "Bias dashboard (bottom)"
+dash2On  = input.bool(true, "Show bias dashboard", group=gDash2)
+dash2Pos = input.string("Bottom right", "Position", options=["Top right","Top left","Bottom right","Bottom left","Middle right"], group=gDash2)
+dash2Sz  = input.string("Small", "Text size", options=["Tiny","Small","Normal"], group=gDash2)
+d2Ses    = input.bool(true, "Session row", group=gDash2, tooltip="Price vs the open of the session currently running. Shows — when no session is active.")
+d2Day    = input.bool(true, "Daily row", group=gDash2, tooltip="Price vs today's open.")
+d2Wk     = input.bool(true, "Weekly row", group=gDash2, tooltip="Price vs this week's open.")
+d2Trd    = input.bool(true, "Overall trend row", group=gDash2, tooltip="Majority vote across every timeframe enabled in the structure dashboard: more bullish than bearish = BULLISH. Bias and trend are the same reading here — structure making higher highs and higher lows IS a bullish trend.")
+d2Chart  = input.bool(true, "Chart structure row", group=gDash2, tooltip="The external tier's trend on THIS chart. Shows — when external structure is switched off.")
 
 // ===================== HELPERS ===============================================
 f_sz(string s) =>
@@ -178,6 +216,80 @@ f_pushLeg(int tier, line ln) =>
     while array.size(a) > stKeep * 2
         line.delete(array.shift(a))
 
+// ---- timeframe-tag machinery ------------------------------------------------
+// Registry of every labelled swing, so a higher-timeframe pivot that confirms
+// LATER can still stamp it. regMk is a bitmask of which timeframes already
+// stamped that swing, so no label is ever stamped twice by the same timeframe.
+var array<label> regLb = array.new<label>()
+var array<float> regY  = array.new<float>()
+var array<int>   regT  = array.new<int>()
+var array<bool>  regHi = array.new<bool>()
+var array<int>   regMk = array.new<int>()
+// recent higher-timeframe pivots: price, candle open time, side, slot, duration
+var array<float> hpP  = array.new<float>()
+var array<int>   hpT  = array.new<int>()
+var array<bool>  hpHi = array.new<bool>()
+var array<int>   hpTf = array.new<int>()
+var array<int>   hpMs = array.new<int>()
+// dedupe: last processed pivot-candle time per (timeframe slot x side)
+var array<int> lastTagT = array.new<int>(12, 0)
+
+f_tagName(int s) =>
+    s == 0 ? "15m" : s == 1 ? "30m" : s == 2 ? "1H" : s == 3 ? "4H" : s == 4 ? "D" : "W"
+
+// One swing vs one higher-timeframe pivot: same side, same price within
+// tolerance, and the swing bar sits inside the pivot candle's time span.
+f_stamp(int ri, int pi) =>
+    if array.get(regHi, ri) == array.get(hpHi, pi)
+        pt = array.get(hpT, pi)
+        okT = array.get(regT, ri) >= pt and array.get(regT, ri) < pt + array.get(hpMs, pi)
+        if okT and math.abs(array.get(regY, ri) - array.get(hpP, pi)) <= tagTol * syminfo.mintick
+            slot = array.get(hpTf, pi)
+            bit = slot == 0 ? 1 : slot == 1 ? 2 : slot == 2 ? 4 : slot == 3 ? 8 : slot == 4 ? 16 : 32
+            mk = array.get(regMk, ri)
+            // Pine has no bitwise ops: int(mk / bit) % 2 tests the bit
+            if int(mk / bit) % 2 == 0
+                array.set(regMk, ri, mk + bit)
+                lb = array.get(regLb, ri)
+                if not na(lb)
+                    label.set_text(lb, label.get_text(lb) + " ·" + f_tagName(slot))
+
+// A higher-timeframe pivot (high and/or low) just confirmed: store it, then try
+// to stamp every registered swing. pivothigh through request.security repeats
+// its value for every chart bar inside the HTF bar, so arrivals are deduped on
+// the pivot candle's own open time.
+f_tagPivot(int slot, float hp, float lp, float pt0, int ms) =>
+    if not na(pt0)
+        pt = int(pt0)
+        if not na(hp) and pt != array.get(lastTagT, slot * 2)
+            array.set(lastTagT, slot * 2, pt)
+            array.push(hpP, hp)
+            array.push(hpT, pt)
+            array.push(hpHi, true)
+            array.push(hpTf, slot)
+            array.push(hpMs, ms)
+            if array.size(regLb) > 0
+                pi = array.size(hpP) - 1
+                for ri = 0 to array.size(regLb) - 1
+                    f_stamp(ri, pi)
+        if not na(lp) and pt != array.get(lastTagT, slot * 2 + 1)
+            array.set(lastTagT, slot * 2 + 1, pt)
+            array.push(hpP, lp)
+            array.push(hpT, pt)
+            array.push(hpHi, false)
+            array.push(hpTf, slot)
+            array.push(hpMs, ms)
+            if array.size(regLb) > 0
+                pi = array.size(hpP) - 1
+                for ri = 0 to array.size(regLb) - 1
+                    f_stamp(ri, pi)
+        while array.size(hpP) > 60
+            array.shift(hpP)
+            array.shift(hpT)
+            array.shift(hpHi)
+            array.shift(hpTf)
+            array.shift(hpMs)
+
 // One confirmed swing: dash marker + text-only label + optional leg, then roll
 // state forward so the NEXT swing classifies against this one.
 f_swing(int tier, bool isHigh, float y, int x, int t, bool lblOn, bool legOn, color cUp, color cDn, string lblSz, int wid, string sty, int fade) =>
@@ -199,6 +311,24 @@ f_swing(int tier, bool isHigh, float y, int x, int t, bool lblOn, bool legOn, co
             txt := txt + " " + str.tostring(y, format.mintick)
         lb = label.new(x, isHigh ? y + off : y - off, txt, style=label.style_none, textcolor=col, size=f_sz(lblSz))
         f_pushLbl(tier, lb)
+        // register for timeframe tagging: stamp now from higher-timeframe pivots
+        // that already confirmed, stay registered for ones that confirm later
+        if tagOn
+            array.push(regLb, lb)
+            array.push(regY, y)
+            array.push(regT, t)
+            array.push(regHi, isHigh)
+            array.push(regMk, 0)
+            if array.size(hpP) > 0
+                ri = array.size(regLb) - 1
+                for pi = 0 to array.size(hpP) - 1
+                    f_stamp(ri, pi)
+            while array.size(regLb) > stKeep * 3
+                array.shift(regLb)
+                array.shift(regY)
+                array.shift(regT)
+                array.shift(regHi)
+                array.shift(regMk)
     if isHigh
         array.set(stPrevH, tier, y)
         array.set(stPH, tier, y)
@@ -277,6 +407,27 @@ if intOn
     f_break(1, intBos, intUpC, intDnC, intLblSz)
 if extOn
     f_break(2, extBos, extUpC, extDnC, extLblSz)
+
+// ---- higher-timeframe pivot feeds for the tags ------------------------------
+// One request per enabled timeframe, gated so disabled ones cost nothing.
+if tagOn and tag15On
+    [hp, lp, pt] = request.security(sym, "15",  [ta.pivothigh(tagLen, tagLen), ta.pivotlow(tagLen, tagLen), time[tagLen]], lookahead=barmerge.lookahead_off)
+    f_tagPivot(0, hp, lp, pt, 900000)
+if tagOn and tag30On
+    [hp, lp, pt] = request.security(sym, "30",  [ta.pivothigh(tagLen, tagLen), ta.pivotlow(tagLen, tagLen), time[tagLen]], lookahead=barmerge.lookahead_off)
+    f_tagPivot(1, hp, lp, pt, 1800000)
+if tagOn and tag1On
+    [hp, lp, pt] = request.security(sym, "60",  [ta.pivothigh(tagLen, tagLen), ta.pivotlow(tagLen, tagLen), time[tagLen]], lookahead=barmerge.lookahead_off)
+    f_tagPivot(2, hp, lp, pt, 3600000)
+if tagOn and tag4On
+    [hp, lp, pt] = request.security(sym, "240", [ta.pivothigh(tagLen, tagLen), ta.pivotlow(tagLen, tagLen), time[tagLen]], lookahead=barmerge.lookahead_off)
+    f_tagPivot(3, hp, lp, pt, 14400000)
+if tagOn and tagDOn
+    [hp, lp, pt] = request.security(sym, "1D",  [ta.pivothigh(tagLen, tagLen), ta.pivotlow(tagLen, tagLen), time[tagLen]], lookahead=barmerge.lookahead_off)
+    f_tagPivot(4, hp, lp, pt, 86400000)
+if tagOn and tagWOn
+    [hp, lp, pt] = request.security(sym, "1W",  [ta.pivothigh(tagLen, tagLen), ta.pivotlow(tagLen, tagLen), time[tagLen]], lookahead=barmerge.lookahead_off)
+    f_tagPivot(5, hp, lp, pt, 604800000)
 
 // ===================== TRENDLINES — current week only ========================
 tlTier = tlSrc == "Internal" ? 1 : tlSrc == "Fractal" ? 0 : 2
@@ -371,7 +522,7 @@ f_ses(1, in2, s2Col, "London")
 f_ses(2, in3, s3Col, "NY AM")
 f_ses(3, in4, s4Col, "NY PM")
 
-// ===================== DASHBOARD =============================================
+// ===================== DASHBOARDS ============================================
 f_tfBias(int L) =>
     ph = ta.pivothigh(L, L)
     pl = ta.pivotlow(L, L)
@@ -388,6 +539,15 @@ f_tfBias(int L) =>
         t := -1
     t
 
+// Confirmed-bars wrapper: with dashConf on, every timeframe's bias is read from
+// its last CLOSED bar — the identical reading the Basic CRT trend filter uses,
+// so the dashboard and the filter can never disagree mid-candle.
+f_tfBiasC(int L) =>
+    t = f_tfBias(L)
+    dashConf ? t[1] : t
+
+// the bias fetches feed BOTH dashboards (structure rows + overall-trend row)
+biasNeed = dashOn or (dash2On and d2Trd)
 int b1 = 0
 int b5 = 0
 int b15 = 0
@@ -396,22 +556,22 @@ int b60 = 0
 int b240 = 0
 int bD = 0
 int bW = 0
-if dashOn and d1On
-    b1 := request.security(sym, "1", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
-if dashOn and d5On
-    b5 := request.security(sym, "5", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
-if dashOn and d15On
-    b15 := request.security(sym, "15", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
-if dashOn and d30On
-    b30 := request.security(sym, "30", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
-if dashOn and d60On
-    b60 := request.security(sym, "60", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
-if dashOn and d240On
-    b240 := request.security(sym, "240", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
-if dashOn and dDOn
-    bD := request.security(sym, "1D", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
-if dashOn and dWOn
-    bW := request.security(sym, "1W", f_tfBias(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and d1On
+    b1 := request.security(sym, "1", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and d5On
+    b5 := request.security(sym, "5", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and d15On
+    b15 := request.security(sym, "15", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and d30On
+    b30 := request.security(sym, "30", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and d60On
+    b60 := request.security(sym, "60", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and d240On
+    b240 := request.security(sym, "240", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and dDOn
+    bD := request.security(sym, "1D", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+if biasNeed and dWOn
+    bW := request.security(sym, "1W", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
 
 dOpen = request.security(sym, "1D", open, lookahead=barmerge.lookahead_off)
 wOpen = request.security(sym, "1W", open, lookahead=barmerge.lookahead_off)
@@ -427,11 +587,12 @@ f_word(int b) =>
 f_col(int b) =>
     b == 1 ? dBull : b == -1 ? dBear : dFlat
 
+// ---- Dashboard 1: structure bias per timeframe ------------------------------
 var table dash = na
 if dashOn and barstate.islast
     if na(dash)
-        dash := table.new(f_pos(dashPos), 2, 14, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
-    table.clear(dash, 0, 0, 1, 13)
+        dash := table.new(f_pos(dashPos), 2, 9, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    table.clear(dash, 0, 0, 1, 8)
     bgh = color.new(color.gray, 85)
     bgc = color.new(color.gray, 92)
     table.cell(dash, 0, 0, "BIAS", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
@@ -469,19 +630,41 @@ if dashOn and barstate.islast
         table.cell(dash, 0, r, "1m", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
         table.cell(dash, 1, r, f_word(b1), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b1), bgcolor=bgc)
         r += 1
-    if dashBias
+
+// ---- Dashboard 2: session / daily / weekly + overall trend ------------------
+var table dash2 = na
+if dash2On and barstate.islast
+    if na(dash2)
+        dash2 := table.new(f_pos(dash2Pos), 2, 6, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    table.clear(dash2, 0, 0, 1, 5)
+    bgh2 = color.new(color.gray, 85)
+    table.cell(dash2, 0, 0, "BIAS", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
+    table.cell(dash2, 1, 0, "STATE", text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh2)
+    r2 = 1
+    if d2Ses
         sB = na(sesOpen) ? 0 : close > sesOpen ? 1 : close < sesOpen ? -1 : 0
+        table.cell(dash2, 0, r2, "Session", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
+        table.cell(dash2, 1, r2, na(sesOpen) ? "—" : f_word(sB), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=na(sesOpen) ? dFlat : f_col(sB), bgcolor=bgh2)
+        r2 += 1
+    if d2Day
         dB = na(dOpen) ? 0 : close > dOpen ? 1 : close < dOpen ? -1 : 0
+        table.cell(dash2, 0, r2, "Daily", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
+        table.cell(dash2, 1, r2, f_word(dB), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_col(dB), bgcolor=bgh2)
+        r2 += 1
+    if d2Wk
         wB = na(wOpen) ? 0 : close > wOpen ? 1 : close < wOpen ? -1 : 0
+        table.cell(dash2, 0, r2, "Weekly", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
+        table.cell(dash2, 1, r2, f_word(wB), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_col(wB), bgcolor=bgh2)
+        r2 += 1
+    if d2Trd
+        // majority vote across every timeframe enabled in the structure table
+        tBu = (d1On and b1 == 1 ? 1 : 0) + (d5On and b5 == 1 ? 1 : 0) + (d15On and b15 == 1 ? 1 : 0) + (d30On and b30 == 1 ? 1 : 0) + (d60On and b60 == 1 ? 1 : 0) + (d240On and b240 == 1 ? 1 : 0) + (dDOn and bD == 1 ? 1 : 0) + (dWOn and bW == 1 ? 1 : 0)
+        tBe = (d1On and b1 == -1 ? 1 : 0) + (d5On and b5 == -1 ? 1 : 0) + (d15On and b15 == -1 ? 1 : 0) + (d30On and b30 == -1 ? 1 : 0) + (d60On and b60 == -1 ? 1 : 0) + (d240On and b240 == -1 ? 1 : 0) + (dDOn and bD == -1 ? 1 : 0) + (dWOn and bW == -1 ? 1 : 0)
+        oT = tBu > tBe ? 1 : tBe > tBu ? -1 : 0
+        table.cell(dash2, 0, r2, "Overall trend", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
+        table.cell(dash2, 1, r2, f_word(oT), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_col(oT), bgcolor=bgh2)
+        r2 += 1
+    if d2Chart
         eB = array.get(stTrend, 2)
-        table.cell(dash, 0, r, "Session", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
-        table.cell(dash, 1, r, na(sesOpen) ? "—" : f_word(sB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=na(sesOpen) ? dFlat : f_col(sB), bgcolor=bgh)
-        r += 1
-        table.cell(dash, 0, r, "Daily", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
-        table.cell(dash, 1, r, f_word(dB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(dB), bgcolor=bgh)
-        r += 1
-        table.cell(dash, 0, r, "Weekly", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
-        table.cell(dash, 1, r, f_word(wB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(wB), bgcolor=bgh)
-        r += 1
-        table.cell(dash, 0, r, "Chart structure", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
-        table.cell(dash, 1, r, f_word(eB), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(eB), bgcolor=bgh)
+        table.cell(dash2, 0, r2, "Chart structure", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
+        table.cell(dash2, 1, r2, extOn ? f_word(eB) : "—", text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=extOn ? f_col(eB) : dFlat, bgcolor=bgh2)
