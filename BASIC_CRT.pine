@@ -1,221 +1,65 @@
 //@version=6
 // =============================================================================
-// BASIC CRT  —  Candle Range Theory, any timeframe, any chart
+// BASIC CRT  —  STEP 1: RANGES
 // -----------------------------------------------------------------------------
-// CRT is timeframe-agnostic. A 30-minute candle is a range. So is a 4-hour, a
-// daily, a weekly. Each one gets swept, each one gets reclaimed, each one has an
-// opposite extreme to target. This script therefore runs UP TO THREE RANGE
-// TIMEFRAMES AT ONCE, and every one of them draws its own box.
+// Rebuilt from scratch, one layer at a time. This file does exactly ONE thing:
+// draw the CRT range of each closed candle on a chosen timeframe — its High, its
+// Low, and the 50% equilibrium between them — and nothing else.
 //
-// That last part is not decoration. A setup's stop and target are derived from
-// its range, so a level with no visible range behind it is unverifiable by eye.
-// Every setup here is titled with the timeframe that produced it and every one
-// of those timeframes is on the chart.
+// No sweeps. No breaks. No setups. No filters. No dashboards. Those get added
+// one at a time, each one verified on the chart before the next arrives.
 //
-// TWO TIMEFRAMES PER SETUP, deliberately separate:
-//   RANGE TF  — the candle whose high/low IS the range (up to three at once)
-//   ENTRY TF  — the timeframe the sweep-and-reclaim trigger is measured on
-// Leave the entry timeframe blank and the trigger runs on the chart's own bars,
-// which is the classic behaviour. Set it to 5m or 15m and the same setup draws
-// at the same prices whether you are looking at 1m, 2m, 3m, 5m or 15m — because
-// nothing in the calculation touches the chart any more.
+// THE RANGE
+//   Every closed candle on the range timeframe IS a range. Its high and low are
+//   the boundaries; the midpoint is equilibrium. The range is drawn from the
+//   candle's own open time and projected forward for N candles, which is the
+//   window in which that range still matters.
 //
-// OPTIONAL LAYERS (all default OFF): D/W ranges with premium/discount, FVGs and
-// order blocks across nine timeframes, sweeps, breaks, swing S/R, equal highs
-// and lows, supply/demand zones. Everything has its own switch.
-//
-// Non-repainting: HTF data via request.security on closed bars, lookahead_off.
+// Non-repainting: the range comes from the [1] offset of the range timeframe —
+// always a fully closed candle — fetched with lookahead_off. A range never
+// appears before its candle has finished, and never moves once drawn.
 // =============================================================================
-indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=100, max_boxes_count=500)
 
-// ===================== RANGES ================================================
-// Three independent range timeframes. Type any timeframe TradingView accepts:
-// 30, 60, 120, 240, 480, D, W, or anything else. Leave one blank to disable it.
-//   draw   — plot this range's High / Low / EQ box
-//   setups — generate CRT setups from this range
-// They are separate switches, so you can watch a Daily range for context while
-// only taking 1H setups. Each range has its own colour and every marker it
-// produces is titled with its timeframe.
-gRng = "Ranges"
-tf1    = input.timeframe("240", "Range 1", inline="r1", group=gRng)
-tf1Drw = input.bool(true,  "draw",   inline="r1", group=gRng)
-tf1Set = input.bool(true,  "setups", inline="r1", group=gRng)
-tf1Col = input.color(color.new(#2962FF, 0), "", inline="r1", group=gRng)
-tf2    = input.timeframe("60", "Range 2", inline="r2", group=gRng)
-tf2Drw = input.bool(true,  "draw",   inline="r2", group=gRng)
-tf2Set = input.bool(true,  "setups", inline="r2", group=gRng)
-tf2Col = input.color(color.new(#AA00FF, 0), "", inline="r2", group=gRng)
-tf3    = input.timeframe("", "Range 3", inline="r3", group=gRng)
-tf3Drw = input.bool(true,  "draw",   inline="r3", group=gRng)
-tf3Set = input.bool(true,  "setups", inline="r3", group=gRng)
-tf3Col = input.color(color.new(#00897B, 0), "", inline="r3", group=gRng)
-liveN  = input.int(3, "Keep each range live for N candles", minval=1, group=gRng)
-rTagTf = input.bool(true, "Title ranges with their timeframe", group=gRng, tooltip="On = '4H CRT High', 'D CRT Low'. Keep it on when more than one range is running.")
+// ===================== RANGE =================================================
+gRng   = "Range"
+tfIn   = input.timeframe("240", "Range timeframe", group=gRng, tooltip="Which candle defines each range. 240 = 4H. Any timeframe TradingView accepts works: 30, 60, 240, D, W.")
+liveN  = input.int(3, "Keep each range live for N candles", minval=1, group=gRng, tooltip="How far right the range is projected, measured in candles of the range timeframe.")
+tagTf  = input.bool(false, "Title the range with its timeframe", group=gRng, tooltip="On = '4H CRT High'. Off = 'CRT High'.")
 
-gVis   = "Visibility"
+// ===================== VISIBILITY ============================================
+gVis     = "Visibility"
 showPrev = input.bool(true,  "Show previous range", group=gVis)
 showHist = input.bool(false, "Show historical ranges", group=gVis)
-maxHist  = input.int(20, "Max historical ranges kept (per timeframe)", minval=1, maxval=200, group=gVis, tooltip="Counted separately for each range timeframe. With three running, lower this if the chart hits TradingView's 500-line ceiling.")
+maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
 
-gCol   = "Range box — Colours & Style"
-prevCol  = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
+// ===================== COLOURS & STYLE =======================================
+gCol     = "Range box — Colours & Style"
+curCol   = input.color(color.new(#2962FF, 0),     "Current range",    group=gCol)
+prevCol  = input.color(color.new(color.gray, 0),  "Previous range",   group=gCol)
 histCol  = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
 lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
-showShade= input.bool(true, "Shade inside the range", group=gCol)
-shadeCol = input.color(#2962FF, "Shade colour", group=gCol)
-shadeOpacity = input.int(90, "Shade opacity (0 = solid, 100 = invisible)", minval=0, maxval=100, group=gCol, tooltip="Higher = lighter / less vibrant than the range lines. The left side of the range stays open; the shading highlights it.")
-shadeDepth = input.float(1.0, "Shade depth (0 = none, 1 = full range)", minval=0, maxval=1, step=0.05, group=gCol)
+showShade    = input.bool(true, "Shade inside the range", group=gCol)
+shadeCol     = input.color(#2962FF, "Shade colour", group=gCol)
+shadeOpacity = input.int(90, "Shade opacity (0 = solid, 100 = invisible)", minval=0, maxval=100, group=gCol, tooltip="Higher = lighter than the range lines. The left side of the range stays open; the shading highlights it.")
+shadeDepth   = input.float(1.0, "Shade depth (0 = none, 1 = full range)", minval=0, maxval=1, step=0.05, group=gCol)
 
-gLab   = "CRT High / Low labels"
+// ===================== HIGH / LOW LABELS =====================================
+gLab      = "CRT High / Low labels"
 labDesign = input.string("Filled", "Label design", options=["Filled","Ghost","Tinted","Chip"], group=gLab)
 showHL    = input.bool(true,  "Show High / Low labels", group=gLab)
 shortHL   = input.bool(false, "Short names (CRT H / CRT L)", group=gLab)
 showPx    = input.bool(true,  "Show price in labels", group=gLab)
 labSz     = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gLab)
-labTxtCol = input.color(color.white, "Text colour (Filled)", group=gLab)
-
-// ===================== SWEEPS (optional, per timeframe) ======================
-// A valid sweep = a CLOSED candle wicks beyond the PRIOR candle's high/low but
-// CLOSES back inside it (liquidity taken then rejected). Detected independently
-// on each enabled timeframe, so a scalper can watch 15m sweeps only, a swing
-// trader only D/W, etc. Data loads only for enabled timeframes (memory-safe).
-gSwp = "Sweeps  (optional)"
-showSweep   = input.bool(false, "Show liquidity sweeps", group=gSwp)
-sweepDesign = input.string("Label", "Sweep marker design", options=["Label","Triangle S","Circle S"], group=gSwp, tooltip="Label = pointer tag ('Sweep'). Triangle S / Circle S = minimal shape with an 'S' on the sweeping candle.")
-sweepLbl    = input.bool(true,  "Show 'Sweep' text (Label design only)", group=gSwp)
-sweepTf     = input.bool(true,  "Title each sweep with its timeframe", group=gSwp, tooltip="On = '4H Sweep', '1H Sweep' etc, so you always know which timeframe produced the marker.")
-sweepAnchor = input.string("Candle close", "Sweep marker position", options=["Candle close","Candle open"], group=gSwp, tooltip="Where on the source candle the marker sits when you are on a lower chart TF. Candle close = the moment the sweep was confirmed. Candle open = the far left edge of that candle, which can float an hour or more away from the wick.")
-sweepSz     = input.string("Tiny", "Sweep marker size", options=["Tiny","Small","Normal"], group=gSwp)
-sweepUpC    = input.color(color.new(color.lime, 0), "Bullish sweep (swept lows)", group=gSwp)
-sweepDnC    = input.color(color.new(color.red, 0),  "Bearish sweep (swept highs)", group=gSwp)
-swp5On  = input.bool(false, "5m",  inline="sw1", group=gSwp)
-swp15On = input.bool(false, "15m", inline="sw1", group=gSwp)
-swp30On = input.bool(false, "30m", inline="sw1", group=gSwp)
-swp1On  = input.bool(false, "1H",  inline="sw2", group=gSwp)
-swp2On  = input.bool(false, "2H",  inline="sw2", group=gSwp)
-swp4On  = input.bool(true,  "4H",  inline="sw2", group=gSwp)
-swp8On  = input.bool(false, "8H",  inline="sw3", group=gSwp)
-swpDOn  = input.bool(false, "D",   inline="sw3", group=gSwp)
-swpWOn  = input.bool(false, "W",   inline="sw3", group=gSwp)
-swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=100, group=gSwp)
-
-// ===================== BREAKS (optional, per timeframe) ======================
-// Same two candles as a sweep, opposite outcome. A CLOSED candle takes out the
-// PRIOR candle's high/low and finishes BEYOND it — the level was broken, not
-// rejected. ONE TAG PER CANDLE: a candle that wicks through one side and expands
-// clean through the other is a single event, a break, not a break plus a phantom
-// sweep. Classification runs before display, so which layers you have switched
-// on never changes what a candle IS.
-gBrk = "Breaks  (optional)"
-showBreak   = input.bool(false, "Show breaks (closed BEYOND the level)", group=gBrk, tooltip="Master switch. A break = the candle took the prior high/low and finished past it instead of reclaiming.")
-brkStrict   = input.bool(true,  "Break needs the FULL body outside", group=gBrk, tooltip="ON: the candle's whole body — open AND close — must sit clear of the level. A body still straddling the level is indecision and gets no tag. OFF: the close alone being outside is enough.")
-breakDesign = input.string("Label", "Break marker design", options=["Label","Triangle B","Circle B"], group=gBrk)
-breakLbl    = input.bool(true,  "Show 'Break' text (Label design only)", group=gBrk)
-breakTf     = input.bool(true,  "Title each break with its timeframe", group=gBrk)
-breakAnchor = input.string("Candle close", "Break marker position", options=["Candle close","Candle open"], group=gBrk)
-breakSz     = input.string("Tiny", "Break marker size", options=["Tiny","Small","Normal"], group=gBrk)
-breakUpC    = input.color(color.new(color.aqua, 0),   "Bullish break (closed above the high)", group=gBrk)
-breakDnC    = input.color(color.new(color.orange, 0), "Bearish break (closed below the low)", group=gBrk)
-brk5On  = input.bool(false, "5m",  inline="br1", group=gBrk)
-brk15On = input.bool(false, "15m", inline="br1", group=gBrk)
-brk30On = input.bool(false, "30m", inline="br1", group=gBrk)
-brk1On  = input.bool(false, "1H",  inline="br2", group=gBrk)
-brk2On  = input.bool(false, "2H",  inline="br2", group=gBrk)
-brk4On  = input.bool(true,  "4H",  inline="br2", group=gBrk)
-brk8On  = input.bool(false, "8H",  inline="br3", group=gBrk)
-brkDOn  = input.bool(false, "D",   inline="br3", group=gBrk)
-brkWOn  = input.bool(false, "W",   inline="br3", group=gBrk)
-brKeep  = input.int(12, "Keep last N break markers (all TFs)", minval=1, maxval=100, group=gBrk)
-
-// ===================== CRT SETUPS ============================================
-// The range candle closes and a watch arms. Price sweeps the range high or low
-// and an ENTRY-TF bar closes back inside — that reclaim bar is the entry. Stop
-// beyond the swept extreme, target the opposite range extreme. Every setup is
-// titled with the range timeframe that produced it, and that range is drawn.
-gSet = "CRT setups  (optional)"
-showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP)", group=gSet)
-entryTf    = input.timeframe("", "Entry timeframe (blank = chart)", group=gSet, tooltip="The timeframe the sweep-and-reclaim is measured on. BLANK = the chart's own bars, so the setups change as you change chart timeframe. Set it to 5 or 15 and the SAME setup draws at the SAME prices on every chart timeframe, because nothing in the calculation touches the chart. That is what makes a 4H-range setup identical on 3m, 5m and 15m.")
-setTagTf   = input.bool(true, "Title setups with their range TF", group=gSet, tooltip="On = '4H LE', 'D TP'. Keep it on whenever more than one range generates setups.")
-setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Off = the sweep and reclaim must complete within one range candle of the range closing. On = allows one range candle longer.")
-setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet, tooltip="Filters on the natural R:R — the target is always the opposite range extreme. Set 0 to see every setup.")
-setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
-setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSet)
-setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSet)
-setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSet)
-setupLineW = input.int(2, "TP / SL line width", minval=1, maxval=4, group=gSet)
-setKeep    = input.int(12, "Keep last N setups", minval=1, maxval=60, group=gSet, tooltip="Shared across every range timeframe. With three ranges generating setups, raise this or the oldest get pruned quickly.")
-
-// ---- STOP LOSS --------------------------------------------------------------
-//   1. ANCHOR   — "Swept extreme" is the furthest price traded past the range
-//                 since it closed (the sweep wick). "Range boundary" is the CRT
-//                 high/low itself, which is tighter.
-//   2. PAD      — how far past the anchor, in units you choose.
-//   3. MINIMUM  — a floor measured from ENTRY, as a share of range height, for
-//                 when the reclaim closes right on top of the wick and the
-//                 entry-to-stop distance would otherwise collapse to nothing.
-// Wider stops lower the natural R:R, because the target is pinned to the
-// opposite extreme. That is a real trade-off, not a bug.
-gSL = "Stop loss"
-slRef     = input.string("Swept extreme", "Stop anchored to", options=["Swept extreme","Range boundary"], group=gSL)
-slPadMode = input.string("ATR of range TF", "Stop pad units", options=["ATR of range TF","ATR of chart TF","% of range height","% of price","Points"], group=gSL, tooltip="'ATR of range TF' uses the ATR of whichever range timeframe produced that particular setup. '% of range height' scales itself to every instrument and timeframe automatically.")
-slPadVal  = input.float(0.1, "Stop pad amount", minval=0, step=0.05, group=gSL)
-slMinOn   = input.bool(false, "Enforce a minimum stop distance", group=gSL)
-slMinPct  = input.float(20, "Minimum stop (% of range height)", minval=0, maxval=200, step=1, group=gSL, tooltip="Measured from ENTRY, not from the wick.")
-slBuffTk  = input.float(0, "Extra buffer (ticks)", minval=0, step=1, group=gSL)
-
-// ---- TIME-OF-DAY FILTER -----------------------------------------------------
-// BLOCK suppresses setups inside a window; ALLOW shows only setups inside one.
-// Both windows are read in the timezone you pick. Block wins on any overlap.
-// The test runs against the ENTRY BAR's own timestamp, so the filter cuts the
-// same setups on every chart timeframe. A blocked bar does NOT consume the
-// watch — a range swept inside a blocked window can still fire later.
-gTime = "Setup time filter"
-tfltOn  = input.bool(false, "Enable setup time filter", group=gTime)
-tfltTz  = input.string("Africa/Johannesburg", "Timezone for the windows below", options=["Africa/Johannesburg","America/New_York","Europe/London","Asia/Tokyo","UTC","Exchange"], group=gTime, tooltip="Africa/Johannesburg = SAST (UTC+2, no DST), so you type the hours exactly as you see them locally.")
-blkOn   = input.bool(true,  "Block setups in this window", group=gTime)
-blkSess = input.session("1900-0000", "Blocked window", group=gTime)
-alwOn   = input.bool(false, "Only show setups in this window", group=gTime)
-alwSess = input.session("0200-0600", "Allowed window", group=gTime)
-tfltDays= input.string("1234567", "Days the windows apply to", group=gTime, tooltip="1=Sunday ... 7=Saturday.")
-tfltShade = input.bool(false, "Shade the blocked hours on the chart", group=gTime)
-tfltShadeC= input.color(color.new(color.red, 92), "Blocked-hours shade", group=gTime)
-
-// ---- TREND FILTER -----------------------------------------------------------
-// Only take a setup that agrees with higher-timeframe structure. A sweep-and-
-// reclaim WITH the trend and one AGAINST it are different trades, and nothing
-// in this script separated them before now.
-//
-// Bias per timeframe = the same rule the Basic Market Structure dashboard uses:
-// price closing beyond the last confirmed swing high is bullish, beyond the last
-// confirmed swing low is bearish, and it holds that reading until the other side
-// breaks. Read from the LAST CLOSED bar of each timeframe, so a forming 4H
-// candle can never rewrite what a historical setup was allowed to do.
-gBias = "Trend filter"
-biasOn   = input.bool(false, "Only take setups that agree with the trend", group=gBias, tooltip="Longs need bullish structure, shorts need bearish. Off = every setup shows regardless of direction.")
-biasLen  = input.int(5, "Structure pivot length", minval=1, group=gBias, tooltip="Bars either side of a swing on each bias timeframe. Higher = only major turning points count, so the bias flips less often.")
-biasMode = input.string("Majority", "Agreement required", options=["All must agree","Majority","Not opposed"], group=gBias, tooltip="All = every enabled timeframe points the same way (strictest, fewest setups). Majority = more agree than disagree. Not opposed = none point the other way, undecided is fine.")
-bias15On = input.bool(false, "15m", inline="bt1", group=gBias)
-bias30On = input.bool(false, "30m", inline="bt1", group=gBias)
-bias1On  = input.bool(true,  "1H",  inline="bt1", group=gBias)
-bias4On  = input.bool(true,  "4H",  inline="bt2", group=gBias)
-biasDOn  = input.bool(false, "D",   inline="bt2", group=gBias)
-biasWOn  = input.bool(false, "W",   inline="bt2", group=gBias)
-
-// ---- BREAK-EVEN -------------------------------------------------------------
-gBE = "Break-even"
-beOn   = input.bool(true, "Break-even at range EQ", group=gBE, tooltip="Draws a BE line at the range equilibrium. When price reaches it the stop moves to just past entry and a second stop line appears; the original SL fades.")
-beTxt  = input.string("BE", "BE label text", options=["BE","Break-even"], group=gBE)
-bePct  = input.float(10, "BE stop offset (% of original risk)", minval=0, maxval=90, step=1, group=gBE)
-beCol  = input.color(color.new(#FF9800, 0), "Break-even colour", group=gBE)
-beFade = input.int(70, "Faded original SL transparency", minval=0, maxval=95, group=gBE)
+hlLabCol  = input.color(color.new(#2962FF, 0), "Label colour", group=gLab)
+labTxtCol = input.color(color.white, "Text colour (Filled design)", group=gLab)
 
 // ===================== EQUILIBRIUM ===========================================
-gEQ = "Equilibrium (all ranges)"
+gEQ       = "Equilibrium"
 showEqLn  = input.bool(true, "Show equilibrium line", group=gEQ)
 eqLnCol   = input.color(color.new(#FF6D00, 0), "EQ line colour", group=gEQ)
 eqLnWidth = input.int(2, "EQ line width", minval=1, maxval=4, group=gEQ)
 eqLnStyle = input.string("Dotted", "EQ line style", options=["Dotted","Dashed","Solid"], group=gEQ)
-showFvgEq = input.bool(true, "Add 50% EQ line to FVG / OB boxes", group=gEQ)
 showEqLab = input.bool(true, "Show EQ label", group=gEQ)
 eqLabSz   = input.string("Tiny", "EQ label size", options=["Tiny","Small","Normal"], group=gEQ)
 eqLabCol  = input.color(color.new(color.black, 0), "EQ label colour", group=gEQ)
@@ -225,1003 +69,111 @@ pointSize = input.float(0.0, "Price per point (0 = auto min-tick)", minval=0, st
 brUnit    = input.string("Pips", "Bracket unit", options=["Pips","Ticks","Price","None"], group=gEQ)
 pipSize   = input.float(0.0, "Price per pip (0 = auto)", minval=0, step=0.0001, group=gEQ)
 
-// ===================== DAILY / WEEKLY CRT (optional) =========================
-gDW = "HTF Bias — Daily / Weekly CRT  (optional)"
-showDR   = input.bool(false, "Show Daily CRT range", group=gDW)
-showWR   = input.bool(false, "Show Weekly CRT range", group=gDW)
-nyAnchor = input.bool(false, "Anchor D/W to New York 17:00", group=gDW, tooltip="OFF = broker native daily/weekly. ON = 17:00 NY session, feed-independent.")
-showPD   = input.bool(true,  "Premium / discount shading", group=gDW)
-htfProj  = input.int(1, "Project ranges N periods right", minval=1, maxval=5, group=gDW)
-showHtfLbl = input.bool(true, "Label D / W ranges", group=gDW)
-showHtfPx  = input.bool(false, "Include price in D / W labels", group=gDW)
-dwLabSz  = input.string("Small", "D / W label size", options=["Tiny","Small","Normal"], group=gDW)
-dCol     = input.color(color.new(#787B86, 0), "Daily line", group=gDW)
-wCol     = input.color(color.new(#5D606B, 0), "Weekly line", group=gDW)
-premC    = input.color(color.new(color.red, 0), "Premium tint", group=gDW)
-discC    = input.color(color.new(color.green, 0), "Discount tint", group=gDW)
-
-// ===================== MULTI-TF FVG / ORDER BLOCKS (optional) ================
-gPDA = "PD Arrays — FVG & Order Blocks  (optional)"
-showFVG = input.bool(false, "Show fair-value gaps", group=gPDA)
-showOB  = input.bool(false, "Show order blocks", group=gPDA)
-tf5On  = input.bool(false, "5m",  inline="pr1", group=gPDA)
-tf15On = input.bool(false, "15m", inline="pr1", group=gPDA)
-tf30On = input.bool(false, "30m", inline="pr1", group=gPDA)
-tf1On  = input.bool(false, "1H",  inline="pr2", group=gPDA)
-tf2On  = input.bool(false, "2H",  inline="pr2", group=gPDA)
-tf4On  = input.bool(true,  "4H",  inline="pr2", group=gPDA)
-tf8On  = input.bool(false, "8H",  inline="pr3", group=gPDA)
-tfDOn  = input.bool(false, "D",   inline="pr3", group=gPDA)
-tfWOn  = input.bool(false, "W",   inline="pr3", group=gPDA)
-pdKeep = input.int(20, "Keep last N per type", minval=1, maxval=60, group=gPDA)
-pdMit  = input.bool(true, "React to mitigation", group=gPDA)
-showHistPD = input.bool(false, "Keep historical (mitigated), faded", group=gPDA)
-showPdLbl = input.bool(true, "Label boxes (e.g. '4h FVG')", group=gPDA)
-pdLabSz   = input.string("Tiny", "Box label size", options=["Tiny","Small","Normal"], group=gPDA)
-pdTxtCol  = input.color(color.new(color.white, 0), "Box label colour", group=gPDA)
-fvgUpC = input.color(color.new(color.teal, 82),   "Bullish FVG", inline="cf", group=gPDA)
-fvgDnC = input.color(color.new(color.maroon, 82), "Bearish FVG", inline="cf", group=gPDA)
-obUpC  = input.color(color.new(color.green, 78),  "Bullish OB", inline="co", group=gPDA)
-obDnC  = input.color(color.new(color.red, 78),    "Bearish OB", inline="co", group=gPDA)
-histC  = input.color(color.new(color.gray, 88),   "Historical fill", group=gPDA)
-
-gWk = "Weekly filter (FVG / OB / Zones)"
-showCurWeek  = input.bool(true, "Show current week", group=gWk)
-showPrevWeek = input.bool(true, "Show previous week", group=gWk)
-
-// ===================== SWINGS — S/R + EQUAL H/L (optional) ===================
-gSR = "Swings — Support / Resistance  (optional)"
-showSR   = input.bool(false, "Recent swing High / Low (S/R)", group=gSR)
-srTF     = input.timeframe("", "S/R source timeframe (blank = chart)", group=gSR)
-srLen    = input.int(10, "Swing length", minval=2, group=gSR)
-srExt    = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSR)
-srMaxLen = input.int(60, "Max line length (bars, 0 = from pivot)", minval=0, maxval=1000, group=gSR)
-showSrLbl= input.bool(true, "Label S/R & equal H/L lines", group=gSR)
-srLabSz  = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gSR)
-resCol   = input.color(color.new(color.red, 0),   "Resistance (swing high)", group=gSR)
-supCol   = input.color(color.new(color.green, 0), "Support (swing low)", group=gSR)
-showEQL  = input.bool(false, "Equal highs / lows", group=gSR)
-eqlTol   = input.float(0.1, "Equal H/L tolerance (x ATR)", minval=0, step=0.05, group=gSR)
-eqlCol   = input.color(color.new(color.fuchsia, 0), "Equal H/L", group=gSR)
-
-// ===================== SUPPLY / DEMAND ZONES (optional) ======================
-gSD = "Supply / Demand zones  (optional)"
-showSD  = input.bool(false, "Show supply / demand zones", group=gSD)
-sdTF    = input.timeframe("", "S/D source timeframe (blank = chart)", group=gSD)
-sdLen   = input.int(10, "Swing length", minval=2, group=gSD)
-sdKeep  = input.int(2, "Keep last N each", minval=1, maxval=6, group=gSD)
-sdExt   = input.int(0, "Extend right (bars past price)", minval=0, maxval=200, group=gSD)
-showSdLbl  = input.bool(true, "Label zones", group=gSD)
-sdLabSz    = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gSD)
-zoneTxtCol = input.color(color.new(color.white, 0), "Zone label colour", group=gSD)
-supplyC = input.color(color.new(color.red, 85),   "Supply zone", group=gSD)
-demandC = input.color(color.new(color.green, 85), "Demand zone", group=gSD)
-
 // ===================== HELPERS ===============================================
 f_lsz(string s) =>
     s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+
 f_lstyle(string s) =>
     s == "Dashed" ? line.style_dashed : s == "Solid" ? line.style_solid : line.style_dotted
 
-// short display name for a timeframe string: "60" -> "1H", "240" -> "4H", "D".
-// The parameter is qualified `simple` because timeframe.in_seconds() refuses a
-// series string and Pine would otherwise infer the looser type.
+// "60" -> "1H", "240" -> "4H", "D" -> "D". The parameter is qualified `simple`
+// because timeframe.in_seconds() refuses a series string.
 f_tfName(simple string tf) =>
     int s = timeframe.in_seconds(tf)
     s >= 604800 ? "W" : s == 86400 ? "D" : s > 86400 ? str.tostring(int(s / 86400)) + "D" : s >= 3600 ? str.tostring(int(s / 3600)) + "H" : str.tostring(int(s / 60)) + "m"
 
 mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, string szStr) =>
-    bg = design == "Ghost"  ? color.new(color.gray, 100) : design == "Tinted" ? color.new(mainCol, 70) : design == "Chip" ? chart.bg_color : mainCol
+    bg = design == "Ghost" ? color.new(color.gray, 100) : design == "Tinted" ? color.new(mainCol, 70) : design == "Chip" ? chart.bg_color : mainCol
     tc = design == "Filled" ? txtCol : mainCol
     label.new(x, y, txt, xloc=xloc.bar_time, style=label.style_label_left, color=bg, textcolor=tc, size=f_lsz(szStr))
 
 TRANSP = color.new(color.gray, 100)
-GHOST  = color.new(color.gray, 100)
 HIDE   = color.new(color.gray, 100)
 
-// ---- current & previous week start times (for the weekly filter) ----
-curWkStart = time("W")
-var int prevWkStart = na
-if ta.change(time("W")) != 0
-    prevWkStart := time("W")[1]
-f_wkBucket(int L) =>
-    L >= curWkStart ? 0 : (na(prevWkStart) or L >= prevWkStart) ? 1 : 2
-f_wkVisible(int bucket) =>
-    (bucket == 0 and showCurWeek) or (bucket == 1 and showPrevWeek)
-
-// ---- Daily/Weekly store ----
-var array<line>  dwL   = array.new<line>()
-var array<box>   dwB   = array.new<box>()
-var array<label> dwLab = array.new<label>()
-f_clearDW() =>
-    while array.size(dwL) > 0
-        line.delete(array.shift(dwL))
-    while array.size(dwB) > 0
-        box.delete(array.shift(dwB))
-    while array.size(dwLab) > 0
-        label.delete(array.shift(dwLab))
-f_drawHTF(float hi, float lo, int st, int projMs, color lc, string tag) =>
-    if not na(hi) and not na(lo) and not na(st)
-        eqy = (hi + lo) / 2.0
-        en  = st + projMs
-        array.push(dwL, line.new(st, hi,  en, hi,  xloc=xloc.bar_time, color=lc, width=lw))
-        array.push(dwL, line.new(st, lo,  en, lo,  xloc=xloc.bar_time, color=lc, width=lw))
-        if showEqLn
-            array.push(dwL, line.new(st, eqy, en, eqy, xloc=xloc.bar_time, color=color.new(lc, 30), width=eqLnWidth, style=f_lstyle(eqLnStyle)))
-        if showPD
-            array.push(dwB, box.new(st, hi,  en, eqy, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(premC, 92)))
-            array.push(dwB, box.new(st, eqy, en, lo,  xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(discC, 92)))
-        if showHtfLbl
-            hiTag = tag + " High" + (showHtfPx ? " " + str.tostring(hi, format.mintick) : "")
-            loTag = tag + " Low"  + (showHtfPx ? " " + str.tostring(lo, format.mintick) : "")
-            array.push(dwLab, mkLabel(en, hi, hiTag, labDesign, lc, labTxtCol, dwLabSz))
-            array.push(dwLab, mkLabel(en, lo, loTag, labDesign, lc, labTxtCol, dwLabSz))
-
-// ---- PD array (FVG/OB) stores ----
-var array<box>  fvgU  = array.new<box>()
-var array<box>  fvgD  = array.new<box>()
-var array<box>  obU   = array.new<box>()
-var array<box>  obD   = array.new<box>()
-var array<box>  fvgUh = array.new<box>()
-var array<box>  fvgDh = array.new<box>()
-var array<box>  obUh  = array.new<box>()
-var array<box>  obDh  = array.new<box>()
-var array<line> fvgUm = array.new<line>()
-var array<line> fvgDm = array.new<line>()
-var array<line> obUm  = array.new<line>()
-var array<line> obDm  = array.new<line>()
-f_addBoxT(array<box> a, array<line> m, float top, float bot, int left, color col, string txt) =>
-    b = box.new(left, top, time, bot, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=col, text=showPdLbl ? txt : "", text_color=pdTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(pdLabSz))
-    array.push(a, b)
-    line lm = na
-    if showFvgEq
-        mid = (top + bot) / 2.0
-        lm := line.new(left, mid, time, mid, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle))
-    array.push(m, lm)
-    while array.size(a) > pdKeep
-        box.delete(array.shift(a))
-        lmo = array.shift(m)
-        if not na(lmo)
-            line.delete(lmo)
-f_maintainT(array<box> act, array<line> actM, array<box> hist, bool bull, color realCol) =>
-    if array.size(act) > 0
-        i = array.size(act) - 1
-        while i >= 0
-            b  = array.get(act, i)
-            lm = array.get(actM, i)
-            bucket = f_wkBucket(int(box.get_left(b)))
-            if bucket >= 2
-                array.remove(act, i)
-                array.remove(actM, i)
-                box.delete(b)
-                if not na(lm)
-                    line.delete(lm)
-            else
-                vis = f_wkVisible(bucket)
-                box.set_right(b, time)
-                box.set_bgcolor(b, vis ? realCol : TRANSP)
-                box.set_text_color(b, vis ? pdTxtCol : TRANSP)
-                if not na(lm)
-                    line.set_x2(lm, time)
-                    line.set_color(lm, vis and showFvgEq ? eqLnCol : TRANSP)
-                mit = pdMit and (bull ? close < box.get_bottom(b) : close > box.get_top(b))
-                if mit
-                    array.remove(act, i)
-                    array.remove(actM, i)
-                    if not na(lm)
-                        line.delete(lm)
-                    if showHistPD
-                        box.set_bgcolor(b, histC)
-                        array.push(hist, b)
-                        while array.size(hist) > pdKeep
-                            box.delete(array.shift(hist))
-                    else
-                        box.delete(b)
-            i := i - 1
-f_pdScan(bool en, string tfName, float h1, float h3, float l1, float l3, float o3, float c3, int t2, bool nb) =>
-    if en and nb
-        bull = not na(h3) and not na(l1) and h3 < l1
-        bear = not na(l3) and not na(h1) and l3 > h1
-        if showFVG and bull
-            f_addBoxT(fvgU, fvgUm, l1, h3, t2, fvgUpC, tfName + " FVG")
-        if showFVG and bear
-            f_addBoxT(fvgD, fvgDm, l3, h1, t2, fvgDnC, tfName + " FVG")
-        if showOB and bull and c3 < o3
-            f_addBoxT(obU, obUm, h3, l3, t2, obUpC, tfName + " OB")
-        if showOB and bear and c3 > o3
-            f_addBoxT(obD, obDm, h3, l3, t2, obDnC, tfName + " OB")
-
-f_srLabel(label lb, bool show, line ln, string txt, color col, int ext, string sz) =>
-    label out = lb
-    if show and not na(ln)
-        lvl = line.get_y2(ln)
-        if na(out)
-            out := label.new(bar_index + ext, lvl, txt, style=label.style_label_left, color=GHOST, textcolor=col, size=f_lsz(sz))
-        else
-            label.set_xy(out, bar_index + ext, lvl)
-            label.set_text(out, txt)
-    out
-
-// ===================== STORES ================================================
+// ===================== THE RANGE FETCH =======================================
+// The last CLOSED candle of the range timeframe: its high, its low, and the
+// timestamp it opened at. Everything else in this file is drawn from these three
+// numbers.
 sym = syminfo.tickerid
-atrChart = ta.atr(14)
+[rHigh, rLow, rOpenT] = request.security(sym, tfIn, [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
+tfMs = timeframe.in_seconds(tfIn) * 1000
+tfNm = f_tfName(tfIn)
 
-// one set of range stores PER range timeframe, so each keeps its own history
-var array<line>  h1A = array.new<line>()
-var array<line>  l1A = array.new<line>()
-var array<line>  e1A = array.new<line>()
-var array<box>   s1A = array.new<box>()
-var array<label> b1A = array.new<label>()
-var array<line>  h2A = array.new<line>()
-var array<line>  l2A = array.new<line>()
-var array<line>  e2A = array.new<line>()
-var array<box>   s2A = array.new<box>()
-var array<label> b2A = array.new<label>()
-var array<line>  h3A = array.new<line>()
-var array<line>  l3A = array.new<line>()
-var array<line>  e3A = array.new<line>()
-var array<box>   s3A = array.new<box>()
-var array<label> b3A = array.new<label>()
+// One store per drawing type. They stay in lock-step: index i of each array
+// belongs to the same range, so age-based recolouring and pruning line up.
+var array<line> hiA = array.new<line>()
+var array<line> loA = array.new<line>()
+var array<line> eqA = array.new<line>()
+var array<box>  shA = array.new<box>()
 
-var array<label> swLbA = array.new<label>()
-var array<label> brLbA = array.new<label>()
+// The newest range owns the labels. Older ranges are lines only, which is what
+// stops a screen full of stacked tags.
+var label labHi = na
+var label labLo = na
+var label labEq = na
 
-// setup stores (parallel; one slot per setup, pruned together by setKeep)
-var array<line>   sEntryLn = array.new<line>()
-var array<line>   sTpLn    = array.new<line>()
-var array<line>   sSlLn    = array.new<line>()
-var array<label>  sTpLb    = array.new<label>()
-var array<label>  sSlLb    = array.new<label>()
-var array<label>  sRrLb    = array.new<label>()
-var array<int>    sDir     = array.new<int>()
-var array<float>  sTp      = array.new<float>()
-var array<float>  sSl      = array.new<float>()
-var array<bool>   sDone    = array.new<bool>()
-var array<string> sTag     = array.new<string>()
-var array<float>  sBeLvl   = array.new<float>()
-var array<float>  sBeStop  = array.new<float>()
-var array<bool>   sBeArm   = array.new<bool>()
-var array<line>   sBeLn    = array.new<line>()
-var array<label>  sBeLb    = array.new<label>()
-var array<line>   sBeSLn   = array.new<line>()
-var array<label>  sBeSLb   = array.new<label>()
+// A new range exists the moment the range timeframe's open time changes.
+newRange = not na(rHigh) and not na(rLow) and not na(rOpenT) and (na(rOpenT[1]) or rOpenT != rOpenT[1])
 
-// live watches. wSrc / wAtr carry the identity and ATR of the range TF that
-// spawned each one, so any number of range timeframes share one queue.
-var array<float>  wHi   = array.new<float>()
-var array<float>  wLo   = array.new<float>()
-var array<int>    wDead = array.new<int>()
-var array<bool>   wSwH  = array.new<bool>()
-var array<bool>   wSwL  = array.new<bool>()
-var array<float>  wExtH = array.new<float>()
-var array<float>  wExtL = array.new<float>()
-var array<float>  wAtr  = array.new<float>()
-var array<string> wSrc  = array.new<string>()
+if newRange
+    startT  = int(rOpenT)
+    endT    = startT + liveN * tfMs
+    eqv     = (rHigh + rLow) / 2.0
+    rangePx = rHigh - rLow
 
-var array<int> lastRt = array.new<int>(4, 0)   // new-range detector, one per TF
-var int lastEt = na                            // last processed entry-TF bar
+    // ---- draw this range ----
+    array.push(hiA, line.new(startT, rHigh, endT, rHigh, xloc=xloc.bar_time, color=curCol, width=lw))
+    array.push(loA, line.new(startT, rLow,  endT, rLow,  xloc=xloc.bar_time, color=curCol, width=lw))
+    array.push(eqA, showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle)) : na)
+    array.push(shA, showShade and shadeDepth > 0 ? box.new(startT, rHigh, startT + int(shadeDepth * (endT - startT)), rLow, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(shadeCol, shadeOpacity)) : na)
 
-// ===================== TREND BIAS ============================================
-// One reading per timeframe: +1 bullish, -1 bearish, 0 undecided. State is
-// sticky — once price closes beyond a confirmed swing the bias holds until the
-// opposite side breaks, so it does not flicker on every bar.
-f_tfBias(int L) =>
-    ph = ta.pivothigh(L, L)
-    pl = ta.pivotlow(L, L)
-    var float lph = na
-    var float lpl = na
-    var int t = 0
-    if not na(ph)
-        lph := ph
-    if not na(pl)
-        lpl := pl
-    if not na(lph) and close > lph
-        t := 1
-    if not na(lpl) and close < lpl
-        t := -1
-    t
+    // ---- labels: only the newest range carries them ----
+    if not na(labHi)
+        label.delete(labHi)
+    if not na(labLo)
+        label.delete(labLo)
+    if not na(labEq)
+        label.delete(labEq)
 
-// Every reading is taken on the [1] offset — the last CLOSED bar of that
-// timeframe. A forming 4H candle therefore cannot repaint what a setup from
-// three hours ago was permitted to do.
-int bz15 = 0
-int bz30 = 0
-int bz1  = 0
-int bz4  = 0
-int bzD  = 0
-int bzW  = 0
-if biasOn and bias15On
-    bz15 := request.security(sym, "15",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
-if biasOn and bias30On
-    bz30 := request.security(sym, "30",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
-if biasOn and bias1On
-    bz1  := request.security(sym, "60",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
-if biasOn and bias4On
-    bz4  := request.security(sym, "240", f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
-if biasOn and biasDOn
-    bzD  := request.security(sym, "1D",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
-if biasOn and biasWOn
-    bzW  := request.security(sym, "1W",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
-
-nBull = (bias15On and bz15 == 1 ? 1 : 0) + (bias30On and bz30 == 1 ? 1 : 0) + (bias1On and bz1 == 1 ? 1 : 0) + (bias4On and bz4 == 1 ? 1 : 0) + (biasDOn and bzD == 1 ? 1 : 0) + (biasWOn and bzW == 1 ? 1 : 0)
-nBear = (bias15On and bz15 == -1 ? 1 : 0) + (bias30On and bz30 == -1 ? 1 : 0) + (bias1On and bz1 == -1 ? 1 : 0) + (bias4On and bz4 == -1 ? 1 : 0) + (biasDOn and bzD == -1 ? 1 : 0) + (biasWOn and bzW == -1 ? 1 : 0)
-nOn   = (bias15On ? 1 : 0) + (bias30On ? 1 : 0) + (bias1On ? 1 : 0) + (bias4On ? 1 : 0) + (biasDOn ? 1 : 0) + (biasWOn ? 1 : 0)
-// With the filter off, or with no timeframe ticked, nothing is filtered — the
-// switch never silently blocks every setup because the user forgot a checkbox.
-biasOkL = not biasOn or nOn == 0 or (biasMode == "All must agree" ? nBull == nOn : biasMode == "Not opposed" ? nBear == 0 : nBull > nBear)
-biasOkS = not biasOn or nOn == 0 or (biasMode == "All must agree" ? nBear == nOn : biasMode == "Not opposed" ? nBull == 0 : nBear > nBull)
-
-// ===================== RANGE DRAWING =========================================
-// One call per enabled range timeframe, each with its own stores and colour, so
-// three ranges can be on screen at once without their histories colliding. The
-// newest range keeps its labels; older ones are line-only, which is what stops
-// three timeframes of tags stacking on top of each other.
-f_drawRange(array<line> hA, array<line> lA, array<line> eA, array<box> sA, array<label> bA, float rH, float rL, int rT, int msLen, color baseCol, string tag) =>
-    startT = rT
-    endT   = rT + liveN * msLen
-    eqv    = (rH + rL) / 2.0
-    rangePx = rH - rL
-
-    array.push(hA, line.new(startT, rH, endT, rH, xloc=xloc.bar_time, color=baseCol, width=lw))
-    array.push(lA, line.new(startT, rL, endT, rL, xloc=xloc.bar_time, color=baseCol, width=lw))
-    array.push(eA, showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle)) : na)
-    array.push(sA, showShade and shadeDepth > 0 ? box.new(startT, rH, startT + int(shadeDepth * (endT - startT)), rL, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(shadeCol, shadeOpacity)) : na)
-
-    // only the newest range of this timeframe carries labels
-    while array.size(bA) > 0
-        label.delete(array.shift(bA))
-    pre    = rTagTf ? tag + " " : ""
+    pre    = tagTf ? tfNm + " " : ""
     hiName = shortHL ? "CRT H" : "CRT High"
     loName = shortHL ? "CRT L" : "CRT Low"
-    ptSz   = pointSize > 0 ? pointSize : syminfo.mintick
-    ppSz   = pipSize   > 0 ? pipSize   : syminfo.mintick * 10
-    ptsN   = math.round(rangePx / ptSz)
-    brNum  = brUnit == "Pips" ? math.round(rangePx / ppSz) : brUnit == "Ticks" ? math.round(rangePx / syminfo.mintick) : na
-    brStr  = brUnit == "None" ? "" : brUnit == "Price" ? "(" + str.tostring(rangePx, format.mintick) + ")" : "(" + str.tostring(brNum, "#") + " " + (brUnit == "Pips" ? "pips" : "ticks") + ")"
-    if showHL
-        array.push(bA, mkLabel(endT, rH, pre + hiName + (showPx ? " " + str.tostring(rH, format.mintick) : ""), labDesign, baseCol, labTxtCol, labSz))
-        array.push(bA, mkLabel(endT, rL, pre + loName + (showPx ? " " + str.tostring(rL, format.mintick) : ""), labDesign, baseCol, labTxtCol, labSz))
-    if showEqLab
-        array.push(bA, mkLabel(endT, eqv, pre + "EQ" + (showEqPx ? " " + str.tostring(eqv, format.mintick) : "") + (showSize ? "  " + str.tostring(ptsN, "#") + " PTS" : "") + (brStr == "" ? "" : "  " + brStr), labDesign, eqLabCol, labTxtCol, eqLabSz))
+    hiTxt  = pre + hiName + (showPx ? " " + str.tostring(rHigh, format.mintick) : "")
+    loTxt  = pre + loName + (showPx ? " " + str.tostring(rLow,  format.mintick) : "")
 
-    // age-based recolour: newest in this TF's colour, then previous, then history
-    n = array.size(hA)
+    ptSz  = pointSize > 0 ? pointSize : syminfo.mintick
+    ppSz  = pipSize   > 0 ? pipSize   : syminfo.mintick * 10
+    ptsN  = math.round(rangePx / ptSz)
+    brNum = brUnit == "Pips" ? math.round(rangePx / ppSz) : brUnit == "Ticks" ? math.round(rangePx / syminfo.mintick) : na
+    brStr = brUnit == "None" ? "" : brUnit == "Price" ? "(" + str.tostring(rangePx, format.mintick) + ")" : "(" + str.tostring(brNum, "#") + " " + (brUnit == "Pips" ? "pips" : "ticks") + ")"
+    eqTxt = pre + "EQ" + (showEqPx ? " " + str.tostring(eqv, format.mintick) : "") + (showSize ? "  " + str.tostring(ptsN, "#") + " PTS" : "") + (brStr == "" ? "" : "  " + brStr)
+
+    labHi := showHL    ? mkLabel(endT, rHigh, hiTxt, labDesign, hlLabCol, labTxtCol, labSz)  : na
+    labLo := showHL    ? mkLabel(endT, rLow,  loTxt, labDesign, hlLabCol, labTxtCol, labSz)  : na
+    labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, labDesign, eqLabCol, labTxtCol, eqLabSz) : na
+
+    // ---- age-based recolour: newest, then previous, then history ----
+    n = array.size(hiA)
     for i = 0 to n - 1
         age = n - 1 - i
-        col = age == 0 ? baseCol : age == 1 ? (showPrev ? prevCol : HIDE) : (showHist ? histCol : HIDE)
-        line.set_color(array.get(hA, i), col)
-        line.set_color(array.get(lA, i), col)
-        lex = array.get(eA, i)
+        col = age == 0 ? curCol : age == 1 ? (showPrev ? prevCol : HIDE) : (showHist ? histCol : HIDE)
+        line.set_color(array.get(hiA, i), col)
+        line.set_color(array.get(loA, i), col)
+        lex = array.get(eqA, i)
         if not na(lex)
             line.set_color(lex, age == 0 ? eqLnCol : col)
-        shx = array.get(sA, i)
+        shx = array.get(shA, i)
         if not na(shx)
+            // shading only ever fills the CURRENT range; older ranges are lines
             box.set_bgcolor(shx, age == 0 ? color.new(shadeCol, shadeOpacity) : HIDE)
 
-    while array.size(hA) > maxHist + 2
-        line.delete(array.shift(hA))
-        line.delete(array.shift(lA))
-        led = array.shift(eA)
+    // ---- prune ----
+    while array.size(hiA) > maxHist + 2
+        line.delete(array.shift(hiA))
+        line.delete(array.shift(loA))
+        led = array.shift(eqA)
         if not na(led)
             line.delete(led)
-        shd = array.shift(sA)
+        shd = array.shift(shA)
         if not na(shd)
             box.delete(shd)
-
-// ===================== SWEEP / BREAK MARKERS =================================
-f_sweepMark(bool bull, int atT, float y, string tfName) =>
-    style = sweepDesign == "Triangle S" ? (bull ? label.style_triangleup : label.style_triangledown) : sweepDesign == "Circle S" ? label.style_circle : (bull ? label.style_label_up : label.style_label_down)
-    pre   = sweepTf ? tfName + " " : ""
-    txt   = sweepDesign == "Label" ? (sweepLbl ? pre + "Sweep" : str.trim(pre)) : str.trim(pre + "S")
-    col   = bull ? sweepUpC : sweepDnC
-    array.push(swLbA, label.new(atT, y, txt, xloc=xloc.bar_time, style=style, color=color.new(col, 20), textcolor=chart.bg_color, size=f_lsz(sweepSz)))
-    while array.size(swLbA) > swKeep
-        label.delete(array.shift(swLbA))
-f_breakMark(bool bull, int atT, float y, string tfName) =>
-    style = breakDesign == "Triangle B" ? (bull ? label.style_triangleup : label.style_triangledown) : breakDesign == "Circle B" ? label.style_circle : (bull ? label.style_label_up : label.style_label_down)
-    pre   = breakTf ? tfName + " " : ""
-    txt   = breakDesign == "Label" ? (breakLbl ? pre + "Break" : str.trim(pre)) : str.trim(pre + "B")
-    col   = bull ? breakUpC : breakDnC
-    array.push(brLbA, label.new(atT, y, txt, xloc=xloc.bar_time, style=style, color=color.new(col, 20), textcolor=chart.bg_color, size=f_lsz(breakSz)))
-    while array.size(brLbA) > brKeep
-        label.delete(array.shift(brLbA))
-// A (older) and B (just closed). Taking out A's level is the shared condition;
-// what B does by the time it FINISHES decides the classification. Break outranks
-// sweep, and the gate is isBreak — NOT "brEn and isBreak" — so a break candle
-// stays a break even with the break layer off and can never become a sweep.
-f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bO, float bC, int bT, int msLen, bool nb) =>
-    if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC)
-        tookLo = bLoV < aLoV
-        tookHi = bHiV > aHiV
-        bodyHi = math.max(bO, bC)
-        bodyLo = math.min(bO, bC)
-        brUp = tookHi and (brkStrict ? bodyLo > aHiV : bC > aHiV)
-        brDn = tookLo and (brkStrict ? bodyHi < aLoV : bC < aLoV)
-        isBreak = brUp or brDn
-        swDn = not isBreak and tookHi and bC < aHiV
-        swUp = not isBreak and tookLo and bC > aLoV
-        swT = sweepAnchor == "Candle open" ? bT : bT + msLen - 1
-        brT = breakAnchor == "Candle open" ? bT : bT + msLen - 1
-        if brEn and brUp
-            f_breakMark(true, brT, bHiV, tfName)
-        if brEn and brDn
-            f_breakMark(false, brT, bLoV, tfName)
-        if swEn and swDn
-            f_sweepMark(false, swT, bHiV, tfName)
-        if swEn and swUp
-            f_sweepMark(true, swT, bLoV, tfName)
-
-// ===================== SETUP HELPERS =========================================
-// Window test against a raw timestamp, because TradingView's time(session)
-// helper answers for the CHART bar. Testing the ENTRY bar's own timestamp keeps
-// the filter cutting the same setups on 2m as on 15m. "HHMM-HHMM"; an end of
-// 0000 means midnight, and a start after the end wraps past midnight.
-f_inWin(string sess, int t, string tz, string days) =>
-    st  = math.round(nz(str.tonumber(str.substring(sess, 0, 4)), 0))
-    en0 = math.round(nz(str.tonumber(str.substring(sess, 5, 9)), 0))
-    en  = en0 == 0 ? 2400 : en0
-    hhmm = hour(t, tz) * 100 + minute(t, tz)
-    okDay = str.contains(days, str.tostring(dayofweek(t, tz)))
-    inR = st < en ? (hhmm >= st and hhmm < en) : (hhmm >= st or hhmm < en)
-    inR and okDay
-
-// rngH and atrRange both belong to the range TF that produced this setup, so a
-// Daily setup is padded by Daily ATR and a 30m setup by 30m ATR.
-f_slPad(float rngH, float atrRange, float entry) =>
-    ptSzSl = pointSize > 0 ? pointSize : syminfo.mintick
-    base = slPadMode == "ATR of range TF" ? slPadVal * nz(atrRange, 0) : slPadMode == "ATR of chart TF" ? slPadVal * nz(atrChart, 0) : slPadMode == "% of range height" ? slPadVal / 100.0 * rngH : slPadMode == "% of price" ? slPadVal / 100.0 * entry : slPadVal * ptSzSl
-    base + slBuffTk * syminfo.mintick
-
-// Anchored with xloc.bar_time so a setup lands at the same CLOCK POSITION on
-// every chart timeframe. tag names the range TF, and that range is on the chart.
-f_makeSetup(int dir, float entry, float sl, float tp, float eqLvl, int startT, int endT, string tag) =>
-    risk = math.abs(entry - sl)
-    rew  = math.abs(tp - entry)
-    rr   = risk > 0 ? rew / risk : 0.0
-    if rr >= setupMinRR and tp != entry and ((dir == 1 and tp > entry) or (dir == -1 and tp < entry))
-        dirC = dir == 1 ? setupLongC : setupShortC
-        pre  = setTagTf ? tag + " " : ""
-        lnE = line.new(startT, entry, endT, entry, xloc=xloc.bar_time, color=dirC, width=setupLineW, style=line.style_dotted)
-        lbR = label.new(endT, entry, pre + (dir == 1 ? "LE" : "SE"), xloc=xloc.bar_time, style=label.style_label_left, color=GHOST, textcolor=dirC, size=size.tiny)
-        lnT = line.new(startT, tp, endT, tp, xloc=xloc.bar_time, color=setupTpC, width=setupLineW, style=line.style_dotted)
-        lnS = line.new(startT, sl, endT, sl, xloc=xloc.bar_time, color=setupSlC, width=setupLineW, style=line.style_dotted)
-        lbT = label.new(endT, tp, pre + "TP", xloc=xloc.bar_time, style=label.style_label_left, color=GHOST, textcolor=setupTpC, size=size.tiny)
-        lbSl = label.new(endT, sl, pre + "SL", xloc=xloc.bar_time, style=label.style_label_left, color=GHOST, textcolor=setupSlC, size=size.tiny)
-        array.push(sEntryLn, lnE)
-        array.push(sTpLn, lnT)
-        array.push(sSlLn, lnS)
-        array.push(sTpLb, lbT)
-        array.push(sSlLb, lbSl)
-        array.push(sRrLb, lbR)
-        array.push(sDir, dir)
-        array.push(sTp, tp)
-        array.push(sSl, sl)
-        array.push(sDone, false)
-        array.push(sTag, tag)
-        // break-even is only legal when the EQ genuinely sits between entry and
-        // target; otherwise the setup runs without a BE leg rather than arming
-        // the instant it is created
-        float beLvl = na
-        float beStp = na
-        if beOn and ((dir == 1 and eqLvl > entry and eqLvl < tp) or (dir == -1 and eqLvl < entry and eqLvl > tp))
-            beLvl := eqLvl
-            beStp := dir == 1 ? entry + risk * bePct / 100.0 : entry - risk * bePct / 100.0
-        line  lnB = na
-        label lbB = na
-        if not na(beLvl)
-            lnB := line.new(startT, beLvl, endT, beLvl, xloc=xloc.bar_time, color=beCol, width=setupLineW, style=line.style_dotted)
-            lbB := label.new(endT, beLvl, pre + beTxt, xloc=xloc.bar_time, style=label.style_label_left, color=GHOST, textcolor=beCol, size=size.tiny)
-        array.push(sBeLvl, beLvl)
-        array.push(sBeStop, beStp)
-        array.push(sBeArm, false)
-        line  naLn = na
-        label naLb = na
-        array.push(sBeLn, lnB)
-        array.push(sBeLb, lbB)
-        array.push(sBeSLn, naLn)
-        array.push(sBeSLb, naLb)
-        while array.size(sEntryLn) > setKeep
-            line.delete(array.shift(sEntryLn))
-            line.delete(array.shift(sTpLn))
-            line.delete(array.shift(sSlLn))
-            label.delete(array.shift(sTpLb))
-            label.delete(array.shift(sSlLb))
-            label.delete(array.shift(sRrLb))
-            lnBo = array.shift(sBeLn)
-            if not na(lnBo)
-                line.delete(lnBo)
-            lbBo = array.shift(sBeLb)
-            if not na(lbBo)
-                label.delete(lbBo)
-            lnSo = array.shift(sBeSLn)
-            if not na(lnSo)
-                line.delete(lnSo)
-            lbSo = array.shift(sBeSLb)
-            if not na(lbSo)
-                label.delete(lbSo)
-            array.shift(sBeLvl)
-            array.shift(sBeStop)
-            array.shift(sBeArm)
-            array.shift(sDir)
-            array.shift(sTp)
-            array.shift(sSl)
-            array.shift(sDone)
-            array.shift(sTag)
-
-// arm a watch when a range-TF candle closes. idx is that timeframe's slot in
-// lastRt, so each range TF gets its own new-candle detector.
-f_armWatch(int idx, string tag, float rH, float rL, int rT, float rA, int msLen) =>
-    if not na(rH) and not na(rL) and not na(rT) and rT != array.get(lastRt, idx)
-        array.set(lastRt, idx, rT)
-        array.push(wHi, rH)
-        array.push(wLo, rL)
-        array.push(wDead, rT + (setup3c ? 3 : 2) * msLen)
-        array.push(wSwH, false)
-        array.push(wSwL, false)
-        array.push(wExtH, rH)
-        array.push(wExtL, rL)
-        array.push(wAtr, rA)
-        array.push(wSrc, tag)
-        while array.size(wHi) > 30
-            array.shift(wHi)
-            array.shift(wLo)
-            array.shift(wDead)
-            array.shift(wSwH)
-            array.shift(wSwL)
-            array.shift(wExtH)
-            array.shift(wExtL)
-            array.shift(wAtr)
-            array.shift(wSrc)
-
-// run every live watch against ONE closed entry bar. bH/bL/bC/bT are the entry
-// timeframe's own values, so a 2m chart and a 15m chart feed this the identical
-// sequence and therefore produce identical setups.
-f_runEntryBar(float bH, float bL, float bC, int bT, int msLen) =>
-    if array.size(wHi) > 0
-        tzU  = tfltTz == "Exchange" ? syminfo.timezone : tfltTz
-        dayU = tfltDays == "" ? "1234567" : tfltDays
-        okT  = not tfltOn or ((not (blkOn and f_inWin(blkSess, bT, tzU, dayU))) and (not alwOn or f_inWin(alwSess, bT, tzU, dayU)))
-        k = array.size(wHi) - 1
-        while k >= 0
-            if bT > array.get(wDead, k)
-                array.remove(wHi, k)
-                array.remove(wLo, k)
-                array.remove(wDead, k)
-                array.remove(wSwH, k)
-                array.remove(wSwL, k)
-                array.remove(wExtH, k)
-                array.remove(wExtL, k)
-                array.remove(wAtr, k)
-                array.remove(wSrc, k)
-            else
-                hi = array.get(wHi, k)
-                lo = array.get(wLo, k)
-                if bH > array.get(wExtH, k)
-                    array.set(wExtH, k, bH)
-                if bL < array.get(wExtL, k)
-                    array.set(wExtL, k, bL)
-                swH = array.get(wSwH, k) or bH > hi
-                swL = array.get(wSwL, k) or bL < lo
-                array.set(wSwH, k, swH)
-                array.set(wSwL, k, swL)
-                eqR  = (hi + lo) / 2.0
-                canS = swH and bC < hi
-                canL = swL and bC > lo
-                wdir = canS and canL ? (bC < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
-                // a setup blocked by the trend filter does NOT consume the
-                // watch, exactly like the time filter: if bias flips while the
-                // range is still swept, it can still fire
-                okDir = wdir == 1 ? biasOkL : wdir == -1 ? biasOkS : false
-                if wdir != 0 and okT and okDir
-                    rngH = hi - lo
-                    pad  = f_slPad(rngH, array.get(wAtr, k), bC)
-                    anchor = wdir == -1 ? (slRef == "Range boundary" ? hi : array.get(wExtH, k)) : (slRef == "Range boundary" ? lo : array.get(wExtL, k))
-                    float sl = wdir == -1 ? anchor + pad : anchor - pad
-                    if slMinOn
-                        minD = slMinPct / 100.0 * rngH
-                        sl := wdir == -1 ? math.max(sl, bC + minD) : math.min(sl, bC - minD)
-                    tp = wdir == -1 ? lo : hi
-                    f_makeSetup(wdir, bC, sl, tp, eqR, bT, bT + 5 * msLen, array.get(wSrc, k))
-                    array.remove(wHi, k)
-                    array.remove(wLo, k)
-                    array.remove(wDead, k)
-                    array.remove(wSwH, k)
-                    array.remove(wSwL, k)
-                    array.remove(wExtH, k)
-                    array.remove(wExtL, k)
-                    array.remove(wAtr, k)
-                    array.remove(wSrc, k)
-            k := k - 1
-
-// ===================== RANGES: fetch, draw, arm ==============================
-// One request.security per enabled range timeframe, pulling the last CLOSED
-// candle's high / low / open-time plus that timeframe's own ATR. Drawing and
-// setups are separate switches but share the same fetch, so enabling both costs
-// nothing extra. Any timeframe TradingView accepts works here: 30, 60, 240, D, W.
-if tf1 != "" and (tf1Drw or (tf1Set and showSetup))
-    [rH, rL, rT, rA] = request.security(sym, tf1, [high[1], low[1], time[1], ta.atr(14)[1]], lookahead=barmerge.lookahead_off)
-    ms1 = timeframe.in_seconds(tf1) * 1000
-    nm1 = f_tfName(tf1)
-    isNew1 = not na(rT) and rT != array.get(lastRt, 1)
-    if tf1Drw and isNew1 and not na(rH) and not na(rL)
-        f_drawRange(h1A, l1A, e1A, s1A, b1A, rH, rL, int(rT), ms1, tf1Col, nm1)
-    if tf1Set and showSetup
-        f_armWatch(1, nm1, rH, rL, int(rT), rA, ms1)
-    else if isNew1 and not na(rT)
-        array.set(lastRt, 1, int(rT))
-
-if tf2 != "" and (tf2Drw or (tf2Set and showSetup))
-    [rH, rL, rT, rA] = request.security(sym, tf2, [high[1], low[1], time[1], ta.atr(14)[1]], lookahead=barmerge.lookahead_off)
-    ms2 = timeframe.in_seconds(tf2) * 1000
-    nm2 = f_tfName(tf2)
-    isNew2 = not na(rT) and rT != array.get(lastRt, 2)
-    if tf2Drw and isNew2 and not na(rH) and not na(rL)
-        f_drawRange(h2A, l2A, e2A, s2A, b2A, rH, rL, int(rT), ms2, tf2Col, nm2)
-    if tf2Set and showSetup
-        f_armWatch(2, nm2, rH, rL, int(rT), rA, ms2)
-    else if isNew2 and not na(rT)
-        array.set(lastRt, 2, int(rT))
-
-if tf3 != "" and (tf3Drw or (tf3Set and showSetup))
-    [rH, rL, rT, rA] = request.security(sym, tf3, [high[1], low[1], time[1], ta.atr(14)[1]], lookahead=barmerge.lookahead_off)
-    ms3 = timeframe.in_seconds(tf3) * 1000
-    nm3 = f_tfName(tf3)
-    isNew3 = not na(rT) and rT != array.get(lastRt, 3)
-    if tf3Drw and isNew3 and not na(rH) and not na(rL)
-        f_drawRange(h3A, l3A, e3A, s3A, b3A, rH, rL, int(rT), ms3, tf3Col, nm3)
-    if tf3Set and showSetup
-        f_armWatch(3, nm3, rH, rL, int(rT), rA, ms3)
-    else if isNew3 and not na(rT)
-        array.set(lastRt, 3, int(rT))
-
-// ===================== ENTRY-TF STREAM =======================================
-// Three sourcing paths, picked by simple (non-series) conditions so the
-// request.* calls sit in the same shape as the sweep/break blocks:
-//   blank                 -> the chart's own bars, no request at all
-//   entry TF < chart TF   -> request.security_lower_tf gives EVERY entry bar
-//                            inside the chart bar, in order, so a 15m chart
-//                            reproduces a 5m trigger exactly
-//   entry TF >= chart TF  -> request.security on the [1] offset, once per bar
-// The lower and higher paths dedupe on lastEt, so no entry bar is processed
-// twice and a partially-formed one is never processed at all.
-entryBlank   = entryTf == ""
-entrySecs    = entryBlank ? timeframe.in_seconds(timeframe.period) : timeframe.in_seconds(entryTf)
-entryMs      = entrySecs * 1000
-entryIsLower = not entryBlank and entrySecs < timeframe.in_seconds(timeframe.period)
-
-if showSetup and entryBlank and barstate.isconfirmed
-    f_runEntryBar(high, low, close, time, entryMs)
-
-if showSetup and entryIsLower
-    aH = request.security_lower_tf(sym, entryTf, high)
-    aL = request.security_lower_tf(sym, entryTf, low)
-    aC = request.security_lower_tf(sym, entryTf, close)
-    aT = request.security_lower_tf(sym, entryTf, time)
-    if barstate.isconfirmed
-        nEnt = math.min(array.size(aH), math.min(array.size(aL), math.min(array.size(aC), array.size(aT))))
-        // guard the loop: Pine's `for 0 to -1` counts DOWN and would execute
-        if nEnt > 0
-            for i = 0 to nEnt - 1
-                et = int(array.get(aT, i))
-                if na(lastEt) or et > lastEt
-                    lastEt := et
-                    f_runEntryBar(array.get(aH, i), array.get(aL, i), array.get(aC, i), et, entryMs)
-
-if showSetup and not entryBlank and not entryIsLower
-    [eH, eL, eC, eT] = request.security(sym, entryTf, [high[1], low[1], close[1], time[1]], lookahead=barmerge.lookahead_off)
-    if barstate.isconfirmed and not na(eT) and not na(eC)
-        et2 = int(eT)
-        if na(lastEt) or et2 > lastEt
-            lastEt := et2
-            f_runEntryBar(eH, eL, eC, et2, entryMs)
-
-// ===================== SETUPS: resolve TP / SL / BE ==========================
-// Outcome marking runs on chart bars deliberately: a lower chart TF resolves the
-// order of events more finely, and where one bar touches both the trigger and
-// the stop it resolves as a stop-out — so a higher chart TF is never more
-// optimistic than a lower one.
-if showSetup and array.size(sTp) > 0
-    j = array.size(sTp) - 1
-    while j >= 0
-        if not array.get(sDone, j)
-            dir = array.get(sDir, j)
-            tpv = array.get(sTp, j)
-            slv = array.get(sSl, j)
-            wasArm = array.get(sBeArm, j)
-            eff = wasArm ? array.get(sBeStop, j) : slv
-            hitTp = dir == 1 ? high >= tpv : low  <= tpv
-            hitSl = dir == 1 ? low  <= eff : high >= eff
-            if hitSl
-                if wasArm
-                    lbS = array.get(sBeSLb, j)
-                    if not na(lbS)
-                        label.set_text(lbS, beTxt + " ✓")
-                else
-                    label.set_text(array.get(sSlLb, j), (setTagTf ? array.get(sTag, j) + " " : "") + "SL ✗")
-                array.set(sDone, j, true)
-            else if hitTp
-                label.set_text(array.get(sTpLb, j), (setTagTf ? array.get(sTag, j) + " " : "") + "TP ✓")
-                array.set(sDone, j, true)
-            else
-                bl = array.get(sBeLvl, j)
-                if not na(bl) and not wasArm and (dir == 1 ? high >= bl : low <= bl)
-                    array.set(sBeArm, j, true)
-                    oln = array.get(sSlLn, j)
-                    if not na(oln)
-                        line.set_color(oln, color.new(setupSlC, beFade))
-                    olb = array.get(sSlLb, j)
-                    if not na(olb)
-                        label.set_textcolor(olb, color.new(setupSlC, beFade))
-                    bs = array.get(sBeStop, j)
-                    if not na(bs) and not na(oln)
-                        x1 = int(line.get_x1(oln))
-                        x2 = int(line.get_x2(oln))
-                        array.set(sBeSLn, j, line.new(x1, bs, x2, bs, xloc=xloc.bar_time, color=beCol, width=setupLineW, style=line.style_dotted))
-                        array.set(sBeSLb, j, label.new(x2, bs, beTxt + " SL", xloc=xloc.bar_time, style=label.style_label_left, color=GHOST, textcolor=beCol, size=size.tiny))
-        j := j - 1
-
-// ===================== OPTIONAL: Sweeps & Breaks (per timeframe) =============
-// Data loads only for timeframes where at least one of the two layers is on.
-sw5 = showSweep and swp5On
-br5 = showBreak and brk5On
-if sw5 or br5
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "5",   [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("5m", sw5, br5, al, ah, bl, bh, bo, bc, int(bt), 300000, not na(bt) and bt != bt[1])
-sw15 = showSweep and swp15On
-br15 = showBreak and brk15On
-if sw15 or br15
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "15",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("15m", sw15, br15, al, ah, bl, bh, bo, bc, int(bt), 900000, not na(bt) and bt != bt[1])
-sw30 = showSweep and swp30On
-br30 = showBreak and brk30On
-if sw30 or br30
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "30",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("30m", sw30, br30, al, ah, bl, bh, bo, bc, int(bt), 1800000, not na(bt) and bt != bt[1])
-sw1 = showSweep and swp1On
-br1H = showBreak and brk1On
-if sw1 or br1H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "60",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("1H", sw1, br1H, al, ah, bl, bh, bo, bc, int(bt), 3600000, not na(bt) and bt != bt[1])
-sw2 = showSweep and swp2On
-br2H = showBreak and brk2On
-if sw2 or br2H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "120", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("2H", sw2, br2H, al, ah, bl, bh, bo, bc, int(bt), 7200000, not na(bt) and bt != bt[1])
-sw4 = showSweep and swp4On
-br4H = showBreak and brk4On
-if sw4 or br4H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "240", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("4H", sw4, br4H, al, ah, bl, bh, bo, bc, int(bt), 14400000, not na(bt) and bt != bt[1])
-sw8 = showSweep and swp8On
-br8H = showBreak and brk8On
-if sw8 or br8H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "480", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("8H", sw8, br8H, al, ah, bl, bh, bo, bc, int(bt), 28800000, not na(bt) and bt != bt[1])
-swD = showSweep and swpDOn
-brD = showBreak and brkDOn
-if swD or brD
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "1D",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("D", swD, brD, al, ah, bl, bh, bo, bc, int(bt), 86400000, not na(bt) and bt != bt[1])
-swW = showSweep and swpWOn
-brW = showBreak and brkWOn
-if swW or brW
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("W", swW, brW, al, ah, bl, bh, bo, bc, int(bt), 604800000, not na(bt) and bt != bt[1])
-
-// blocked-hours shading is display only, so it stays on the chart bar
-tzShade   = tfltTz == "Exchange" ? syminfo.timezone : tfltTz
-daysShade = tfltDays == "" ? "1234567" : tfltDays
-bgcolor(tfltOn and tfltShade and blkOn and f_inWin(blkSess, time, tzShade, daysShade) ? tfltShadeC : na, title="Blocked hours")
-
-// ===================== OPTIONAL: Daily / Weekly CRT ranges ===================
-[ndHi, ndLo, ndT] = request.security(sym, "1D", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-[nwHi, nwLo, nwT] = request.security(sym, "1W", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-
-shiftMs = 7 * 3600 * 1000
-newNYd = ta.change(dayofmonth(time + shiftMs, "America/New_York")) != 0
-newNYw = ta.change(weekofyear(time + shiftMs, "America/New_York")) != 0
-
-var float cdH = na
-var float cdL = na
-var int   cdS = na
-var float pdH = na
-var float pdL = na
-var int   pdS = na
-if newNYd
-    pdH := cdH
-    pdL := cdL
-    pdS := cdS
-    cdH := high
-    cdL := low
-    cdS := time
-else
-    cdH := math.max(nz(cdH, high), high)
-    cdL := math.min(nz(cdL, low),  low)
-
-var float cwH = na
-var float cwL = na
-var int   cwS = na
-var float pwH = na
-var float pwL = na
-var int   pwS = na
-if newNYw
-    pwH := cwH
-    pwL := cwL
-    pwS := cwS
-    cwH := high
-    cwL := low
-    cwS := time
-else
-    cwH := math.max(nz(cwH, high), high)
-    cwL := math.min(nz(cwL, low),  low)
-
-prevDHi = nyAnchor ? pdH : ndHi
-prevDLo = nyAnchor ? pdL : ndLo
-prevDSt = nyAnchor ? pdS : ndT
-prevWHi = nyAnchor ? pwH : nwHi
-prevWLo = nyAnchor ? pwL : nwLo
-prevWSt = nyAnchor ? pwS : nwT
-newDailyEvt  = nyAnchor ? newNYd : (ndT != ndT[1])
-newWeeklyEvt = nyAnchor ? newNYw : (nwT != nwT[1])
-dProjMs = 86400000 * htfProj
-wProjMs = 604800000 * htfProj
-
-if (showDR and newDailyEvt) or (showWR and newWeeklyEvt)
-    f_clearDW()
-    if showDR
-        f_drawHTF(prevDHi, prevDLo, int(prevDSt), dProjMs, dCol, "D")
-    if showWR
-        f_drawHTF(prevWHi, prevWLo, int(prevWSt), wProjMs, wCol, "W")
-
-// ===================== OPTIONAL: Multi-TF FVG / Order Blocks =================
-pdaOn = showFVG or showOB
-if pdaOn and tf5On
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "5",   [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "5m", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tf15On
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "15",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "15m", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tf30On
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "30",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "30m", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tf1On
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "60",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "1h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tf2On
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "120", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "2h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tf4On
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "240", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "4h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tf8On
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "480", [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "8h", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tfDOn
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "1D",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "1D", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-if pdaOn and tfWOn
-    [h1,h3,l1,l3,o3,c3,t1,t2] = request.security(sym, "1W",  [high[1],high[3],low[1],low[3],open[3],close[3],time[1],time[2]], lookahead=barmerge.lookahead_off)
-    f_pdScan(true, "1W", h1, h3, l1, l3, o3, c3, int(t2), not na(t1) and t1 != t1[1])
-
-if showFVG
-    f_maintainT(fvgU, fvgUm, fvgUh, true,  fvgUpC)
-    f_maintainT(fvgD, fvgDm, fvgDh, false, fvgDnC)
-if showOB
-    f_maintainT(obU, obUm, obUh, true,  obUpC)
-    f_maintainT(obD, obDm, obDh, false, obDnC)
-
-// ===================== OPTIONAL: Swing S/R + Equal H/L =======================
-srUseTF = srTF == "" ? timeframe.period : srTF
-[srPh, srPl] = request.security(sym, srUseTF, [ta.pivothigh(srLen, srLen), ta.pivotlow(srLen, srLen)], lookahead=barmerge.lookahead_off)
-var float lastPH = na
-var float prevPH = na
-var float lastPL = na
-var float prevPL = na
-var line resLine = na
-var line supLine = na
-var line eqhLine = na
-var line eqlLine = na
-var label resLbl = na
-var label supLbl = na
-var label eqhLbl = na
-var label eqlLbl = na
-var int resBar = na
-var int supBar = na
-var int eqhBar = na
-var int eqlBar = na
-
-if not na(srPh)
-    prevPH := lastPH
-    lastPH := srPh
-    if showSR
-        if not na(resLine)
-            line.delete(resLine)
-        resLine := line.new(bar_index - srLen, srPh, bar_index, srPh, color=resCol, width=2)
-        resBar  := bar_index - srLen
-    if showEQL and not na(prevPH) and math.abs(lastPH - prevPH) <= eqlTol * atrChart
-        if not na(eqhLine)
-            line.delete(eqhLine)
-        eqhLine := line.new(bar_index - srLen, math.max(lastPH, prevPH), bar_index, math.max(lastPH, prevPH), color=eqlCol, style=line.style_dotted)
-        eqhBar  := bar_index - srLen
-if not na(srPl)
-    prevPL := lastPL
-    lastPL := srPl
-    if showSR
-        if not na(supLine)
-            line.delete(supLine)
-        supLine := line.new(bar_index - srLen, srPl, bar_index, srPl, color=supCol, width=2)
-        supBar  := bar_index - srLen
-    if showEQL and not na(prevPL) and math.abs(lastPL - prevPL) <= eqlTol * atrChart
-        if not na(eqlLine)
-            line.delete(eqlLine)
-        eqlLine := line.new(bar_index - srLen, math.min(lastPL, prevPL), bar_index, math.min(lastPL, prevPL), color=eqlCol, style=line.style_dotted)
-        eqlBar  := bar_index - srLen
-
-if not na(resLine)
-    line.set_x1(resLine, srMaxLen > 0 ? math.max(nz(resBar, bar_index), bar_index - srMaxLen) : nz(resBar, bar_index))
-    line.set_x2(resLine, bar_index + srExt)
-if not na(supLine)
-    line.set_x1(supLine, srMaxLen > 0 ? math.max(nz(supBar, bar_index), bar_index - srMaxLen) : nz(supBar, bar_index))
-    line.set_x2(supLine, bar_index + srExt)
-if not na(eqhLine)
-    line.set_x1(eqhLine, srMaxLen > 0 ? math.max(nz(eqhBar, bar_index), bar_index - srMaxLen) : nz(eqhBar, bar_index))
-    line.set_x2(eqhLine, bar_index + srExt)
-if not na(eqlLine)
-    line.set_x1(eqlLine, srMaxLen > 0 ? math.max(nz(eqlBar, bar_index), bar_index - srMaxLen) : nz(eqlBar, bar_index))
-    line.set_x2(eqlLine, bar_index + srExt)
-resLbl := f_srLabel(resLbl, showSR and showSrLbl,  resLine, "Resistance", resCol, srExt, srLabSz)
-supLbl := f_srLabel(supLbl, showSR and showSrLbl,  supLine, "Support",    supCol, srExt, srLabSz)
-eqhLbl := f_srLabel(eqhLbl, showEQL and showSrLbl, eqhLine, "EQH",        eqlCol, srExt, srLabSz)
-eqlLbl := f_srLabel(eqlLbl, showEQL and showSrLbl, eqlLine, "EQL",        eqlCol, srExt, srLabSz)
-
-// ===================== OPTIONAL: Supply / Demand zones =======================
-sdUseTF = sdTF == "" ? timeframe.period : sdTF
-[sdPhV, sdPhBody, sdPlV, sdPlBody] = request.security(sym, sdUseTF, [ta.pivothigh(sdLen, sdLen), math.max(open[sdLen], close[sdLen]), ta.pivotlow(sdLen, sdLen), math.min(open[sdLen], close[sdLen])], lookahead=barmerge.lookahead_off)
-var array<box> supplyA = array.new<box>()
-var array<box> demandA = array.new<box>()
-var array<int> supplyT = array.new<int>()
-var array<int> demandT = array.new<int>()
-if showSD and not na(sdPhV)
-    bS = box.new(bar_index - sdLen, sdPhV, bar_index, sdPhBody, border_color=TRANSP, bgcolor=supplyC, text=showSdLbl ? "Supply" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
-    array.push(supplyA, bS)
-    array.push(supplyT, time)
-    while array.size(supplyA) > sdKeep
-        box.delete(array.shift(supplyA))
-        array.shift(supplyT)
-if showSD and not na(sdPlV)
-    bD = box.new(bar_index - sdLen, sdPlBody, bar_index, sdPlV, border_color=TRANSP, bgcolor=demandC, text=showSdLbl ? "Demand" : "", text_color=zoneTxtCol, text_halign=text.align_center, text_valign=text.align_center, text_size=f_lsz(sdLabSz))
-    array.push(demandA, bD)
-    array.push(demandT, time)
-    while array.size(demandA) > sdKeep
-        box.delete(array.shift(demandA))
-        array.shift(demandT)
-if array.size(supplyA) > 0
-    i = array.size(supplyA) - 1
-    while i >= 0
-        b = array.get(supplyA, i)
-        bucket = f_wkBucket(array.get(supplyT, i))
-        if bucket >= 2
-            box.delete(b)
-            array.remove(supplyA, i)
-            array.remove(supplyT, i)
-        else
-            vis = showSD and f_wkVisible(bucket)
-            box.set_right(b, bar_index + sdExt)
-            box.set_bgcolor(b, vis ? supplyC : TRANSP)
-            box.set_text_color(b, vis ? zoneTxtCol : TRANSP)
-        i := i - 1
-if array.size(demandA) > 0
-    i2 = array.size(demandA) - 1
-    while i2 >= 0
-        b = array.get(demandA, i2)
-        bucket = f_wkBucket(array.get(demandT, i2))
-        if bucket >= 2
-            box.delete(b)
-            array.remove(demandA, i2)
-            array.remove(demandT, i2)
-        else
-            vis = showSD and f_wkVisible(bucket)
-            box.set_right(b, bar_index + sdExt)
-            box.set_bgcolor(b, vis ? demandC : TRANSP)
-            box.set_text_color(b, vis ? zoneTxtCol : TRANSP)
-        i2 := i2 - 1
