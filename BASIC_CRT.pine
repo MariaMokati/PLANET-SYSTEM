@@ -79,7 +79,7 @@ showSweep   = input.bool(false, "Show liquidity sweeps", group=gSwp)
 sweepDesign = input.string("Label", "Sweep marker design", options=["Label","Triangle S","Circle S"], group=gSwp, tooltip="Label = pointer tag ('Sweep'). Triangle S / Circle S = minimal shape with an 'S' on the sweeping candle.")
 sweepLbl    = input.bool(true,  "Show 'Sweep' text (Label design only)", group=gSwp)
 sweepTf     = input.bool(true,  "Title each sweep with its timeframe", group=gSwp, tooltip="On = '4H Sweep', '1H Sweep' etc, so you always know which timeframe produced the marker.")
-sweepAnchor = input.string("Candle close", "Sweep marker position", options=["Candle close","Candle open"], group=gSwp, tooltip="Candle close = the moment the sweep was confirmed (recommended). Candle open = the far left edge of that candle — on a 15m chart that puts a 4H marker up to 77 hours away from the wick it describes.")
+sweepAnchor = input.string("Candle close", "Sweep marker position", options=["Candle close","Candle open"], group=gSwp, tooltip="Candle close = the last bar of the candle that did the sweeping, which is where it was confirmed (recommended). Candle open = the first bar of that candle — on a 15m chart that puts a 4H marker up to 4 hours to the left of the wick it describes.")
 sweepSz     = input.string("Tiny", "Sweep marker size", options=["Tiny","Small","Normal"], group=gSwp)
 sweepUpC    = input.color(color.new(color.lime, 0), "Bullish sweep (swept lows)", group=gSwp)
 sweepDnC    = input.color(color.new(color.red, 0),  "Bearish sweep (swept highs)", group=gSwp)
@@ -167,6 +167,9 @@ HIDE   = color.new(color.gray, 100)
 // timestamp it opened at. Everything else in this file is drawn from these three
 // numbers.
 sym = syminfo.tickerid
+// length of one CHART bar, in milliseconds — used to land higher-timeframe
+// markers on a real bar of the chart you are actually looking at
+chartMs = timeframe.in_seconds(timeframe.period) * 1000
 [rHigh, rLow, rOpenT] = request.security(sym, tfIn, [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
 tfMs = timeframe.in_seconds(tfIn) * 1000
 tfNm = f_tfName(tfIn)
@@ -304,10 +307,20 @@ f_breakMark(int kind, int atT, float y, string tfName) =>
 // so each source candle is classified exactly once no matter which chart
 // timeframe you are looking at.
 //
-// bT is B's OPEN time. On a chart below the source timeframe that is the far
-// LEFT edge of the candle — anchoring there puts a 4H marker up to 77 hours
-// away from the wick it describes. bT + msLen - 1 is the last millisecond of
-// B itself, which is where the event was confirmed.
+// ANCHORING. xloc.bar_time positions a drawing by TIME, and a time that does not
+// match a bar is resolved to the NEAREST bar. So the anchor has to be an actual
+// chart-bar open time, not merely a moment inside the candle:
+//
+//   bT                     B's open  = the FIRST chart bar of the candle
+//   bT + msLen - 1         one ms before B ends. Measured against real data this
+//                          matches a chart bar 0% of the time and resolves to the
+//                          bar AFTER the candle — every marker one bar too far
+//                          right. This was wrong and is not used.
+//   bT + (msLen - chartMs) the open time of the LAST chart bar inside B, which is
+//                          an exact bar time 100% of the time. This is used.
+//
+// Clamped to `time` so a marker can never be placed to the right of the bar that
+// is currently being processed.
 f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bO, float bC, int bT, int msLen, bool nb) =>
     if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC)
         tookLo = bLoV < aLoV
@@ -320,8 +333,9 @@ f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float 
         isBreak = brUp or brDn
         swHi = tookHi and not isBreak and bC < aHiV
         swLo = tookLo and not isBreak and bC > aLoV
-        swT = sweepAnchor == "Candle open" ? bT : bT + msLen - 1
-        brT = breakAnchor == "Candle open" ? bT : bT + msLen - 1
+        lastBarT = math.min(bT + math.max(0, msLen - chartMs), time)
+        swT = sweepAnchor == "Candle open" ? bT : lastBarT
+        brT = breakAnchor == "Candle open" ? bT : lastBarT
         cmbU = comboOn and tookLo
         cmbD = comboOn and tookHi
         if brEn and brUp
