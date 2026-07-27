@@ -80,14 +80,15 @@ swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=
 // came back inside, you get a "Break" tag instead. Mirrors the sweep layer
 // exactly: master switch, per-timeframe switches, own design, size and colours.
 //
-// ONE TAG PER CANDLE. A candle that wicks through one side of the prior range
-// and expands clean through the other is a single event — a break — not a break
-// plus a phantom sweep of the side it only passed through. Classification runs
+// EACH LEVEL IS JUDGED ON ITS OWN. A marker marks a LEVEL, not a candle: a
+// candle that wicks below the prior low and expands through the prior high is
+// TWO events — a sweep of the low and a break of the high — and gets both tags,
+// exactly like a double sweep gets one tag on each side. Classification runs
 // before display, so which layers you have switched on never changes what a
 // candle IS.
 gBrk = "Breaks  (optional)"
 showBreak   = input.bool(false, "Show breaks (closed BEYOND the level)", group=gBrk, tooltip="Master switch for the whole break layer. A break = the candle took the prior high/low and finished past it instead of reclaiming.")
-brkStrict   = input.bool(true,  "Break needs the FULL body outside", group=gBrk, tooltip="ON (recommended): the candle's whole body — open AND close — must sit clear of the level. A candle whose body still straddles the level is not a break; it is indecision, and gets no tag at all. OFF: the close alone being outside is enough, which tags body-straddling candles as breaks too.")
+brkStrict   = input.bool(false, "Break needs the FULL body outside", group=gBrk, tooltip="OFF (measured default): the close finishing beyond the level is enough. ON: the whole body — open AND close — must sit clear of the level; a body still straddling it gets no tag at all. Measured on 16 years of gold 4H, strict mode left about 38% of level-taking candles with no tag, which is why loose is the default.")
 breakDesign = input.string("Label", "Break marker design", options=["Label","Triangle B","Circle B"], group=gBrk, tooltip="Label = pointer tag ('Break'). Triangle B / Circle B = minimal shape with a 'B' on the breaking candle.")
 breakLbl    = input.bool(true,  "Show 'Break' text (Label design only)", group=gBrk)
 breakTf     = input.bool(true,  "Title each break with its timeframe", group=gBrk, tooltip="On = '4H Break', '1H Break' etc.")
@@ -115,7 +116,9 @@ gSet = "CRT setups  (optional)"
 showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
 setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. Target the opposite extreme; SL beyond the sweep.")
 setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Same live logic but the sweep+reclaim may complete up to two candles after the range instead of one.")
-setupMinRR = input.float(1.5, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet)
+setupConf  = input.string("Chart bar close (original)", "Setup confirms on", options=["Chart bar close (original)","Range candle close (research)"], group=gSet, tooltip="What counts as the full bar closing back inside the range. Chart bar close = the first CHART-timeframe bar that closes back inside fires the setup — the original behaviour, earliest in, tightest stop. Range candle close = the RANGE-timeframe candle itself must close back inside; it fires later but measured about +0.07 R per trade better across seven instruments, because the earlier entry's tighter stop makes a fixed spread a much bigger share of the risk.")
+setupMinRng= input.float(0.0, "Skip ranges smaller than (× ATR of range TF)", minval=0, step=0.1, group=gSet, tooltip="0 = take every range (default). Bigger ranges tested better than smaller ones on every instrument, monotonically — the smallest ranges were the worst bucket everywhere. Try 1.0 to drop them. The range still draws exactly as always; it just arms no setup.")
+setupMinRR = input.float(0.0, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet, tooltip="0 = off (measured default). Filtering for RR ≥ 1.5 tested WORSE on all seven instruments — it keeps the setups whose sweeps barely ran and throws away the survivable stops; on gold it roughly doubled the loss per trade. Raise it only if you have your own reason to.")
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
 setupShortC= input.color(color.new(color.maroon, 0), "Short setup", group=gSet)
 setupTpC   = input.color(color.new(color.green, 0),  "Take-profit line", group=gSet)
@@ -145,7 +148,7 @@ setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 // every point added to the stop lowers the natural R:R and some setups will stop
 // passing "Only show setups with RR >=". That is a real trade-off, not a bug.
 gSL = "Stop loss"
-slRef     = input.string("Swept extreme", "Stop anchored to", options=["Swept extreme","Range boundary"], group=gSL, tooltip="Swept extreme = beyond the actual sweep wick (default, and what CRT normally means). Range boundary = beyond the CRT high/low itself, ignoring how far the wick ran — tighter, and usually the wrong direction if you are being wicked out.")
+slRef     = input.string("Half the range past the level (research)", "Stop anchored to", options=["Half the range past the level (research)","Swept extreme","Range boundary"], group=gSL, tooltip="Half the range past the level (default) = the stop sits 50% of the range height beyond the swept high/low, and never tighter than the actual sweep wick. The widest of the three — and the only one that tested best on ALL seven instruments: wick-anchored stops lost roughly twice as much per trade, because a tight stop turns a fixed spread into a huge fraction of R. Swept extreme = just beyond the sweep wick (classic CRT). Range boundary = just beyond the CRT high/low itself — the tightest, and the first to be wicked out.")
 slPadMode = input.string("ATR of range TF", "Stop pad units", options=["ATR of range TF","ATR of chart TF","% of range height","% of price","Points"], group=gSL, tooltip="What the pad amount below is measured in. '% of range height' scales itself to every instrument and timeframe automatically, which is usually the easiest to reason about.")
 slPadVal  = input.float(0.1, "Stop pad amount", minval=0, step=0.05, group=gSL, tooltip="0.1 with 'ATR of range TF' reproduces the original behaviour. With '% of range height' try 10-15. With 'Points' this is in the 'Price per point' unit set in the Equilibrium group.")
 slMinOn   = input.bool(false, "Enforce a minimum stop distance", group=gSL, tooltip="Turn this on first if you are being stopped out by noise. It guarantees a floor on entry-to-stop distance regardless of how close the reclaim closed to the swept wick.")
@@ -163,11 +166,12 @@ slBuffTk  = input.float(0, "Extra buffer (ticks)", minval=0, step=1, group=gSL, 
 // window can still fire later when price reclaims inside an allowed one.
 gTime = "Setup time filter"
 tfltOn  = input.bool(false, "Enable setup time filter", group=gTime, tooltip="Master switch. Off = setups show at all hours (original behaviour).")
+tfltRef = input.string("Range formation (research)", "Windows apply to", options=["Range formation (research)","Entry bar"], group=gTime, tooltip="Range formation = the windows test WHEN THE RANGE CANDLE OPENED. The session that built the range is what carried the measurable edge, and the same session ranking reproduced across two independent studies. Entry bar = the windows test the bar the setup fires on (the original behaviour).")
 tfltTz  = input.string("Africa/Johannesburg", "Timezone for the windows below", options=["Africa/Johannesburg","America/New_York","Europe/London","Asia/Tokyo","UTC","Exchange"], group=gTime, tooltip="Times are read in this zone. Africa/Johannesburg = SAST (UTC+2), so you type the hours exactly as you see them locally.")
-blkOn   = input.bool(true,  "Block setups in this window", group=gTime, tooltip="Suppresses setups that trigger inside the window — e.g. the 19:00–00:00 SAST dead zone.")
-blkSess = input.session("1900-0000", "Blocked window", group=gTime, tooltip="Default 1900-0000 = 7pm to midnight SAST.")
-alwOn   = input.bool(false, "Only show setups in this window", group=gTime, tooltip="When on, everything OUTSIDE this window is hidden. Use it to isolate Asia through the New York volatility window.")
-alwSess = input.session("0300-0700", "Allowed window", group=gTime, tooltip="Default 0300-0700 = 3am to 7am SAST (Asia into the New York volatility run).")
+blkOn   = input.bool(true,  "Block setups in this window", group=gTime, tooltip="Suppresses setups from this window. Measured worst 4H sessions across seven instruments, in order: NY afternoon (19:00 SAST) and Asia (03:00 SAST) — both negative on 7 of 7.")
+blkSess = input.session("1900-0000", "Blocked window", group=gTime, tooltip="Default 1900-0000 = 7pm to midnight SAST, the NY-afternoon dead zone — the worst measured bucket.")
+alwOn   = input.bool(false, "Only show setups in this window", group=gTime, tooltip="When on, everything OUTSIDE this window is hidden.")
+alwSess = input.session("1100-1700", "Allowed window", group=gTime, tooltip="Default 1100-1700 SAST = London PM into the NY open — the two sessions that measured best across all seven instruments, and the most reproducible ranking found in the whole study. (The old default, 0300-0700 Asia, measured among the worst.)")
 tfltDays= input.string("1234567", "Days the windows apply to", group=gTime, tooltip="1=Sunday … 7=Saturday. Leave as 1234567 for every day.")
 tfltShade = input.bool(false, "Shade the blocked hours on the chart", group=gTime)
 tfltShadeC= input.color(color.new(color.red, 92), "Blocked-hours shade", group=gTime)
@@ -177,8 +181,8 @@ tfltShadeC= input.color(color.new(color.red, 92), "Blocked-hours shade", group=g
 // stop is moved to just past entry, locking in a small profit instead of a true
 // scratch. Marked with the same short dotted line + tiny label as TP / SL.
 gBE = "Break-even"
-beOn   = input.bool(true, "Break-even at range EQ", group=gBE, tooltip="Draws a BE line at the range equilibrium. When price reaches it, the stop moves to just past entry and a second stop line appears; the original SL fades out.")
-beTxt  = input.string("BE", "BE label text", options=["BE","Break-even"], group=gBE)
+beOn   = input.bool(true, "Break-even at range EQ", group=gBE, tooltip="Draws a line at the range equilibrium. When price reaches it, the stop moves to just past entry and a second stop line appears; the original SL fades out. Trade it as TP1: banking HALF there and running the rest tested better than holding full size on all seven instruments, and it is what turns most setups green — about 63% of setups ended positive under that management in testing.")
+beTxt  = input.string("TP1", "EQ line label", options=["TP1","BE","Break-even"], group=gBE, tooltip="TP1 = treat the EQ as the first target: bank half, stop to just past entry, rest runs to the far extreme.")
 bePct  = input.float(10, "BE stop offset (% of original risk)", minval=0, maxval=90, step=1, group=gBE, tooltip="How far past ENTRY the moved stop sits, as a share of the original entry-to-SL distance. Longs go above entry, shorts below. 10% locks in a small win rather than a pure scratch, and scales automatically across instruments.")
 beCol  = input.color(color.new(#FF9800, 0), "Break-even colour", group=gBE)
 beFade = input.int(70, "Faded original SL transparency", minval=0, maxval=95, group=gBE, tooltip="Once BE arms, the original stop line dims to this transparency so you can still see where it started.")
@@ -276,6 +280,23 @@ f_lsz(string s) =>
     s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
 f_lstyle(string s) =>
     s == "Dashed" ? line.style_dashed : s == "Solid" ? line.style_solid : line.style_dotted
+
+// is timestamp t inside the HHMM-HHMM session window on one of the listed days,
+// read in tz? Works for ANY timestamp, not just the current bar — which is what
+// lets the time filter judge the range candle's formation time.
+f_winHit(int t, string sess, string days, string tz) =>
+    bool hit = false
+    if not na(t)
+        if str.contains(days, str.tostring(dayofweek(t, tz)))
+            parts = str.split(sess, "-")
+            if array.size(parts) == 2
+                a = array.get(parts, 0)
+                b = array.get(parts, 1)
+                m1 = int(60 * str.tonumber(str.substring(a, 0, 2)) + str.tonumber(str.substring(a, 2, 4)))
+                m2 = int(60 * str.tonumber(str.substring(b, 0, 2)) + str.tonumber(str.substring(b, 2, 4)))
+                md = 60 * hour(t, tz) + minute(t, tz)
+                hit := m1 == m2 ? true : m1 < m2 ? (md >= m1 and md < m2) : (md >= m1 or md < m2)
+    hit
 
 mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, string szStr) =>
     bg = design == "Ghost"  ? color.new(color.gray, 100) : design == "Tinted" ? color.new(mainCol, 70) : design == "Chip" ? chart.bg_color : mainCol
@@ -414,7 +435,9 @@ sym    = syminfo.tickerid
 cHigh  = request.security(sym, tfIn, high[1], lookahead=barmerge.lookahead_off)
 cLow   = request.security(sym, tfIn, low[1],  lookahead=barmerge.lookahead_off)
 cOpenT = request.security(sym, tfIn, time[1], lookahead=barmerge.lookahead_off)
+cClose = request.security(sym, tfIn, close[1], lookahead=barmerge.lookahead_off)
 tfMs   = timeframe.in_seconds(tfIn) * 1000
+chartMs = timeframe.in_seconds(timeframe.period) * 1000
 // range-TF ATR for stop padding. The range itself = the last closed candle (cHigh/cLow).
 atrTf = request.security(sym, tfIn, ta.atr(14)[1], lookahead=barmerge.lookahead_off)
 // chart-TF ATR — an alternative pad unit, and the tolerance for equal highs/lows
@@ -448,6 +471,7 @@ var array<label> sBeSLb   = array.new<label>()
 // live setup watches: each = a closed HTF range being watched for a sweep+reclaim
 var array<float> wHi   = array.new<float>()
 var array<float> wLo   = array.new<float>()
+var array<int>   wOpenT= array.new<int>()   // the range candle's OPEN time (for the formation-time filter)
 var array<int>   wDead = array.new<int>()
 var array<bool>  wSwH  = array.new<bool>()
 var array<bool>  wSwL  = array.new<bool>()
@@ -488,21 +512,20 @@ f_breakMark(bool bull, int atT, float y, string tfName) =>
 //          is indecision, not a break, and gets nothing.
 // SWEEP  — B took the level and closed back INSIDE the range. Rejection.
 //
-// The classification is decided for the CANDLE, once, before any drawing. That
-// is what stops an outside candle — one that wicks below A's low and expands
-// through A's high — from being tagged as a sweep AND a break at the same time.
-// A break outranks a sweep because expansion through a level is a strictly
-// stronger statement than a wick through the opposite one.
-//
-// Note the gate is `isBreak`, NOT `brEn and isBreak`: a break candle stays a
-// break even when the break layer is switched off, so turning breaks off can
-// never make phantom sweeps appear.
+// EACH LEVEL RESOLVES INDEPENDENTLY. A marker marks a LEVEL, not a candle: an
+// outside candle that wicks below A's low and expands through A's high is two
+// events — a sweep of the low AND a break of the high — and gets both tags, the
+// same way a double sweep gets a tag on each side. On any ONE level a break
+// still outranks a sweep (closing beyond a level is a strictly stronger
+// statement than wicking through it), and that ranking is decided per side
+// before any drawing, so which layers you have switched on never changes what
+// a candle IS.
 //
 // bT is the source candle's OPEN time. On a chart TF below the source TF that
 // is the far LEFT edge of the candle — an hour to the left of the wick for a 1H
 // marker on a 2m chart — which is why an untethered tag appears floating over
-// empty space. msLen lets us anchor at the candle's last chart bar instead, i.e.
-// where the sweep or break was actually confirmed.
+// empty space. msLen lets us anchor at the candle's LAST CHART BAR instead,
+// i.e. where the sweep or break was actually confirmed.
 f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bO, float bC, int bT, int msLen, bool nb) =>
     if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC)
         tookLo = bLoV < aLoV
@@ -511,12 +534,19 @@ f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float 
         bodyLo = math.min(bO, bC)
         brUp = tookHi and (brkStrict ? bodyLo > aHiV : bC > aHiV)
         brDn = tookLo and (brkStrict ? bodyHi < aLoV : bC < aLoV)
-        // brUp and brDn cannot both be true: aHiV >= aLoV makes them exclusive.
-        isBreak = brUp or brDn
-        swDn = not isBreak and tookHi and bC < aHiV   // took the high, closed back inside
-        swUp = not isBreak and tookLo and bC > aLoV   // took the low,  closed back inside
-        swT = sweepAnchor == "Candle open" ? bT : bT + msLen - 1
-        brT = breakAnchor == "Candle open" ? bT : bT + msLen - 1
+        // each side on its own: taking a level and NOT breaking it = sweeping it.
+        // A candle that takes both sides therefore gets a tag on each — a double
+        // sweep shows both, an outside candle shows a sweep AND a break.
+        swDn = tookHi and not brUp and bC < aHiV   // took the high, closed back inside
+        swUp = tookLo and not brDn and bC > aLoV   // took the low,  closed back inside
+        // the candle's last CHART bar, clamped to now. bT + msLen - 1 is not a
+        // real bar open, and xloc.bar_time snaps such a timestamp to the NEXT
+        // bar — one bar past the candle. Stepping back one chart bar lands the
+        // marker exactly on the candle that confirmed the event (verified
+        // against every source/chart pairing tested).
+        confT = math.min(bT + math.max(0, msLen - chartMs), time)
+        swT = sweepAnchor == "Candle open" ? bT : confT
+        brT = breakAnchor == "Candle open" ? bT : confT
         if brEn and brUp
             f_breakMark(true, brT, bHiV, tfName)
         if brEn and brDn
@@ -742,6 +772,17 @@ inAlw   = not na(time(timeframe.period, alwSess + ":" + daysUse, tzUse))
 // Block wins on overlap. With the master switch off nothing is filtered.
 setupTimeOk = not tfltOn or ((not (blkOn and inBlk)) and (not alwOn or inAlw))
 bgcolor(tfltOn and tfltShade and blkOn and inBlk ? tfltShadeC : na, title="Blocked hours")
+// The same verdict for the RANGE CANDLE'S formation time — used when "Windows
+// apply to" is set to Range formation. The session that BUILT the range is what
+// carried the measured edge, so the windows judge that timestamp instead of the
+// bar the setup fires on.
+f_watchTimeOk(int t0) =>
+    bool ok = true
+    if tfltOn
+        blkHit = blkOn and f_winHit(t0, blkSess, daysUse, tzUse)
+        alwHit = f_winHit(t0, alwSess, daysUse, tzUse)
+        ok := not blkHit and (not alwOn or alwHit)
+    ok
 
 // ===================== OPTIONAL: CRT setups (live sweep → reclaim) ============
 // The range = the last CLOSED range-TF candle. The MOMENT it closes we arm a
@@ -750,9 +791,13 @@ bgcolor(tfltOn and tfltShade and blkOn and inBlk ? tfltShadeC : na, title="Block
 // NOT wait for the whole next HTF candle to close. SL beyond the swept extreme,
 // TP the opposite range extreme. Use a chart TF below the range TF for precision.
 // 2-candle = reclaim in the very next candle; 3-candle allows one candle later.
-if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na(cLow)
+// A range smaller than the size floor still DRAWS exactly as always — it just
+// arms no watch, because the smallest ranges were the worst-testing bucket on
+// every instrument.
+if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na(cLow) and (setupMinRng <= 0 or cHigh - cLow >= setupMinRng * nz(atrTf, 0))
     array.push(wHi, cHigh)
     array.push(wLo, cLow)
+    array.push(wOpenT, cOpenT)
     array.push(wDead, cOpenT + (setup3c ? 3 : 2) * tfMs)
     array.push(wSwH, false)
     array.push(wSwL, false)
@@ -761,18 +806,26 @@ if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na
     while array.size(wHi) > 10
         array.shift(wHi)
         array.shift(wLo)
+        array.shift(wOpenT)
         array.shift(wDead)
         array.shift(wSwH)
         array.shift(wSwL)
         array.shift(wExtH)
         array.shift(wExtL)
 
+htfConf = setupConf != "Chart bar close (original)"
 if showSetup and barstate.isconfirmed and array.size(wHi) > 0
     k = array.size(wHi) - 1
     while k >= 0
-        if time > array.get(wDead, k)
+        // With range-candle confirmation, a candle that closed INSIDE the watch
+        // window can be reported on a chart bar past it (a weekend or session
+        // gap sits between them). Judge the candle's open time, not the
+        // reporting bar, so those legitimate confirmations are not thrown away.
+        rescue = htfConf and newClosed and not na(cOpenT) and cOpenT < array.get(wDead, k)
+        if time > array.get(wDead, k) and not rescue
             array.remove(wHi, k)
             array.remove(wLo, k)
+            array.remove(wOpenT, k)
             array.remove(wDead, k)
             array.remove(wSwH, k)
             array.remove(wSwL, k)
@@ -781,34 +834,59 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
         else
             hi = array.get(wHi, k)
             lo = array.get(wLo, k)
-            if high > array.get(wExtH, k)
+            // sweep state and swept extreme as they stood BEFORE this chart bar.
+            // The range-candle confirmation judges the candle that just CLOSED,
+            // and the current chart bar already belongs to the next one.
+            pSwH = array.get(wSwH, k)
+            pSwL = array.get(wSwL, k)
+            pExH = array.get(wExtH, k)
+            pExL = array.get(wExtL, k)
+            if high > pExH
                 array.set(wExtH, k, high)
-            if low < array.get(wExtL, k)
+            if low < pExL
                 array.set(wExtL, k, low)
-            swH = array.get(wSwH, k) or high > hi
-            swL = array.get(wSwL, k) or low < lo
+            swH = pSwH or high > hi
+            swL = pSwL or low < lo
             array.set(wSwH, k, swH)
             array.set(wSwL, k, swL)
             eqR  = (hi + lo) / 2.0
-            canS = swH and close < hi   // swept the high, now reclaimed back inside
-            canL = swL and close > lo   // swept the low,  now reclaimed back inside
-            wdir = canS and canL ? (close < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
-            if wdir != 0 and setupTimeOk
+            bool canS = false
+            bool canL = false
+            if htfConf
+                // fires only when a range-TF candle just closed, judged on THAT
+                // candle: it swept the watched range and its own close is back
+                // inside. This is the entry that measured best.
+                if newClosed
+                    canS := pSwH and cClose < hi
+                    canL := pSwL and cClose > lo
+            else
+                // original behaviour: the first CHART bar that closes back
+                // inside after the sweep fires the setup
+                canS := swH and close < hi   // swept the high, now reclaimed back inside
+                canL := swL and close > lo   // swept the low,  now reclaimed back inside
+            refC = htfConf ? cClose : close
+            wdir = canS and canL ? (refC < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
+            tOk = tfltRef == "Entry bar" ? setupTimeOk : f_watchTimeOk(array.get(wOpenT, k))
+            if wdir != 0 and tOk
                 rngH = hi - lo
                 pad  = f_slPad(rngH)
-                // anchor: the swept wick, or the range boundary if you want the
-                // stop to ignore how far the sweep actually ran
-                anchor = wdir == -1 ? (slRef == "Range boundary" ? hi : array.get(wExtH, k)) : (slRef == "Range boundary" ? lo : array.get(wExtL, k))
+                // the sweep wick as of the confirming candle
+                wickA = wdir == -1 ? (htfConf ? pExH : array.get(wExtH, k)) : (htfConf ? pExL : array.get(wExtL, k))
+                // anchor: half the range past the swept level (never tighter
+                // than the wick — the config that tested best on all seven
+                // instruments), or the wick itself, or the bare range boundary
+                anchor = slRef == "Range boundary" ? (wdir == -1 ? hi : lo) : slRef == "Swept extreme" ? wickA : (wdir == -1 ? math.max(hi + 0.5 * rngH, wickA) : math.min(lo - 0.5 * rngH, wickA))
                 float sl = wdir == -1 ? anchor + pad : anchor - pad
                 // floor measured from ENTRY, so a reclaim that closes right on
                 // top of the swept wick still gets a survivable stop
                 if slMinOn
                     minD = slMinPct / 100.0 * rngH
-                    sl := wdir == -1 ? math.max(sl, close + minD) : math.min(sl, close - minD)
+                    sl := wdir == -1 ? math.max(sl, refC + minD) : math.min(sl, refC - minD)
                 tp = wdir == -1 ? lo : hi
-                f_makeSetup(wdir, close, sl, tp, eqR, bar_index)
+                f_makeSetup(wdir, refC, sl, tp, eqR, bar_index)
                 array.remove(wHi, k)
                 array.remove(wLo, k)
+                array.remove(wOpenT, k)
                 array.remove(wDead, k)
                 array.remove(wSwH, k)
                 array.remove(wSwL, k)
