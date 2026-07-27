@@ -83,8 +83,8 @@ sweepAnchor = input.string("Candle close", "Sweep marker position", options=["Ca
 sweepSz     = input.string("Tiny", "Sweep marker size", options=["Tiny","Small","Normal"], group=gSwp)
 sweepUpC    = input.color(color.new(color.lime, 0), "Bullish sweep (swept lows)", group=gSwp)
 sweepDnC    = input.color(color.new(color.red, 0),  "Bearish sweep (swept highs)", group=gSwp)
-dblOn       = input.bool(true, "Mark double sweeps (took BOTH sides)", group=gSwp, tooltip="A candle that takes the prior high AND the prior low and still closes inside. It has swept both liquidity pools, so it points nowhere — measured negative on every timeframe. Own colour so it is never mistaken for a directional sweep. Untick to hide these candles entirely.")
-dblC        = input.color(color.new(#FF9800, 0), "Double sweep", group=gSwp)
+dblOn       = input.bool(true, "Mark double sweeps (BOTH wicks get a marker)", group=gSwp, tooltip="A candle that takes the prior high AND the prior low and still closes inside has swept two liquidity pools, so it gets TWO markers — one on the high it took, one on the low — in their own colour. As a trade it points nowhere and measured negative on every timeframe, which is exactly why it must be recognisable on sight. Untick to hide both markers.")
+dblC        = input.color(color.new(#FF9800, 0), "Double sweep (both wicks)", group=gSwp)
 swp5On  = input.bool(false, "5m",  inline="sw1", group=gSwp)
 swp15On = input.bool(false, "15m", inline="sw1", group=gSwp)
 swp30On = input.bool(false, "30m", inline="sw1", group=gSwp)
@@ -105,7 +105,7 @@ swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=
 // candle IS. Turning breaks off never turns a break candle into a sweep.
 gBrk = "Breaks  (optional)"
 showBreak   = input.bool(false, "Show breaks (closed BEYOND the level)", group=gBrk, tooltip="Master switch. A break = the candle took the prior high/low and finished past it instead of reclaiming.")
-brkStrict   = input.bool(false, "Also require the OPEN beyond the level", group=gBrk, tooltip="OFF (recommended): the close beyond the level is the break — that is the standard definition and it labels every candle that touches a level. ON: the whole body, open AND close, must clear the level. In a 24-hour market the open equals the previous close, so this needs a gap: measured on 4H gold it found 60 breaks in 5,269 candles, and left 38% of all candles touching a level with no tag at all.")
+brkStrict   = input.bool(false, "Also require the OPEN beyond the level", group=gBrk, tooltip="OFF (recommended): the close beyond the level is the break — the standard definition. ON: the whole body, open AND close, must clear the level. In a 24-hour market the open equals the previous close, so this needs a gap — measured on 4H gold it found 60 breaks in 5,269 candles. Nothing goes unmarked either way: a level that was taken without being accepted is a sweep, so with this on, a candle whose body still straddles the level is marked as a sweep rather than a break.")
 breakDesign = input.string("Label", "Break marker design", options=["Label","Triangle B","Circle B"], group=gBrk)
 breakLbl    = input.bool(true,  "Show 'Break' text (Label design only)", group=gBrk)
 breakTf     = input.bool(true,  "Title each break with its timeframe", group=gBrk)
@@ -113,8 +113,8 @@ breakAnchor = input.string("Candle close", "Break marker position", options=["Ca
 breakSz     = input.string("Tiny", "Break marker size", options=["Tiny","Small","Normal"], group=gBrk)
 breakUpC    = input.color(color.new(color.aqua, 0),   "Bullish break (closed above the high)", group=gBrk)
 breakDnC    = input.color(color.new(color.orange, 0), "Bearish break (closed below the low)", group=gBrk)
-comboOn     = input.bool(false, "Flag breaks that swept the other side first", group=gBrk, tooltip="A candle that dips under the low, rejects it, and still closes clean above the high is manipulation and distribution inside one candle — 17% of 4H breaks. Off = it prints as an ordinary break. On = it gets its own 'Sweep+Break' tag, placed on the wick it swept.")
-comboC      = input.color(color.new(#AA00FF, 0), "Sweep + break", group=gBrk)
+comboOn     = input.bool(true, "Also mark the wick a break candle swept first", group=gBrk, tooltip="A candle that dips under the low, rejects it, and still closes clean above the high is manipulation and distribution in one candle — 17% of 4H breaks. On = that swept wick gets its own marker in the colour below, alongside the break marker at the level that was accepted. Off = only the break is marked and the swept wick is invisible.")
+comboC      = input.color(color.new(#AA00FF, 0), "Wick swept by a break candle", group=gBrk)
 brk5On  = input.bool(false, "5m",  inline="br1", group=gBrk)
 brk15On = input.bool(false, "15m", inline="br1", group=gBrk)
 brk30On = input.bool(false, "30m", inline="br1", group=gBrk)
@@ -256,21 +256,28 @@ if newRange
 // ===================== SWEEPS & BREAKS =======================================
 // Two candles of the source timeframe, both fully closed:
 //   A = the older one. Its high and low are the levels.
-//   B = the one that just closed. What B did to A's levels is the event.
+//   B = the one that just closed.
 //
-// Classification happens ONCE per candle, before anything is drawn:
+// A MARKER MARKS A LEVEL, NOT A CANDLE. A has two levels and B can take both of
+// them, so B can produce two events at two different prices. Each side is
+// resolved on its own:
 //
-//   took the level          B.high > A.high        (or B.low < A.low)
-//   BREAK   accepted it     B closes BEYOND the level
-//   SWEEP   rejected it     B closes BACK INSIDE the range
+//   A's HIGH, if B traded above it     accepted (closed beyond) -> BREAK
+//                                      rejected                 -> SWEEP
+//   A's LOW,  if B traded below it     same question, answered separately
 //
-// Those two are exhaustive over candles that touched a level, so nothing that
-// touches a level goes unlabelled. A break outranks a sweep, and the gate is
-// the classification itself — never the display switches — so turning the break
-// layer off can never make a break candle reappear as a phantom sweep.
+// Every taken side resolves to exactly one of break or sweep, so no side that
+// was taken ever goes unmarked. What is exclusive is the CLASSIFICATION of a
+// single side — never both labels on one level — not the number of events on a
+// candle.
 //
-// DOUBLE SWEEP: took both sides, closed inside. Its own event, its own colour.
-// SWEEP+BREAK: took one side, rejected it, then closed clean through the other.
+//   DOUBLE SWEEP   both sides taken, neither accepted. TWO markers, one on each
+//                  wick, in their own colour: this configuration measured
+//                  negative on every timeframe and must be recognisable at a
+//                  glance.
+//   SWEPT + BROKE  one side taken and rejected, the other taken and accepted.
+//                  Also two markers — the swept wick and the broken level —
+//                  because hiding the swept half is hiding the manipulation.
 
 var array<label> swLbA = array.new<label>()
 var array<label> brLbA = array.new<label>()
@@ -280,27 +287,20 @@ f_pushMark(array<label> store, int keepN, label lb) =>
     while array.size(store) > keepN
         label.delete(array.shift(store))
 
-// kind 1 = swept the high (bearish), 2 = swept the low (bullish), 3 = both
-f_sweepMark(int kind, int atT, float y, string tfName) =>
-    bull  = kind == 2
-    col   = kind == 1 ? sweepDnC : kind == 2 ? sweepUpC : dblC
-    core  = kind == 3 ? "Double Sweep" : "Sweep"
-    lett  = kind == 3 ? "DS" : "S"
+// One sweep marker at one price. `bull` = it sits UNDER the candle pointing up
+// (a swept low); false = above it pointing down (a swept high).
+f_sweepMark(bool bull, color col, string core, string lett, int atT, float y, string tfName) =>
     style = sweepDesign == "Triangle S" ? (bull ? label.style_triangleup : label.style_triangledown) : sweepDesign == "Circle S" ? label.style_circle : (bull ? label.style_label_up : label.style_label_down)
     pre   = sweepTf ? tfName + " " : ""
     txt   = sweepDesign == "Label" ? (sweepLbl ? pre + core : str.trim(pre)) : str.trim(pre + lett)
     f_pushMark(swLbA, swKeep, label.new(atT, y, txt, xloc=xloc.bar_time, style=style, color=color.new(col, 20), textcolor=chart.bg_color, size=f_lsz(sweepSz)))
 
-// kind 1 = broke up, 2 = broke down, 3 = swept low then broke up, 4 = the mirror
-f_breakMark(int kind, int atT, float y, string tfName) =>
-    bull  = kind == 1 or kind == 3
-    combo = kind >= 3
-    col   = combo ? comboC : bull ? breakUpC : breakDnC
-    core  = combo ? "Sweep+Break" : "Break"
-    lett  = combo ? "SB" : "B"
+// One break marker at one price.
+f_breakMark(bool bull, int atT, float y, string tfName) =>
+    col   = bull ? breakUpC : breakDnC
     style = breakDesign == "Triangle B" ? (bull ? label.style_triangleup : label.style_triangledown) : breakDesign == "Circle B" ? label.style_circle : (bull ? label.style_label_up : label.style_label_down)
     pre   = breakTf ? tfName + " " : ""
-    txt   = breakDesign == "Label" ? (breakLbl ? pre + core : str.trim(pre)) : str.trim(pre + lett)
+    txt   = breakDesign == "Label" ? (breakLbl ? pre + "Break" : str.trim(pre)) : str.trim(pre + "B")
     f_pushMark(brLbA, brKeep, label.new(atT, y, txt, xloc=xloc.bar_time, style=style, color=color.new(col, 20), textcolor=chart.bg_color, size=f_lsz(breakSz)))
 
 // One pass over A and B. `nb` is true only on the first chart bar after B closed,
@@ -329,28 +329,40 @@ f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float 
         bodyLo = math.min(bO, bC)
         brUp = tookHi and bC > aHiV and (not brkStrict or bodyLo > aHiV)
         brDn = tookLo and bC < aLoV and (not brkStrict or bodyHi < aLoV)
-        // aHiV >= aLoV makes these mutually exclusive
-        isBreak = brUp or brDn
-        swHi = tookHi and not isBreak and bC < aHiV
-        swLo = tookLo and not isBreak and bC > aLoV
+        // brUp and brDn cannot both be true: aHiV >= aLoV
+        // A side that was taken and NOT accepted was swept. Every taken side
+        // therefore resolves to exactly one of break / sweep — no holes, in
+        // strict mode as well as loose.
+        swHi = tookHi and not brUp
+        swLo = tookLo and not brDn
+        isDbl = swHi and swLo
         lastBarT = math.min(bT + math.max(0, msLen - chartMs), time)
         swT = sweepAnchor == "Candle open" ? bT : lastBarT
         brT = breakAnchor == "Candle open" ? bT : lastBarT
-        cmbU = comboOn and tookLo
-        cmbD = comboOn and tookHi
-        if brEn and brUp
-            f_breakMark(cmbU ? 3 : 1, brT, cmbU ? bLoV : bHiV, tfName)
-        if brEn and brDn
-            f_breakMark(cmbD ? 4 : 2, brT, cmbD ? bHiV : bLoV, tfName)
-        // flat, mutually exclusive conditions rather than a nested if/else —
-        // a double sweep is one event, never two directional ones
-        isDbl = swHi and swLo
-        if swEn and isDbl and dblOn
-            f_sweepMark(3, swT, bHiV, tfName)
-        if swEn and not isDbl and swHi
-            f_sweepMark(1, swT, bHiV, tfName)
-        if swEn and not isDbl and swLo
-            f_sweepMark(2, swT, bLoV, tfName)
+
+        // ---- the event at the HIGH ----
+        if tookHi
+            if brUp
+                if brEn
+                    f_breakMark(true, brT, bHiV, tfName)
+            else
+                // swept the high while breaking the low = the swept half of a
+                // break candle; own colour, own switch
+                cmb = brDn
+                okHi = isDbl ? dblOn : cmb ? comboOn : true
+                if swEn and okHi
+                    f_sweepMark(false, isDbl ? dblC : cmb ? comboC : sweepDnC, isDbl ? "Double Sweep" : "Sweep", isDbl ? "DS" : "S", swT, bHiV, tfName)
+
+        // ---- the event at the LOW ----
+        if tookLo
+            if brDn
+                if brEn
+                    f_breakMark(false, brT, bLoV, tfName)
+            else
+                cmb2 = brUp
+                okLo = isDbl ? dblOn : cmb2 ? comboOn : true
+                if swEn and okLo
+                    f_sweepMark(true, isDbl ? dblC : cmb2 ? comboC : sweepUpC, isDbl ? "Double Sweep" : "Sweep", isDbl ? "DS" : "S", swT, bLoV, tfName)
 
 // ---- one fetch per timeframe, gated by its own checkboxes ------------------
 // [2] is A, [1] is B — both always fully closed, so nothing is ever classified
