@@ -189,6 +189,37 @@ brkDOn  = input.bool(false, "D",   inline="br3", group=gBrk)
 brkWOn  = input.bool(false, "W",   inline="br3", group=gBrk)
 brKeep  = input.int(12, "Keep last N break markers (all TFs)", minval=1, maxval=100, group=gBrk)
 
+// ===================== CRT SETUPS ============================================
+// The rule, exactly as traded: a full bar CLOSES BACK INSIDE the range. That is
+// the setup. Target the opposite extreme — the whole range. Stop beyond the
+// level that was swept.
+//
+// Measured across seven instruments (ENTRY_STUDY.md), the two settings that
+// improved EVERY instrument tested:
+//   - a stop 50% of the range beyond the level instead of at the sweep wick
+//     (mean -0.235 -> -0.105 R). Cost in R is 2 x slippage / stop distance, so
+//     a tight stop hands the spread a large share of your R.
+//   - banking part of the position at equilibrium with the stop to breakeven
+//     (+0.038 R, better on 7 of 7, and gross positive on 6 of 7).
+// Both arrive on. Neither makes the mechanical rule profitable after costs; they
+// are the difference between -0.105 R and -0.067 R per trade.
+gSet = "CRT setups  (optional)"
+showSetup = input.bool(false, "Show CRT setups (entry / stop / target)", group=gSet, tooltip="Setups come from the RANGE timeframe above, so the range you can see is the range you are trading. They also obey the range time filter.")
+setWatch  = input.int(2, "Sweep must happen within N candles of the range", minval=1, maxval=3, group=gSet, tooltip="1 = only the candle immediately after the range. 2 = the classic three-candle CRT, allowing the sweep one candle later. A range whose level is BROKEN rather than swept is discarded immediately.")
+setDbl    = input.bool(false, "Also take double sweeps", group=gSet, tooltip="A candle that sweeps both sides has taken two liquidity pools and points nowhere. It measured negative on every timeframe and instrument tested, so it is skipped by default.")
+slMode    = input.string("% of range beyond the level", "Stop placed at", options=["% of range beyond the level","Swept wick"], group=gSet, tooltip="Measured: a stop 50% of the range beyond the level beat a stop at the sweep wick on every instrument tested, because cost in R is 2 x slippage / stop distance. The wick option is never tighter than the wick actually printed.")
+slPct     = input.float(50, "Stop distance (% of range beyond the level)", minval=0, maxval=300, step=5, group=gSet)
+tpPart    = input.bool(true, "Bank part of the position at equilibrium", group=gSet, tooltip="Take profit at the 50% mark and move the stop to breakeven, letting the rest run to the opposite extreme. This is taking profit at EQ, NOT entering there. Improved every instrument tested.")
+tpPartPct = input.float(50, "Portion banked at EQ (%)", minval=0, maxval=100, step=5, group=gSet)
+setLongC  = input.color(color.new(color.teal, 0), "Long setup", inline="sc", group=gSet)
+setShortC = input.color(color.new(color.maroon, 0), "Short setup", inline="sc", group=gSet)
+setTpC    = input.color(color.new(color.green, 0), "Target", inline="sc2", group=gSet)
+setSlC    = input.color(color.new(color.red, 0),   "Stop", inline="sc2", group=gSet)
+setEqC    = input.color(color.new(#FF9800, 0),     "Equilibrium", inline="sc2", group=gSet)
+setW      = input.int(2, "Line width", minval=1, maxval=4, group=gSet)
+setProj   = input.int(4, "Project lines N candles right", minval=1, maxval=20, group=gSet)
+setKeep   = input.int(8, "Keep last N setups", minval=1, maxval=40, group=gSet)
+
 // ===================== EQUILIBRIUM ===========================================
 gEQ       = "Equilibrium"
 showEqLn  = input.bool(true, "Show equilibrium line", group=gEQ)
@@ -263,7 +294,7 @@ sym = syminfo.tickerid
 // length of one CHART bar, in milliseconds — used to land higher-timeframe
 // markers on a real bar of the chart you are actually looking at
 chartMs = timeframe.in_seconds(timeframe.period) * 1000
-[rHigh, rLow, rOpenT] = request.security(sym, tfIn, [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
+[rHigh, rLow, rOpenT, rOpen, rClose] = request.security(sym, tfIn, [high[1], low[1], time[1], open[1], close[1]], lookahead=barmerge.lookahead_off)
 tfMs = timeframe.in_seconds(tfIn) * 1000
 tfNm = f_tfName(tfIn)
 
@@ -507,3 +538,160 @@ brW = showBreak and brkWOn
 if swW or brW
     [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
     f_swpBrkScan("W", swW, brW, al, ah, bl, bh, bo, bc, int(at), int(bt), 604800000, not na(bt) and bt != bt[1])
+
+// ===================== CRT SETUPS ============================================
+// A range candle closes and a WATCH arms. Each later candle of the range
+// timeframe is then asked one question about each live watch:
+//
+//   did it take a level, and where did it CLOSE?
+//     closed back inside  -> the setup fires on that close
+//     closed beyond       -> the level was accepted, not swept: the watch dies
+//     never reached it    -> the watch waits, then expires
+//
+// The entry is that closing price. Not a retrace to equilibrium — that enters
+// into the leg, keeps the risk and gives up half the reward.
+//
+// Everything is decided on CLOSED candles of the range timeframe, read through
+// the same [1] offset as the ranges themselves, so a setup can never appear and
+// then vanish as a candle forms.
+
+var array<float> wHi   = array.new<float>()   // the watched range
+var array<float> wLo   = array.new<float>()
+var array<int>   wDead = array.new<int>()     // time this watch stops looking
+
+// one slot per live setup, all pruned together
+var array<line>  uEn = array.new<line>()
+var array<line>  uSl = array.new<line>()
+var array<line>  uTp = array.new<line>()
+var array<line>  uEq = array.new<line>()
+var array<label> uEnL = array.new<label>()
+var array<label> uSlL = array.new<label>()
+var array<label> uTpL = array.new<label>()
+var array<int>   uDir = array.new<int>()
+var array<float> uEnP = array.new<float>()
+var array<float> uSlP = array.new<float>()
+var array<float> uTpP = array.new<float>()
+var array<float> uEqP = array.new<float>()
+var array<bool>  uBE  = array.new<bool>()     // has the EQ portion been banked?
+var array<bool>  uDone = array.new<bool>()
+
+f_setupDraw(int dir, float entry, float stop, float tp, float eqv, int t0, int t1) =>
+    dirC = dir == 1 ? setLongC : setShortC
+    array.push(uEn, line.new(t0, entry, t1, entry, xloc=xloc.bar_time, color=dirC, width=setW, style=line.style_dotted))
+    array.push(uSl, line.new(t0, stop,  t1, stop,  xloc=xloc.bar_time, color=setSlC, width=setW, style=line.style_dotted))
+    array.push(uTp, line.new(t0, tp,    t1, tp,    xloc=xloc.bar_time, color=setTpC, width=setW, style=line.style_dotted))
+    array.push(uEq, tpPart ? line.new(t0, eqv, t1, eqv, xloc=xloc.bar_time, color=setEqC, width=setW, style=line.style_dotted) : na)
+    array.push(uEnL, label.new(t1, entry, dir == 1 ? "LE" : "SE", xloc=xloc.bar_time, style=label.style_label_left, color=HIDE, textcolor=dirC, size=size.tiny))
+    array.push(uSlL, label.new(t1, stop, "SL", xloc=xloc.bar_time, style=label.style_label_left, color=HIDE, textcolor=setSlC, size=size.tiny))
+    array.push(uTpL, label.new(t1, tp, "TP", xloc=xloc.bar_time, style=label.style_label_left, color=HIDE, textcolor=setTpC, size=size.tiny))
+    array.push(uDir, dir)
+    array.push(uEnP, entry)
+    array.push(uSlP, stop)
+    array.push(uTpP, tp)
+    array.push(uEqP, tpPart ? eqv : na)
+    array.push(uBE, false)
+    array.push(uDone, false)
+    while array.size(uEn) > setKeep
+        line.delete(array.shift(uEn))
+        line.delete(array.shift(uSl))
+        line.delete(array.shift(uTp))
+        eqo = array.shift(uEq)
+        if not na(eqo)
+            line.delete(eqo)
+        label.delete(array.shift(uEnL))
+        label.delete(array.shift(uSlL))
+        label.delete(array.shift(uTpL))
+        array.shift(uDir)
+        array.shift(uEnP)
+        array.shift(uSlP)
+        array.shift(uTpP)
+        array.shift(uEqP)
+        array.shift(uBE)
+        array.shift(uDone)
+
+// Run every live watch against the candle that just closed, then arm a watch
+// for that candle. Order matters: a candle cannot sweep itself.
+if showSetup and newRange and not na(rOpen) and not na(rClose)
+    bT = int(rOpenT)
+    k = array.size(wHi) - 1
+    while k >= 0
+        hiW = array.get(wHi, k)
+        loW = array.get(wLo, k)
+        if bT > array.get(wDead, k)
+            array.remove(wHi, k)
+            array.remove(wLo, k)
+            array.remove(wDead, k)
+        else
+            tookHi = rHigh > hiW
+            tookLo = rLow < loW
+            brUp = tookHi and rClose > hiW
+            brDn = tookLo and rClose < loW
+            swHi = tookHi and not brUp          // took the high, closed back inside
+            swLo = tookLo and not brDn
+            dbl  = swHi and swLo
+            dir  = dbl ? (setDbl ? (rClose < (hiW + loW) / 2.0 ? -1 : 1) : 0) : swHi ? -1 : swLo ? 1 : 0
+            if brUp or brDn or dir != 0
+                // resolved either way: this range is finished with
+                array.remove(wHi, k)
+                array.remove(wLo, k)
+                array.remove(wDead, k)
+            if dir != 0
+                rngH = hiW - loW
+                lvl  = dir == -1 ? hiW : loW
+                wick = dir == -1 ? rHigh : rLow
+                pad  = slPct / 100.0 * rngH
+                beyond = dir == -1 ? lvl + pad : lvl - pad
+                stop = slMode == "Swept wick" ? wick : (dir == -1 ? math.max(beyond, wick) : math.min(beyond, wick))
+                entry = rClose
+                tp = dir == -1 ? loW : hiW
+                eqv = (hiW + loW) / 2.0
+                ok = dir == -1 ? (stop > entry and tp < entry) : (stop < entry and tp > entry)
+                if ok
+                    t0 = math.min(bT + math.max(0, tfMs - chartMs), time)
+                    f_setupDraw(dir, entry, stop, tp, eqv, t0, bT + (setProj + 1) * tfMs)
+        k := k - 1
+    // this candle now becomes a range in its own right
+    array.push(wHi, rHigh)
+    array.push(wLo, rLow)
+    array.push(wDead, bT + setWatch * tfMs)
+    while array.size(wHi) > 8
+        array.shift(wHi)
+        array.shift(wLo)
+        array.shift(wDead)
+
+// ---- outcome, resolved on CHART bars --------------------------------------
+// A finer chart resolves the order of events more precisely, and a bar that
+// touches both the stop and the target is called a STOP. Intrabar order is
+// unknowable and flattering it would make the markers lie.
+if showSetup and array.size(uEn) > 0
+    j = array.size(uEn) - 1
+    while j >= 0
+        if not array.get(uDone, j)
+            dir = array.get(uDir, j)
+            en  = array.get(uEnP, j)
+            tp  = array.get(uTpP, j)
+            eqv = array.get(uEqP, j)
+            banked = array.get(uBE, j)
+            // once the EQ portion is banked the stop sits at entry
+            eff = banked ? en : array.get(uSlP, j)
+            hitSl = dir == 1 ? low <= eff : high >= eff
+            hitTp = dir == 1 ? high >= tp : low <= tp
+            if hitSl
+                label.set_text(array.get(uSlL, j), banked ? "BE ✓" : "SL ✗")
+                if banked
+                    label.set_textcolor(array.get(uSlL, j), setEqC)
+                array.set(uDone, j, true)
+            else if hitTp
+                label.set_text(array.get(uTpL, j), "TP ✓")
+                array.set(uDone, j, true)
+            else if not banked and not na(eqv) and (dir == 1 ? high >= eqv : low <= eqv)
+                // part banked at equilibrium, stop moves to entry
+                array.set(uBE, j, true)
+                sl = array.get(uSl, j)
+                line.set_color(sl, color.new(setSlC, 70))
+                label.set_textcolor(array.get(uSlL, j), color.new(setSlC, 70))
+                eqn = array.get(uEq, j)
+                if not na(eqn)
+                    line.set_color(eqn, setEqC)
+                label.set_text(array.get(uEnL, j), (dir == 1 ? "LE" : "SE") + "  " + str.tostring(tpPartPct, "#") + "% @ EQ, stop to BE")
+        j := j - 1
