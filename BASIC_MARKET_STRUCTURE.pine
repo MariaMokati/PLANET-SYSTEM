@@ -15,11 +15,21 @@
 //               timeframe gets that timeframe stamped on its label:
 //               "HH ·1H ·4H" = the same point is a 1H swing and a 4H swing.
 //   TRENDLINES  Last two confirmed swings — CURRENT WEEK ONLY.
-//   DASHBOARDS  Two panels showing the SAME timeframe ladder — same rows, same
-//               order, same checkboxes — measuring two different things:
-//                 1. STRUCTURE  which way each timeframe's swings point
-//                 2. vs OPEN    where price sits inside each CURRENT period
-//               A timeframe is fully aligned when its row agrees on both.
+//   DASHBOARDS  Two panels showing the SAME timeframe ladder (W → 1m, same
+//               rows, same order, same checkboxes):
+//                 TOP     STRUCTURE  which way each timeframe's swings point
+//                         SWINGS     price now vs that TF's last confirmed
+//                                    swings: H BRK / L BRK / INSIDE
+//                         SWEEP      what that TF's last CLOSED candle did to
+//                                    the one before it (same rule as Basic CRT)
+//                         VERDICT    LONGS ONLY / SHORTS ONLY / WAIT + reason,
+//                                    computed with the SAME agreement logic as
+//                                    the Basic CRT trend filter
+//                 BOTTOM  vs OPEN    ABOVE / BELOW each CURRENT period's open
+//               Rows for timeframes BELOW the chart's show — and are excluded
+//               from every vote: data that fine cannot be read reliably from a
+//               higher-timeframe chart, and pretending otherwise is what makes
+//               dashboards flicker nonsense during replay.
 //               Structure reads CONFIRMED bars by default (no intra-bar
 //               repaint), matching the Basic CRT trend filter exactly.
 //
@@ -136,16 +146,36 @@ dashSz   = input.string("Small", "Text size", options=["Tiny","Small","Normal"],
 dashLen  = input.int(5, "Structure pivot length used per timeframe", minval=1, group=gDash)
 dashConf = input.bool(true, "Confirmed bars only (no repaint)", group=gDash, tooltip="Read each timeframe's bias from its last CLOSED bar — the same reading the Basic CRT trend filter uses, so the two tools always agree. Off = include the forming bar, which can flip mid-candle.")
 d1On  = input.bool(true,  "1m",  inline="d1", group=gDash)
+d2mOn = input.bool(true,  "2m",  inline="d1", group=gDash)
 d5On  = input.bool(true,  "5m",  inline="d1", group=gDash)
-d15On = input.bool(true,  "15m", inline="d1", group=gDash)
+d15On = input.bool(true,  "15m", inline="d2", group=gDash)
 d30On = input.bool(true,  "30m", inline="d2", group=gDash)
 d60On = input.bool(true,  "1H",  inline="d2", group=gDash)
-d240On= input.bool(true,  "4H",  inline="d2", group=gDash)
+d240On= input.bool(true,  "4H",  inline="d3", group=gDash)
 dDOn  = input.bool(true,  "D",   inline="d3", group=gDash)
 dWOn  = input.bool(true,  "W",   inline="d3", group=gDash)
+dashSwing = input.bool(true, "SWINGS column", group=gDash, tooltip="Where price sits RIGHT NOW against that timeframe's last confirmed swing high and swing low: H BRK = above the last swing high, L BRK = below the last swing low, INSIDE = between them.")
+dashSweep = input.bool(true, "SWEEP column", group=gDash, tooltip="What that timeframe's LAST CLOSED candle did to the candle before it, using the exact rule from Basic CRT's sweep layer: HIGH = wicked above the prior high and closed back inside (bearish, liquidity taken), LOW = the mirror (bullish), BOTH, or —.")
 dBull = input.color(color.new(#089981, 0), "Bullish", inline="dc", group=gDash)
 dBear = input.color(color.new(#F23645, 0), "Bearish", inline="dc", group=gDash)
 dFlat = input.color(color.new(#787B86, 0), "Range",   inline="dc", group=gDash)
+
+// ===================== VERDICT ===============================================
+// One line that answers "am I allowed to trade, and which way?" — computed with
+// the SAME timeframes and the SAME agreement modes as the Basic CRT trend
+// filter, so this verdict predicts exactly what that filter will allow. WAIT
+// always comes with the reason: each verdict timeframe's arrow, so the conflict
+// is visible instead of mysterious. Timeframes below the chart's are excluded
+// automatically.
+gVer = "Verdict (top panel)"
+verOn   = input.bool(true, "Show Verdict + Reason rows", group=gVer)
+v15  = input.bool(false, "15m", inline="v1", group=gVer)
+v30  = input.bool(false, "30m", inline="v1", group=gVer)
+v60  = input.bool(true,  "1H",  inline="v1", group=gVer)
+v240 = input.bool(true,  "4H",  inline="v2", group=gVer)
+vD   = input.bool(false, "D",   inline="v2", group=gVer)
+vW   = input.bool(false, "W",   inline="v2", group=gVer)
+verMode = input.string("Majority", "Agreement required", options=["All must agree","Majority","Not opposed"], group=gVer, tooltip="Match this to the Basic CRT trend filter's mode and timeframes and the verdict tells you in advance which setups CRT will permit. All = every verdict timeframe points the same way. Majority = more agree than disagree. Not opposed = none point the other way.")
 
 // ===================== DASHBOARD 2 — PRICE vs PERIOD OPENS ===================
 // The SAME timeframe ladder as the structure dashboard — same rows, same order,
@@ -314,9 +344,10 @@ f_swing(int tier, bool isHigh, float y, int x, int t, bool lblOn, bool legOn, co
         if stPrice
             txt := txt + " " + str.tostring(y, format.mintick)
         lb = label.new(x, isHigh ? y + off : y - off, txt, style=label.style_none, textcolor=col, size=f_sz(lblSz))
-        f_pushLbl(tier, lb)
-        // register for timeframe tagging: stamp now from higher-timeframe pivots
-        // that already confirmed, stay registered for ones that confirm later
+        // With tagging on, the registry OWNS the text label — it must not sit in
+        // the shared per-tier store, whose faster pruning could delete a label
+        // the registry still intends to stamp. Registered for pivots that
+        // confirm later; stamped immediately from ones that already have.
         if tagOn
             array.push(regLb, lb)
             array.push(regY, y)
@@ -328,11 +359,13 @@ f_swing(int tier, bool isHigh, float y, int x, int t, bool lblOn, bool legOn, co
                 for pi = 0 to array.size(hpP) - 1
                     f_stamp(ri, pi)
             while array.size(regLb) > stKeep * 3
-                array.shift(regLb)
+                label.delete(array.shift(regLb))
                 array.shift(regY)
                 array.shift(regT)
                 array.shift(regHi)
                 array.shift(regMk)
+        else
+            f_pushLbl(tier, lb)
     if isHigh
         array.set(stPrevH, tier, y)
         array.set(stPH, tier, y)
@@ -366,7 +399,9 @@ f_break(int tier, bool en, color cUp, color cDn, string lblSz) =>
         array.set(stBrkH, tier, true)
         was = array.get(stTrend, tier)
         array.set(stTrend, tier, 1)
-        if en
+        // was == 0 means there is no prior trend to continue or flip — the very
+        // first break after load sets state silently instead of printing a BOS
+        if en and was != 0
             string tg = was == -1 ? "CHoCH" : "BOS"
             tg := tier == 0 ? "F " + tg : tier == 1 ? str.lower(tg) : tg
             ln = line.new(array.get(stPHbar, tier), lvlH, bar_index, lvlH, color=color.new(cUp, 40), width=1, style=line.style_dashed)
@@ -377,7 +412,7 @@ f_break(int tier, bool en, color cUp, color cDn, string lblSz) =>
         array.set(stBrkL, tier, true)
         was = array.get(stTrend, tier)
         array.set(stTrend, tier, -1)
-        if en
+        if en and was != 0
             string tg = was == 1 ? "CHoCH" : "BOS"
             tg := tier == 0 ? "F " + tg : tier == 1 ? str.lower(tg) : tg
             ln = line.new(array.get(stPLbar, tier), lvlL, bar_index, lvlL, color=color.new(cDn, 40), width=1, style=line.style_dashed)
@@ -527,7 +562,16 @@ f_ses(2, in3, s3Col, "NY AM")
 f_ses(3, in4, s4Col, "NY PM")
 
 // ===================== DASHBOARDS ============================================
-f_tfBias(int L) =>
+// One packed reading per timeframe, so each timeframe costs ONE security call:
+//   bias   sticky structure trend: +1 after a swing-high break, -1 after a
+//          swing-low break, held until the other side breaks
+//   swing  where price sits RIGHT NOW: +1 above the last confirmed swing high
+//          (H BRK), -1 below the last confirmed swing low (L BRK), 0 INSIDE
+//   sweep  what the LAST CLOSED candle did to the one before it, Basic CRT's
+//          exact sweep rule: 1 swept the high, 2 swept the low, 3 both, 0 none
+// bias and swing honour the confirmed-bars toggle; sweep is built from already
+// closed candles so it can never repaint regardless.
+f_tfPack(int L) =>
     ph = ta.pivothigh(L, L)
     pl = ta.pivotlow(L, L)
     var float lph = na
@@ -541,41 +585,118 @@ f_tfBias(int L) =>
         t := 1
     if not na(lpl) and close < lpl
         t := -1
-    t
+    int sw = na(lph) or na(lpl) ? 0 : close > lph ? 1 : close < lpl ? -1 : 0
+    swpH = high[1] > high[2] and close[1] < high[2]
+    swpL = low[1] < low[2] and close[1] > low[2]
+    int sp = swpH and swpL ? 3 : swpH ? 1 : swpL ? 2 : 0
+    [dashConf ? t[1] : t, dashConf ? sw[1] : sw, sp]
 
-// Confirmed-bars wrapper: with dashConf on, every timeframe's bias is read from
-// its last CLOSED bar — the identical reading the Basic CRT trend filter uses,
-// so the dashboard and the filter can never disagree mid-candle.
-f_tfBiasC(int L) =>
-    t = f_tfBias(L)
-    dashConf ? t[1] : t
+// A timeframe BELOW the chart's cannot be read reliably from this chart (its
+// bars are not individually visible to a plain security call), so those rows
+// display — and are excluded from every vote.
+chartSec = timeframe.in_seconds(timeframe.period)
+ok1   = 60     >= chartSec
+ok2m  = 120    >= chartSec
+ok5   = 300    >= chartSec
+ok15  = 900    >= chartSec
+ok30  = 1800   >= chartSec
+ok60  = 3600   >= chartSec
+ok240 = 14400  >= chartSec
+okD   = 86400  >= chartSec
+okW   = 604800 >= chartSec
 
-// the bias fetches feed BOTH dashboards (structure rows + overall-trend row)
-biasNeed = dashOn or (dash2On and d2Trd)
+// each fetch is needed by the ladder, the overall-trend vote, or the verdict
+ladNeed = dashOn or (dash2On and d2Trd)
 int b1 = 0
+int s1 = 0
+int p1 = 0
+int b2m = 0
+int s2m = 0
+int p2m = 0
 int b5 = 0
+int s5 = 0
+int p5 = 0
 int b15 = 0
+int s15 = 0
+int p15 = 0
 int b30 = 0
+int s30 = 0
+int p30 = 0
 int b60 = 0
+int s60 = 0
+int p60 = 0
 int b240 = 0
+int s240 = 0
+int p240 = 0
 int bD = 0
+int sD = 0
+int pD = 0
 int bW = 0
-if biasNeed and d1On
-    b1 := request.security(sym, "1", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
-if biasNeed and d5On
-    b5 := request.security(sym, "5", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
-if biasNeed and d15On
-    b15 := request.security(sym, "15", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
-if biasNeed and d30On
-    b30 := request.security(sym, "30", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
-if biasNeed and d60On
-    b60 := request.security(sym, "60", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
-if biasNeed and d240On
-    b240 := request.security(sym, "240", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
-if biasNeed and dDOn
-    bD := request.security(sym, "1D", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
-if biasNeed and dWOn
-    bW := request.security(sym, "1W", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
+int sW = 0
+int pW = 0
+if ladNeed and d1On
+    [xb, xs, xp] = request.security(sym, "1", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    b1 := xb
+    s1 := xs
+    p1 := xp
+if ladNeed and d2mOn
+    [xb, xs, xp] = request.security(sym, "2", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    b2m := xb
+    s2m := xs
+    p2m := xp
+if ladNeed and d5On
+    [xb, xs, xp] = request.security(sym, "5", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    b5 := xb
+    s5 := xs
+    p5 := xp
+if (ladNeed and d15On) or (verOn and v15)
+    [xb, xs, xp] = request.security(sym, "15", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    b15 := xb
+    s15 := xs
+    p15 := xp
+if (ladNeed and d30On) or (verOn and v30)
+    [xb, xs, xp] = request.security(sym, "30", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    b30 := xb
+    s30 := xs
+    p30 := xp
+if (ladNeed and d60On) or (verOn and v60)
+    [xb, xs, xp] = request.security(sym, "60", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    b60 := xb
+    s60 := xs
+    p60 := xp
+if (ladNeed and d240On) or (verOn and v240)
+    [xb, xs, xp] = request.security(sym, "240", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    b240 := xb
+    s240 := xs
+    p240 := xp
+if (ladNeed and dDOn) or (verOn and vD)
+    [xb, xs, xp] = request.security(sym, "1D", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    bD := xb
+    sD := xs
+    pD := xp
+if (ladNeed and dWOn) or (verOn and vW)
+    [xb, xs, xp] = request.security(sym, "1W", f_tfPack(dashLen), lookahead=barmerge.lookahead_off)
+    bW := xb
+    sW := xs
+    pW := xp
+
+// ---- verdict: identical agreement logic to the Basic CRT trend filter ------
+u15  = verOn and v15 and ok15
+u30  = verOn and v30 and ok30
+u60  = verOn and v60 and ok60
+u240 = verOn and v240 and ok240
+uD   = verOn and vD and okD
+uW   = verOn and vW and okW
+vBu = (u15 and b15 == 1 ? 1 : 0) + (u30 and b30 == 1 ? 1 : 0) + (u60 and b60 == 1 ? 1 : 0) + (u240 and b240 == 1 ? 1 : 0) + (uD and bD == 1 ? 1 : 0) + (uW and bW == 1 ? 1 : 0)
+vBe = (u15 and b15 == -1 ? 1 : 0) + (u30 and b30 == -1 ? 1 : 0) + (u60 and b60 == -1 ? 1 : 0) + (u240 and b240 == -1 ? 1 : 0) + (uD and bD == -1 ? 1 : 0) + (uW and bW == -1 ? 1 : 0)
+vN  = (u15 ? 1 : 0) + (u30 ? 1 : 0) + (u60 ? 1 : 0) + (u240 ? 1 : 0) + (uD ? 1 : 0) + (uW ? 1 : 0)
+longOK  = vN > 0 and (verMode == "All must agree" ? vBu == vN : verMode == "Not opposed" ? vBe == 0 : vBu > vBe)
+shortOK = vN > 0 and (verMode == "All must agree" ? vBe == vN : verMode == "Not opposed" ? vBu == 0 : vBe > vBu)
+verd = longOK and not shortOK ? 1 : shortOK and not longOK ? -1 : 0
+f_arw(int b) =>
+    b == 1 ? "▲" : b == -1 ? "▼" : "·"
+vReason = (u15 ? "15m" + f_arw(b15) + "  " : "") + (u30 ? "30m" + f_arw(b30) + "  " : "") + (u60 ? "1H" + f_arw(b60) + "  " : "") + (u240 ? "4H" + f_arw(b240) + "  " : "") + (uD ? "D" + f_arw(bD) + "  " : "") + (uW ? "W" + f_arw(bW) + "  " : "")
+vReason := vN == 0 ? "no verdict timeframes usable" : vReason
 
 // Current-period open per timeframe, computed natively from period boundaries.
 // This is exact on every bar — including Replay — unlike request.security(open),
@@ -586,6 +707,7 @@ f_pOpen(simple string tf) =>
         op := open
     op
 op1   = f_pOpen("1")
+op2   = f_pOpen("2")
 op5   = f_pOpen("5")
 op15  = f_pOpen("15")
 op30  = f_pOpen("30")
@@ -609,104 +731,139 @@ f_oWord(float op) =>
     na(op) ? "—" : close > op ? "ABOVE" : close < op ? "BELOW" : "AT"
 f_oCol(float op) =>
     na(op) ? dFlat : close > op ? dBull : close < op ? dBear : dFlat
+// SWINGS column wording: price now vs the last confirmed swings of that TF
+f_sWord(int s) =>
+    s == 1 ? "H BRK" : s == -1 ? "L BRK" : "INSIDE"
+f_sCol(int s) =>
+    s == 1 ? dBull : s == -1 ? dBear : dFlat
+// SWEEP column wording: a swept HIGH is bearish (liquidity taken above), a
+// swept LOW bullish — same colouring convention as Basic CRT's sweep markers
+f_pWord(int p) =>
+    p == 1 ? "HIGH" : p == 2 ? "LOW" : p == 3 ? "BOTH" : "—"
+f_pCol(int p) =>
+    p == 1 ? dBear : p == 2 ? dBull : dFlat
 
-// ---- Dashboard 1: structure bias per timeframe ------------------------------
+// One ladder row of the top table: TF name, STRUCTURE, SWINGS, SWEEP. Rows for
+// timeframes below the chart print — everywhere rather than pretend to know.
+f_row1(table tb, int r, string nm, bool ok, int b, int s, int p, color bg) =>
+    table.cell(tb, 0, r, nm, text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bg)
+    table.cell(tb, 1, r, ok ? f_word(b) : "—", text_size=f_sz(dashSz), text_halign=text.align_right, text_color=ok ? f_col(b) : dFlat, bgcolor=bg)
+    if dashSwing
+        table.cell(tb, 2, r, ok ? f_sWord(s) : "—", text_size=f_sz(dashSz), text_halign=text.align_right, text_color=ok ? f_sCol(s) : dFlat, bgcolor=bg)
+    if dashSweep
+        table.cell(tb, 3, r, ok ? f_pWord(p) : "—", text_size=f_sz(dashSz), text_halign=text.align_right, text_color=ok ? f_pCol(p) : dFlat, bgcolor=bg)
+
+// ---- Dashboard 1: structure / swings / sweep per timeframe + verdict --------
 var table dash = na
 if dashOn and barstate.islast
     if na(dash)
-        dash := table.new(f_pos(dashPos), 2, 9, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
-    table.clear(dash, 0, 0, 1, 8)
+        dash := table.new(f_pos(dashPos), 4, 12, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    table.clear(dash, 0, 0, 3, 11)
     bgh = color.new(color.gray, 85)
     bgc = color.new(color.gray, 92)
-    table.cell(dash, 0, 0, "BIAS", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
+    table.cell(dash, 0, 0, "TF", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
     table.cell(dash, 1, 0, "STRUCTURE", text_size=f_sz(dashSz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh)
+    if dashSwing
+        table.cell(dash, 2, 0, "SWINGS", text_size=f_sz(dashSz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh)
+    if dashSweep
+        table.cell(dash, 3, 0, "SWEEP", text_size=f_sz(dashSz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh)
     r = 1
     if dWOn
-        table.cell(dash, 0, r, "W", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(bW), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(bW), bgcolor=bgc)
+        f_row1(dash, r, "W", okW, bW, sW, pW, bgc)
         r += 1
     if dDOn
-        table.cell(dash, 0, r, "D", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(bD), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(bD), bgcolor=bgc)
+        f_row1(dash, r, "D", okD, bD, sD, pD, bgc)
         r += 1
     if d240On
-        table.cell(dash, 0, r, "4H", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(b240), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b240), bgcolor=bgc)
+        f_row1(dash, r, "4H", ok240, b240, s240, p240, bgc)
         r += 1
     if d60On
-        table.cell(dash, 0, r, "1H", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(b60), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b60), bgcolor=bgc)
+        f_row1(dash, r, "1H", ok60, b60, s60, p60, bgc)
         r += 1
     if d30On
-        table.cell(dash, 0, r, "30m", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(b30), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b30), bgcolor=bgc)
+        f_row1(dash, r, "30m", ok30, b30, s30, p30, bgc)
         r += 1
     if d15On
-        table.cell(dash, 0, r, "15m", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(b15), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b15), bgcolor=bgc)
+        f_row1(dash, r, "15m", ok15, b15, s15, p15, bgc)
         r += 1
     if d5On
-        table.cell(dash, 0, r, "5m", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(b5), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b5), bgcolor=bgc)
+        f_row1(dash, r, "5m", ok5, b5, s5, p5, bgc)
+        r += 1
+    if d2mOn
+        f_row1(dash, r, "2m", ok2m, b2m, s2m, p2m, bgc)
         r += 1
     if d1On
-        table.cell(dash, 0, r, "1m", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc)
-        table.cell(dash, 1, r, f_word(b1), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b1), bgcolor=bgc)
+        f_row1(dash, r, "1m", ok1, b1, s1, p1, bgc)
         r += 1
+    if verOn
+        vTxt = verd == 1 ? "LONGS ONLY" : verd == -1 ? "SHORTS ONLY" : "WAIT"
+        vCol = verd == 1 ? dBull : verd == -1 ? dBear : color.new(#FF9800, 0)
+        table.cell(dash, 0, r, "Verdict", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
+        table.cell(dash, 1, r, vTxt, text_size=f_sz(dashSz), text_halign=text.align_right, text_color=vCol, bgcolor=bgh)
+        table.cell(dash, 2, r, "", bgcolor=bgh)
+        table.cell(dash, 3, r, "", bgcolor=bgh)
+        table.merge_cells(dash, 1, r, 3, r)
+        r += 1
+        table.cell(dash, 0, r, "Reason", text_size=f_sz(dashSz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh)
+        table.cell(dash, 1, r, vReason, text_size=f_sz(dashSz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh)
+        table.cell(dash, 2, r, "", bgcolor=bgh)
+        table.cell(dash, 3, r, "", bgcolor=bgh)
+        table.merge_cells(dash, 1, r, 3, r)
 
 // ---- Dashboard 2: the same timeframe ladder, measured against period opens --
 // Rows are driven by the SAME dXOn checkboxes as the structure table, in the
 // same order, so the two panels always mirror and alignment reads row vs row.
+// one vs-open ladder row; sub-chart timeframes print — instead of noise
+f_row2(table tb, int r, string nm, bool ok, float op, color bg) =>
+    table.cell(tb, 0, r, nm, text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bg)
+    table.cell(tb, 1, r, ok ? f_oWord(op) : "—", text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=ok ? f_oCol(op) : dFlat, bgcolor=bg)
+
 var table dash2 = na
 if dash2On and barstate.islast
     if na(dash2)
-        dash2 := table.new(f_pos(dash2Pos), 2, 12, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
-    table.clear(dash2, 0, 0, 1, 11)
+        dash2 := table.new(f_pos(dash2Pos), 2, 13, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    table.clear(dash2, 0, 0, 1, 12)
     bgh2 = color.new(color.gray, 85)
     bgc2 = color.new(color.gray, 92)
-    table.cell(dash2, 0, 0, "BIAS", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
+    table.cell(dash2, 0, 0, "TF", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
     table.cell(dash2, 1, 0, "vs OPEN", text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh2)
     r2 = 1
     if dWOn
-        table.cell(dash2, 0, r2, "W", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(opW), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(opW), bgcolor=bgc2)
+        f_row2(dash2, r2, "W", okW, opW, bgc2)
         r2 += 1
     if dDOn
-        table.cell(dash2, 0, r2, "D", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(opD), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(opD), bgcolor=bgc2)
+        f_row2(dash2, r2, "D", okD, opD, bgc2)
         r2 += 1
     if d240On
-        table.cell(dash2, 0, r2, "4H", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(op240), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op240), bgcolor=bgc2)
+        f_row2(dash2, r2, "4H", ok240, op240, bgc2)
         r2 += 1
     if d60On
-        table.cell(dash2, 0, r2, "1H", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(op60), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op60), bgcolor=bgc2)
+        f_row2(dash2, r2, "1H", ok60, op60, bgc2)
         r2 += 1
     if d30On
-        table.cell(dash2, 0, r2, "30m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(op30), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op30), bgcolor=bgc2)
+        f_row2(dash2, r2, "30m", ok30, op30, bgc2)
         r2 += 1
     if d15On
-        table.cell(dash2, 0, r2, "15m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(op15), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op15), bgcolor=bgc2)
+        f_row2(dash2, r2, "15m", ok15, op15, bgc2)
         r2 += 1
     if d5On
-        table.cell(dash2, 0, r2, "5m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(op5), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op5), bgcolor=bgc2)
+        f_row2(dash2, r2, "5m", ok5, op5, bgc2)
+        r2 += 1
+    if d2mOn
+        f_row2(dash2, r2, "2m", ok2m, op2, bgc2)
         r2 += 1
     if d1On
-        table.cell(dash2, 0, r2, "1m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
-        table.cell(dash2, 1, r2, f_oWord(op1), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op1), bgcolor=bgc2)
+        f_row2(dash2, r2, "1m", ok1, op1, bgc2)
         r2 += 1
     if d2Ses
         table.cell(dash2, 0, r2, "Session", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
         table.cell(dash2, 1, r2, f_oWord(sesOpen), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(sesOpen), bgcolor=bgh2)
         r2 += 1
     if d2Trd
-        // majority vote across every timeframe enabled in the structure table
-        tBu = (d1On and b1 == 1 ? 1 : 0) + (d5On and b5 == 1 ? 1 : 0) + (d15On and b15 == 1 ? 1 : 0) + (d30On and b30 == 1 ? 1 : 0) + (d60On and b60 == 1 ? 1 : 0) + (d240On and b240 == 1 ? 1 : 0) + (dDOn and bD == 1 ? 1 : 0) + (dWOn and bW == 1 ? 1 : 0)
-        tBe = (d1On and b1 == -1 ? 1 : 0) + (d5On and b5 == -1 ? 1 : 0) + (d15On and b15 == -1 ? 1 : 0) + (d30On and b30 == -1 ? 1 : 0) + (d60On and b60 == -1 ? 1 : 0) + (d240On and b240 == -1 ? 1 : 0) + (dDOn and bD == -1 ? 1 : 0) + (dWOn and bW == -1 ? 1 : 0)
+        // majority vote across every timeframe enabled in the structure table;
+        // sub-chart timeframes are excluded exactly as their rows are dashed
+        tBu = (d1On and ok1 and b1 == 1 ? 1 : 0) + (d2mOn and ok2m and b2m == 1 ? 1 : 0) + (d5On and ok5 and b5 == 1 ? 1 : 0) + (d15On and ok15 and b15 == 1 ? 1 : 0) + (d30On and ok30 and b30 == 1 ? 1 : 0) + (d60On and ok60 and b60 == 1 ? 1 : 0) + (d240On and ok240 and b240 == 1 ? 1 : 0) + (dDOn and okD and bD == 1 ? 1 : 0) + (dWOn and okW and bW == 1 ? 1 : 0)
+        tBe = (d1On and ok1 and b1 == -1 ? 1 : 0) + (d2mOn and ok2m and b2m == -1 ? 1 : 0) + (d5On and ok5 and b5 == -1 ? 1 : 0) + (d15On and ok15 and b15 == -1 ? 1 : 0) + (d30On and ok30 and b30 == -1 ? 1 : 0) + (d60On and ok60 and b60 == -1 ? 1 : 0) + (d240On and ok240 and b240 == -1 ? 1 : 0) + (dDOn and okD and bD == -1 ? 1 : 0) + (dWOn and okW and bW == -1 ? 1 : 0)
         oT = tBu > tBe ? 1 : tBe > tBu ? -1 : 0
         table.cell(dash2, 0, r2, "Overall trend", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
         table.cell(dash2, 1, r2, f_word(oT), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_col(oT), bgcolor=bgh2)
