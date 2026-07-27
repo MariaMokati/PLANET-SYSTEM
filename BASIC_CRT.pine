@@ -3,67 +3,45 @@
 // BASIC CRT  —  STEP 1: RANGES
 // -----------------------------------------------------------------------------
 // Rebuilt from scratch, one layer at a time. This file does exactly ONE thing:
-// mark CRT ranges — and it marks EVERY timeframe you tick, at the same time.
-//
-// CRT is timeframe-agnostic. A 5-minute candle is a range. So is a 30-minute, a
-// 1-hour, a 4-hour, a daily, a weekly. Each one gets its own checkbox, its own
-// colour, its own history, and its own labels titled with its timeframe, so a
-// 4H range and a 1H range can sit on the chart together and never be confused.
-//
-// Ten slots: 5m, 15m, 30m, 1H, 2H, 4H, 8H, D, W, plus one free-form Custom slot
-// for anything else TradingView accepts (3m, 12H, 3D...).
+// draw the CRT range of each closed candle on a chosen timeframe — its High, its
+// Low, and the 50% equilibrium between them — and nothing else.
 //
 // No sweeps. No breaks. No setups. No filters. No dashboards. Those get added
-// one at a time, each verified on the chart before the next arrives.
+// one at a time, each one verified on the chart before the next arrives.
 //
-// Non-repainting: every range comes from the [1] offset of its own timeframe —
+// THE RANGE
+//   Every closed candle on the range timeframe IS a range. Its high and low are
+//   the boundaries; the midpoint is equilibrium. The range is drawn from the
+//   candle's own open time and projected forward for N candles, which is the
+//   window in which that range still matters.
+//
+// Non-repainting: the range comes from the [1] offset of the range timeframe —
 // always a fully closed candle — fetched with lookahead_off. A range never
 // appears before its candle has finished, and never moves once drawn.
 // =============================================================================
-indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+indicator("Basic CRT", overlay=true, max_lines_count=500, max_labels_count=100, max_boxes_count=500)
 
-// ===================== RANGES ================================================
-// One row per timeframe: tick it to mark it, and give it its own colour.
-gRng  = "Ranges — tick every timeframe you want marked"
-r5On  = input.bool(false, "5m",  inline="r1", group=gRng)
-r5C   = input.color(color.new(#787B86, 0), "", inline="r1", group=gRng)
-r15On = input.bool(false, "15m", inline="r2", group=gRng)
-r15C  = input.color(color.new(#26A69A, 0), "", inline="r2", group=gRng)
-r30On = input.bool(false, "30m", inline="r3", group=gRng)
-r30C  = input.color(color.new(#66BB6A, 0), "", inline="r3", group=gRng)
-r1On  = input.bool(false, "1H",  inline="r4", group=gRng)
-r1C   = input.color(color.new(#AA00FF, 0), "", inline="r4", group=gRng)
-r2On  = input.bool(false, "2H",  inline="r5", group=gRng)
-r2C   = input.color(color.new(#7E57C2, 0), "", inline="r5", group=gRng)
-r4On  = input.bool(true,  "4H",  inline="r6", group=gRng)
-r4C   = input.color(color.new(#2962FF, 0), "", inline="r6", group=gRng)
-r8On  = input.bool(false, "8H",  inline="r7", group=gRng)
-r8C   = input.color(color.new(#00897B, 0), "", inline="r7", group=gRng)
-rDOn  = input.bool(false, "D",   inline="r8", group=gRng)
-rDC   = input.color(color.new(#FF6D00, 0), "", inline="r8", group=gRng)
-rWOn  = input.bool(false, "W",   inline="r9", group=gRng)
-rWC   = input.color(color.new(#F23645, 0), "", inline="r9", group=gRng)
-rCTf  = input.timeframe("", "Custom", inline="r10", group=gRng, tooltip="Any timeframe TradingView accepts — 3, 45, 12H, 3D. Leave blank to disable this slot.")
-rCC   = input.color(color.new(#5D606B, 0), "", inline="r10", group=gRng)
-
-liveN = input.int(3, "Keep each range live for N candles", minval=1, group=gRng, tooltip="How far right a range is projected, measured in candles of ITS OWN timeframe. A 4H range with 3 = drawn across the next 12 hours.")
-tagTf = input.bool(true, "Title each range with its timeframe", group=gRng, tooltip="On = '4H CRT High', '1H CRT Low'. Keep it on whenever more than one timeframe is ticked.")
+// ===================== RANGE =================================================
+gRng   = "Range"
+tfIn   = input.timeframe("240", "Range timeframe", group=gRng, tooltip="Which candle defines each range. 240 = 4H. Any timeframe TradingView accepts works: 30, 60, 240, D, W.")
+liveN  = input.int(3, "Keep each range live for N candles", minval=1, group=gRng, tooltip="How far right the range is projected, measured in candles of the range timeframe.")
+tagTf  = input.bool(false, "Title the range with its timeframe", group=gRng, tooltip="On = '4H CRT High'. Off = 'CRT High'.")
 
 // ===================== VISIBILITY ============================================
-// Age is counted WITHIN each timeframe: the 4H store's 'previous' is the 4H
-// range before the current one, not some other timeframe's.
 gVis     = "Visibility"
 showPrev = input.bool(true,  "Show previous range", group=gVis)
 showHist = input.bool(false, "Show historical ranges", group=gVis)
-maxHist  = input.int(8, "Max ranges kept per timeframe", minval=1, maxval=200, group=gVis, tooltip="Counted separately for each ticked timeframe. Every range costs 3 lines, and TradingView allows 500 in total — with many timeframes ticked, keep this low.")
+maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
 
 // ===================== COLOURS & STYLE =======================================
-gCol     = "Range box — Style"
-prevCol  = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
+gCol     = "Range box — Colours & Style"
+curCol   = input.color(color.new(#2962FF, 0),     "Current range",    group=gCol)
+prevCol  = input.color(color.new(color.gray, 0),  "Previous range",   group=gCol)
 histCol  = input.color(color.new(color.gray, 55), "Historical range", group=gCol)
 lw       = input.int(2, "Line width", minval=1, maxval=4, group=gCol)
 showShade    = input.bool(true, "Shade inside the range", group=gCol)
-shadeOpacity = input.int(92, "Shade opacity (0 = solid, 100 = invisible)", minval=0, maxval=100, group=gCol, tooltip="The shade uses each timeframe's own colour, so ranges stay distinguishable. The left side stays open; the shading just highlights it.")
+shadeCol     = input.color(#2962FF, "Shade colour", group=gCol)
+shadeOpacity = input.int(90, "Shade opacity (0 = solid, 100 = invisible)", minval=0, maxval=100, group=gCol, tooltip="Higher = lighter than the range lines. The left side of the range stays open; the shading highlights it.")
 shadeDepth   = input.float(1.0, "Shade depth (0 = none, 1 = full range)", minval=0, maxval=1, step=0.05, group=gCol)
 
 // ===================== HIGH / LOW LABELS =====================================
@@ -73,6 +51,7 @@ showHL    = input.bool(true,  "Show High / Low labels", group=gLab)
 shortHL   = input.bool(false, "Short names (CRT H / CRT L)", group=gLab)
 showPx    = input.bool(true,  "Show price in labels", group=gLab)
 labSz     = input.string("Small", "Label size", options=["Tiny","Small","Normal"], group=gLab)
+hlLabCol  = input.color(color.new(#2962FF, 0), "Label colour", group=gLab)
 labTxtCol = input.color(color.white, "Text colour (Filled design)", group=gLab)
 
 // ===================== EQUILIBRIUM ===========================================
@@ -110,159 +89,91 @@ mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, 
 
 TRANSP = color.new(color.gray, 100)
 HIDE   = color.new(color.gray, 100)
-sym    = syminfo.tickerid
 
-// ===================== PER-TIMEFRAME STORES ==================================
-// One complete set per slot, so each timeframe keeps its own history and its own
-// labels. Nothing is shared between timeframes except the settings.
-var array<line>  h0A = array.new<line>()
-var array<line>  l0A = array.new<line>()
-var array<line>  e0A = array.new<line>()
-var array<box>   s0A = array.new<box>()
-var array<label> b0A = array.new<label>()
-var array<line>  h1A = array.new<line>()
-var array<line>  l1A = array.new<line>()
-var array<line>  e1A = array.new<line>()
-var array<box>   s1A = array.new<box>()
-var array<label> b1A = array.new<label>()
-var array<line>  h2A = array.new<line>()
-var array<line>  l2A = array.new<line>()
-var array<line>  e2A = array.new<line>()
-var array<box>   s2A = array.new<box>()
-var array<label> b2A = array.new<label>()
-var array<line>  h3A = array.new<line>()
-var array<line>  l3A = array.new<line>()
-var array<line>  e3A = array.new<line>()
-var array<box>   s3A = array.new<box>()
-var array<label> b3A = array.new<label>()
-var array<line>  h4A = array.new<line>()
-var array<line>  l4A = array.new<line>()
-var array<line>  e4A = array.new<line>()
-var array<box>   s4A = array.new<box>()
-var array<label> b4A = array.new<label>()
-var array<line>  h5A = array.new<line>()
-var array<line>  l5A = array.new<line>()
-var array<line>  e5A = array.new<line>()
-var array<box>   s5A = array.new<box>()
-var array<label> b5A = array.new<label>()
-var array<line>  h6A = array.new<line>()
-var array<line>  l6A = array.new<line>()
-var array<line>  e6A = array.new<line>()
-var array<box>   s6A = array.new<box>()
-var array<label> b6A = array.new<label>()
-var array<line>  h7A = array.new<line>()
-var array<line>  l7A = array.new<line>()
-var array<line>  e7A = array.new<line>()
-var array<box>   s7A = array.new<box>()
-var array<label> b7A = array.new<label>()
-var array<line>  h8A = array.new<line>()
-var array<line>  l8A = array.new<line>()
-var array<line>  e8A = array.new<line>()
-var array<box>   s8A = array.new<box>()
-var array<label> b8A = array.new<label>()
-var array<line>  h9A = array.new<line>()
-var array<line>  l9A = array.new<line>()
-var array<line>  e9A = array.new<line>()
-var array<box>   s9A = array.new<box>()
-var array<label> b9A = array.new<label>()
+// ===================== THE RANGE FETCH =======================================
+// The last CLOSED candle of the range timeframe: its high, its low, and the
+// timestamp it opened at. Everything else in this file is drawn from these three
+// numbers.
+sym = syminfo.tickerid
+[rHigh, rLow, rOpenT] = request.security(sym, tfIn, [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
+tfMs = timeframe.in_seconds(tfIn) * 1000
+tfNm = f_tfName(tfIn)
 
-// new-range detector: the open time of the last range drawn, one slot per TF
-var array<int> lastT = array.new<int>(10, 0)
+// One store per drawing type. They stay in lock-step: index i of each array
+// belongs to the same range, so age-based recolouring and pruning line up.
+var array<line> hiA = array.new<line>()
+var array<line> loA = array.new<line>()
+var array<line> eqA = array.new<line>()
+var array<box>  shA = array.new<box>()
 
-// ===================== DRAW ONE RANGE ========================================
-// Called once per ticked timeframe. It detects that timeframe's new closed
-// candle itself, so each slot fires on its own clock: the 4H slot every four
-// hours, the 15m slot every fifteen minutes, independently.
-f_range(int slot, array<line> hA, array<line> lA, array<line> eA, array<box> sA, array<label> bA, float rH, float rL, float rT0, int msLen, color baseCol, string tag) =>
-    if not na(rH) and not na(rL) and not na(rT0)
-        int rT = int(rT0)
-        if rT != array.get(lastT, slot)
-            array.set(lastT, slot, rT)
-            startT  = rT
-            endT    = rT + liveN * msLen
-            eqv     = (rH + rL) / 2.0
-            rangePx = rH - rL
+// The newest range owns the labels. Older ranges are lines only, which is what
+// stops a screen full of stacked tags.
+var label labHi = na
+var label labLo = na
+var label labEq = na
 
-            // ---- the range itself ----
-            array.push(hA, line.new(startT, rH, endT, rH, xloc=xloc.bar_time, color=baseCol, width=lw))
-            array.push(lA, line.new(startT, rL, endT, rL, xloc=xloc.bar_time, color=baseCol, width=lw))
-            array.push(eA, showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle)) : na)
-            array.push(sA, showShade and shadeDepth > 0 ? box.new(startT, rH, startT + int(shadeDepth * (endT - startT)), rL, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(baseCol, shadeOpacity)) : na)
+// A new range exists the moment the range timeframe's open time changes.
+newRange = not na(rHigh) and not na(rLow) and not na(rOpenT) and (na(rOpenT[1]) or rOpenT != rOpenT[1])
 
-            // ---- labels: only this timeframe's newest range carries them ----
-            while array.size(bA) > 0
-                label.delete(array.shift(bA))
-            pre    = tagTf ? tag + " " : ""
-            hiName = shortHL ? "CRT H" : "CRT High"
-            loName = shortHL ? "CRT L" : "CRT Low"
-            ptSz   = pointSize > 0 ? pointSize : syminfo.mintick
-            ppSz   = pipSize   > 0 ? pipSize   : syminfo.mintick * 10
-            ptsN   = math.round(rangePx / ptSz)
-            brNum  = brUnit == "Pips" ? math.round(rangePx / ppSz) : brUnit == "Ticks" ? math.round(rangePx / syminfo.mintick) : na
-            brStr  = brUnit == "None" ? "" : brUnit == "Price" ? "(" + str.tostring(rangePx, format.mintick) + ")" : "(" + str.tostring(brNum, "#") + " " + (brUnit == "Pips" ? "pips" : "ticks") + ")"
-            if showHL
-                array.push(bA, mkLabel(endT, rH, pre + hiName + (showPx ? " " + str.tostring(rH, format.mintick) : ""), labDesign, baseCol, labTxtCol, labSz))
-                array.push(bA, mkLabel(endT, rL, pre + loName + (showPx ? " " + str.tostring(rL, format.mintick) : ""), labDesign, baseCol, labTxtCol, labSz))
-            if showEqLab
-                array.push(bA, mkLabel(endT, eqv, pre + "EQ" + (showEqPx ? " " + str.tostring(eqv, format.mintick) : "") + (showSize ? "  " + str.tostring(ptsN, "#") + " PTS" : "") + (brStr == "" ? "" : "  " + brStr), labDesign, eqLabCol, labTxtCol, eqLabSz))
+if newRange
+    startT  = int(rOpenT)
+    endT    = startT + liveN * tfMs
+    eqv     = (rHigh + rLow) / 2.0
+    rangePx = rHigh - rLow
 
-            // ---- age-based recolour within THIS timeframe's own history ----
-            n = array.size(hA)
-            for i = 0 to n - 1
-                age = n - 1 - i
-                col = age == 0 ? baseCol : age == 1 ? (showPrev ? prevCol : HIDE) : (showHist ? histCol : HIDE)
-                line.set_color(array.get(hA, i), col)
-                line.set_color(array.get(lA, i), col)
-                lex = array.get(eA, i)
-                if not na(lex)
-                    line.set_color(lex, age == 0 ? eqLnCol : col)
-                shx = array.get(sA, i)
-                if not na(shx)
-                    // shading only ever fills the newest range of this timeframe
-                    box.set_bgcolor(shx, age == 0 ? color.new(baseCol, shadeOpacity) : HIDE)
+    // ---- draw this range ----
+    array.push(hiA, line.new(startT, rHigh, endT, rHigh, xloc=xloc.bar_time, color=curCol, width=lw))
+    array.push(loA, line.new(startT, rLow,  endT, rLow,  xloc=xloc.bar_time, color=curCol, width=lw))
+    array.push(eqA, showEqLn ? line.new(startT, eqv, endT, eqv, xloc=xloc.bar_time, color=eqLnCol, width=eqLnWidth, style=f_lstyle(eqLnStyle)) : na)
+    array.push(shA, showShade and shadeDepth > 0 ? box.new(startT, rHigh, startT + int(shadeDepth * (endT - startT)), rLow, xloc=xloc.bar_time, border_color=TRANSP, bgcolor=color.new(shadeCol, shadeOpacity)) : na)
 
-            // ---- prune ----
-            while array.size(hA) > maxHist + 2
-                line.delete(array.shift(hA))
-                line.delete(array.shift(lA))
-                led = array.shift(eA)
-                if not na(led)
-                    line.delete(led)
-                shd = array.shift(sA)
-                if not na(shd)
-                    box.delete(shd)
+    // ---- labels: only the newest range carries them ----
+    if not na(labHi)
+        label.delete(labHi)
+    if not na(labLo)
+        label.delete(labLo)
+    if not na(labEq)
+        label.delete(labEq)
 
-// ===================== FETCH & DRAW, ONE SLOT PER TIMEFRAME ==================
-// Each request.security is gated by its own checkbox, so unticked timeframes
-// cost nothing at all. Every one pulls the last CLOSED candle of that
-// timeframe: high, low, and the time it opened.
-if r5On
-    [rH, rL, rT] = request.security(sym, "5", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(0, h0A, l0A, e0A, s0A, b0A, rH, rL, rT, 300000, r5C, "5m")
-if r15On
-    [rH, rL, rT] = request.security(sym, "15", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(1, h1A, l1A, e1A, s1A, b1A, rH, rL, rT, 900000, r15C, "15m")
-if r30On
-    [rH, rL, rT] = request.security(sym, "30", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(2, h2A, l2A, e2A, s2A, b2A, rH, rL, rT, 1800000, r30C, "30m")
-if r1On
-    [rH, rL, rT] = request.security(sym, "60", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(3, h3A, l3A, e3A, s3A, b3A, rH, rL, rT, 3600000, r1C, "1H")
-if r2On
-    [rH, rL, rT] = request.security(sym, "120", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(4, h4A, l4A, e4A, s4A, b4A, rH, rL, rT, 7200000, r2C, "2H")
-if r4On
-    [rH, rL, rT] = request.security(sym, "240", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(5, h5A, l5A, e5A, s5A, b5A, rH, rL, rT, 14400000, r4C, "4H")
-if r8On
-    [rH, rL, rT] = request.security(sym, "480", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(6, h6A, l6A, e6A, s6A, b6A, rH, rL, rT, 28800000, r8C, "8H")
-if rDOn
-    [rH, rL, rT] = request.security(sym, "1D", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(7, h7A, l7A, e7A, s7A, b7A, rH, rL, rT, 86400000, rDC, "D")
-if rWOn
-    [rH, rL, rT] = request.security(sym, "1W", [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(8, h8A, l8A, e8A, s8A, b8A, rH, rL, rT, 604800000, rWC, "W")
-if rCTf != ""
-    [rH, rL, rT] = request.security(sym, rCTf, [high[1], low[1], time[1]], lookahead=barmerge.lookahead_off)
-    f_range(9, h9A, l9A, e9A, s9A, b9A, rH, rL, rT, timeframe.in_seconds(rCTf) * 1000, rCC, f_tfName(rCTf))
+    pre    = tagTf ? tfNm + " " : ""
+    hiName = shortHL ? "CRT H" : "CRT High"
+    loName = shortHL ? "CRT L" : "CRT Low"
+    hiTxt  = pre + hiName + (showPx ? " " + str.tostring(rHigh, format.mintick) : "")
+    loTxt  = pre + loName + (showPx ? " " + str.tostring(rLow,  format.mintick) : "")
+
+    ptSz  = pointSize > 0 ? pointSize : syminfo.mintick
+    ppSz  = pipSize   > 0 ? pipSize   : syminfo.mintick * 10
+    ptsN  = math.round(rangePx / ptSz)
+    brNum = brUnit == "Pips" ? math.round(rangePx / ppSz) : brUnit == "Ticks" ? math.round(rangePx / syminfo.mintick) : na
+    brStr = brUnit == "None" ? "" : brUnit == "Price" ? "(" + str.tostring(rangePx, format.mintick) + ")" : "(" + str.tostring(brNum, "#") + " " + (brUnit == "Pips" ? "pips" : "ticks") + ")"
+    eqTxt = pre + "EQ" + (showEqPx ? " " + str.tostring(eqv, format.mintick) : "") + (showSize ? "  " + str.tostring(ptsN, "#") + " PTS" : "") + (brStr == "" ? "" : "  " + brStr)
+
+    labHi := showHL    ? mkLabel(endT, rHigh, hiTxt, labDesign, hlLabCol, labTxtCol, labSz)  : na
+    labLo := showHL    ? mkLabel(endT, rLow,  loTxt, labDesign, hlLabCol, labTxtCol, labSz)  : na
+    labEq := showEqLab ? mkLabel(endT, eqv,   eqTxt, labDesign, eqLabCol, labTxtCol, eqLabSz) : na
+
+    // ---- age-based recolour: newest, then previous, then history ----
+    n = array.size(hiA)
+    for i = 0 to n - 1
+        age = n - 1 - i
+        col = age == 0 ? curCol : age == 1 ? (showPrev ? prevCol : HIDE) : (showHist ? histCol : HIDE)
+        line.set_color(array.get(hiA, i), col)
+        line.set_color(array.get(loA, i), col)
+        lex = array.get(eqA, i)
+        if not na(lex)
+            line.set_color(lex, age == 0 ? eqLnCol : col)
+        shx = array.get(shA, i)
+        if not na(shx)
+            // shading only ever fills the CURRENT range; older ranges are lines
+            box.set_bgcolor(shx, age == 0 ? color.new(shadeCol, shadeOpacity) : HIDE)
+
+    // ---- prune ----
+    while array.size(hiA) > maxHist + 2
+        line.delete(array.shift(hiA))
+        line.delete(array.shift(loA))
+        led = array.shift(eqA)
+        if not na(led)
+            line.delete(led)
+        shd = array.shift(shA)
+        if not na(shd)
+            box.delete(shd)
