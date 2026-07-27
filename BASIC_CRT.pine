@@ -35,6 +35,69 @@ tfIn   = input.timeframe("240", "Range timeframe", group=gRng, tooltip="Which ca
 liveN  = input.int(3, "Keep each range live for N candles", minval=1, group=gRng, tooltip="How far right the range is projected, measured in candles of the range timeframe.")
 tagTf  = input.bool(false, "Title the range with its timeframe", group=gRng, tooltip="On = '4H CRT High'. Off = 'CRT High'.")
 
+// ===================== RANGE TIME FILTER =====================================
+// Which ranges are worth looking at, by the time the RANGE CANDLE opened.
+//
+// Measured on eight instruments over 2010-2026, net of realistic costs
+// (SLOT_STUDY.md). The finding in one line: no slot is profitable traded
+// mechanically, but the RANKING between slots is large and consistent — 0.31 R
+// per trade separates the best 4H bucket from the worst, and seven instruments
+// that share nothing but a clock agree on the order. This filter mutes the
+// slots that are consistently worst; it does not promise the rest are good.
+//
+// The boxes below arrive pre-set to that finding. Everything is one tick away
+// from coming back.
+gSlot  = "Range time filter"
+sltOn  = input.bool(true, "Only use ranges that open in the ticked slots", group=gSlot, tooltip="Applies to the range boxes AND to the sweep/break markers, since a marker describes what happened to a range. Untick to see every range again.")
+sltTz  = input.string("Africa/Johannesburg", "Timezone", options=["Africa/Johannesburg","America/New_York","Europe/London","Asia/Tokyo","UTC","Exchange"], group=gSlot, tooltip="Africa/Johannesburg = SAST, UTC+2 with no daylight saving, so the slots read the same all year.")
+
+// ---- 4H: six sessions. US daylight saving moves each one by an hour, so each
+// bucket covers two adjacent SAST hours and follows the shift automatically.
+gS4 = "Range slots — 4H sessions"
+s4b0 = input.bool(true,  "23:00/00:00   daily open", group=gS4, tooltip="Mean net -0.178 R across seven instruments. Middle of the pack.")
+s4b1 = input.bool(false, "03:00/04:00   Asia", group=gS4, tooltip="WORST bucket measured: mean net -0.395 R, negative on 7 of 7 instruments. Off by default.")
+s4b2 = input.bool(true,  "07:00/08:00   London open", group=gS4, tooltip="Mean net -0.212 R.")
+s4b3 = input.bool(true,  "11:00/12:00   London PM", group=gS4, tooltip="BEST bucket measured: mean net -0.081 R, the least negative on nearly every instrument.")
+s4b4 = input.bool(true,  "15:00/16:00   NY open", group=gS4, tooltip="Mean net -0.174 R.")
+s4b5 = input.bool(false, "19:00/20:00   NY afternoon", group=gS4, tooltip="Second worst: mean net -0.286 R, negative on 7 of 7 instruments. Off by default.")
+
+// ---- every other intraday range timeframe: by the hour the candle opened
+gSH = "Range slots — hourly (15m, 30m, 1H, 2H, 8H)"
+h00 = input.bool(false, "00", inline="q1", group=gSH)
+h01 = input.bool(true,  "01", inline="q1", group=gSH)
+h02 = input.bool(true,  "02", inline="q1", group=gSH)
+h03 = input.bool(false, "03", inline="q1", group=gSH)
+h04 = input.bool(true,  "04", inline="q1", group=gSH)
+h05 = input.bool(true,  "05", inline="q1", group=gSH)
+h06 = input.bool(false, "06", inline="q2", group=gSH)
+h07 = input.bool(false, "07", inline="q2", group=gSH)
+h08 = input.bool(false, "08", inline="q2", group=gSH)
+h09 = input.bool(false, "09", inline="q2", group=gSH)
+h10 = input.bool(true,  "10", inline="q2", group=gSH)
+h11 = input.bool(true,  "11", inline="q2", group=gSH)
+h12 = input.bool(true,  "12", inline="q3", group=gSH)
+h13 = input.bool(true,  "13", inline="q3", group=gSH)
+h14 = input.bool(true,  "14", inline="q3", group=gSH)
+h15 = input.bool(true,  "15", inline="q3", group=gSH)
+h16 = input.bool(true,  "16", inline="q3", group=gSH)
+h17 = input.bool(true,  "17", inline="q3", group=gSH)
+h18 = input.bool(true,  "18", inline="q4", group=gSH)
+h19 = input.bool(true,  "19", inline="q4", group=gSH)
+h20 = input.bool(true,  "20", inline="q4", group=gSH)
+h21 = input.bool(true,  "21", inline="q4", group=gSH)
+h22 = input.bool(true,  "22", inline="q4", group=gSH)
+h23 = input.bool(true,  "23", inline="q4", group=gSH)
+
+// ---- day of week, applied on every timeframe
+gSD = "Range slots — day of week"
+wMon = input.bool(true, "Mon", inline="w1", group=gSD)
+wTue = input.bool(true, "Tue", inline="w1", group=gSD)
+wWed = input.bool(true, "Wed", inline="w1", group=gSD)
+wThu = input.bool(true, "Thu", inline="w2", group=gSD)
+wFri = input.bool(true, "Fri", inline="w2", group=gSD)
+wSat = input.bool(true, "Sat", inline="w2", group=gSD)
+wSun = input.bool(true, "Sun", inline="w2", group=gSD, tooltip="All days on by default. The weekday effect measured far weaker than the hourly one — 0.085 R between best and worst, against 0.31 R across the 4H sessions — so nothing is pre-muted here. For reference on DAILY ranges: Wed was least bad (-0.045 R), then Mon (-0.055), Fri (-0.103), Tue (-0.126), Thu (-0.130).")
+
 // ===================== VISIBILITY ============================================
 gVis     = "Visibility"
 showPrev = input.bool(true,  "Show previous range", group=gVis)
@@ -162,6 +225,36 @@ mkLabel(int x, float y, string txt, string design, color mainCol, color txtCol, 
 TRANSP = color.new(color.gray, 100)
 HIDE   = color.new(color.gray, 100)
 
+// ---- range time filter -----------------------------------------------------
+// Lookup tables built once from the inputs, so the test is an array read rather
+// than a twenty-four-way ternary.
+tzSlot = sltTz == "Exchange" ? syminfo.timezone : sltTz
+hrOn  = array.from(h00, h01, h02, h03, h04, h05, h06, h07, h08, h09, h10, h11, h12, h13, h14, h15, h16, h17, h18, h19, h20, h21, h22, h23)
+dayOn = array.from(wSun, wMon, wTue, wWed, wThu, wFri, wSat)   // dayofweek is 1..7 from Sunday
+sesOn = array.from(s4b0, s4b1, s4b2, s4b3, s4b4, s4b5)
+
+// Is a range that OPENED at time t, on a timeframe msLen long, one we want?
+//   daily and above -> the weekday boxes are the whole filter
+//   exactly 4H      -> the six session buckets. Bucket = ((hour+1) % 24) / 4,
+//                      which pairs 23/00, 03/04, 07/08, 11/12, 15/16, 19/20 and
+//                      therefore follows the daylight-saving shift by itself.
+//   anything else   -> the hour the candle opened
+f_slotOK(int t, int msLen) =>
+    bool ok = true
+    if sltOn and not na(t)
+        h  = hour(t, tzSlot)
+        dw = dayofweek(t, tzSlot)
+        okDay = array.get(dayOn, dw - 1)
+        bool okT = true
+        if msLen >= 86400000
+            okT := true
+        else if msLen == 14400000
+            okT := array.get(sesOn, int(((h + 1) % 24) / 4))
+        else
+            okT := array.get(hrOn, h)
+        ok := okDay and okT
+    ok
+
 // ===================== THE RANGE FETCH =======================================
 // The last CLOSED candle of the range timeframe: its high, its low, and the
 // timestamp it opened at. Everything else in this file is drawn from these three
@@ -188,7 +281,7 @@ var label labLo = na
 var label labEq = na
 
 // A new range exists the moment the range timeframe's open time changes.
-newRange = not na(rHigh) and not na(rLow) and not na(rOpenT) and (na(rOpenT[1]) or rOpenT != rOpenT[1])
+newRange = not na(rHigh) and not na(rLow) and not na(rOpenT) and (na(rOpenT[1]) or rOpenT != rOpenT[1]) and f_slotOK(int(rOpenT), tfMs)
 
 if newRange
     startT  = int(rOpenT)
@@ -321,8 +414,10 @@ f_breakMark(bool bull, int atT, float y, string tfName) =>
 //
 // Clamped to `time` so a marker can never be placed to the right of the bar that
 // is currently being processed.
-f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bO, float bC, int bT, int msLen, bool nb) =>
-    if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC)
+f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bO, float bC, int aT, int bT, int msLen, bool nb) =>
+    // aT is candle A's own open time, not bT - msLen: across a weekend that
+    // subtraction lands on a Saturday and the slot test would read the wrong day.
+    if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC) and f_slotOK(aT, msLen)
         tookLo = bLoV < aLoV
         tookHi = bHiV > aHiV
         bodyHi = math.max(bO, bC)
@@ -370,45 +465,45 @@ f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float 
 sw5 = showSweep and swp5On
 br5 = showBreak and brk5On
 if sw5 or br5
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "5",   [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("5m", sw5, br5, al, ah, bl, bh, bo, bc, int(bt), 300000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "5",   [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("5m", sw5, br5, al, ah, bl, bh, bo, bc, int(at), int(bt), 300000, not na(bt) and bt != bt[1])
 sw15 = showSweep and swp15On
 br15 = showBreak and brk15On
 if sw15 or br15
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "15",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("15m", sw15, br15, al, ah, bl, bh, bo, bc, int(bt), 900000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "15",  [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("15m", sw15, br15, al, ah, bl, bh, bo, bc, int(at), int(bt), 900000, not na(bt) and bt != bt[1])
 sw30 = showSweep and swp30On
 br30 = showBreak and brk30On
 if sw30 or br30
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "30",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("30m", sw30, br30, al, ah, bl, bh, bo, bc, int(bt), 1800000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "30",  [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("30m", sw30, br30, al, ah, bl, bh, bo, bc, int(at), int(bt), 1800000, not na(bt) and bt != bt[1])
 sw1 = showSweep and swp1On
 br1H = showBreak and brk1On
 if sw1 or br1H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "60",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("1H", sw1, br1H, al, ah, bl, bh, bo, bc, int(bt), 3600000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "60",  [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("1H", sw1, br1H, al, ah, bl, bh, bo, bc, int(at), int(bt), 3600000, not na(bt) and bt != bt[1])
 sw2 = showSweep and swp2On
 br2H = showBreak and brk2On
 if sw2 or br2H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "120", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("2H", sw2, br2H, al, ah, bl, bh, bo, bc, int(bt), 7200000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "120", [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("2H", sw2, br2H, al, ah, bl, bh, bo, bc, int(at), int(bt), 7200000, not na(bt) and bt != bt[1])
 sw4 = showSweep and swp4On
 br4H = showBreak and brk4On
 if sw4 or br4H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "240", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("4H", sw4, br4H, al, ah, bl, bh, bo, bc, int(bt), 14400000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "240", [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("4H", sw4, br4H, al, ah, bl, bh, bo, bc, int(at), int(bt), 14400000, not na(bt) and bt != bt[1])
 sw8 = showSweep and swp8On
 br8H = showBreak and brk8On
 if sw8 or br8H
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "480", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("8H", sw8, br8H, al, ah, bl, bh, bo, bc, int(bt), 28800000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "480", [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("8H", sw8, br8H, al, ah, bl, bh, bo, bc, int(at), int(bt), 28800000, not na(bt) and bt != bt[1])
 swD = showSweep and swpDOn
 brD = showBreak and brkDOn
 if swD or brD
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "1D",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("D", swD, brD, al, ah, bl, bh, bo, bc, int(bt), 86400000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "1D",  [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("D", swD, brD, al, ah, bl, bh, bo, bc, int(at), int(bt), 86400000, not na(bt) and bt != bt[1])
 swW = showSweep and swpWOn
 brW = showBreak and brkWOn
 if swW or brW
-    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("W", swW, brW, al, ah, bl, bh, bo, bc, int(bt), 604800000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,at,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],open[1],close[1],time[2],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("W", swW, brW, al, ah, bl, bh, bo, bc, int(at), int(bt), 604800000, not na(bt) and bt != bt[1])
