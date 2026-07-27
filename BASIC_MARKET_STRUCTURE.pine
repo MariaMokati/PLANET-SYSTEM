@@ -15,11 +15,13 @@
 //               timeframe gets that timeframe stamped on its label:
 //               "HH ·1H ·4H" = the same point is a 1H swing and a 4H swing.
 //   TRENDLINES  Last two confirmed swings — CURRENT WEEK ONLY.
-//   DASHBOARDS  Two independent panels:
-//                 1. Structure bias per timeframe, 1m → W
-//                 2. Session / Daily / Weekly bias + overall trend
-//               Both read CONFIRMED bars by default (no intra-bar repaint),
-//               matching the Basic CRT trend filter exactly.
+//   DASHBOARDS  Two panels showing the SAME timeframe ladder — same rows, same
+//               order, same checkboxes — measuring two different things:
+//                 1. STRUCTURE  which way each timeframe's swings point
+//                 2. vs OPEN    where price sits inside each CURRENT period
+//               A timeframe is fully aligned when its row agrees on both.
+//               Structure reads CONFIRMED bars by default (no intra-bar
+//               repaint), matching the Basic CRT trend filter exactly.
 //
 // All labels use style_none: text only, no bubbles, no background boxes.
 // Non-repainting: swings are CONFIRMED pivots, placed `length` bars back.
@@ -145,16 +147,18 @@ dBull = input.color(color.new(#089981, 0), "Bullish", inline="dc", group=gDash)
 dBear = input.color(color.new(#F23645, 0), "Bearish", inline="dc", group=gDash)
 dFlat = input.color(color.new(#787B86, 0), "Range",   inline="dc", group=gDash)
 
-// ===================== DASHBOARD 2 — SESSION / DAILY / WEEKLY ================
-// Its own panel so it can sit at the bottom while the structure table sits at
-// the top. Every row individually switchable.
+// ===================== DASHBOARD 2 — PRICE vs PERIOD OPENS ===================
+// The SAME timeframe ladder as the structure dashboard — same rows, same order,
+// driven by the SAME checkboxes, so the two panels always mirror and alignment
+// can be read row against row. This panel answers a different question per row:
+// is price ABOVE or BELOW the open of the CURRENT period of that timeframe?
+// (e.g. the W row = price vs this week's open, the 4H row = price vs the
+// current 4H candle's open.) Structure BULLISH + open ABOVE = fully aligned.
 gDash2 = "Bias dashboard (bottom)"
-dash2On  = input.bool(true, "Show bias dashboard", group=gDash2)
+dash2On  = input.bool(true, "Show bias dashboard", group=gDash2, tooltip="Timeframe rows follow the checkboxes in the structure dashboard group, so both panels always show the same ladder.")
 dash2Pos = input.string("Bottom right", "Position", options=["Top right","Top left","Bottom right","Bottom left","Middle right"], group=gDash2)
 dash2Sz  = input.string("Small", "Text size", options=["Tiny","Small","Normal"], group=gDash2)
-d2Ses    = input.bool(true, "Session row", group=gDash2, tooltip="Price vs the open of the session currently running. Shows — when no session is active.")
-d2Day    = input.bool(true, "Daily row", group=gDash2, tooltip="Price vs today's open.")
-d2Wk     = input.bool(true, "Weekly row", group=gDash2, tooltip="Price vs this week's open.")
+d2Ses    = input.bool(true, "Session row", group=gDash2, tooltip="Price vs the open of the session running RIGHT NOW (Asia / London / NY AM / NY PM, as defined in the Sessions group). Between sessions there is no session open to measure against, so the row shows —.")
 d2Trd    = input.bool(true, "Overall trend row", group=gDash2, tooltip="Majority vote across every timeframe enabled in the structure dashboard: more bullish than bearish = BULLISH. Bias and trend are the same reading here — structure making higher highs and higher lows IS a bullish trend.")
 d2Chart  = input.bool(true, "Chart structure row", group=gDash2, tooltip="The external tier's trend on THIS chart. Shows — when external structure is switched off.")
 
@@ -573,8 +577,22 @@ if biasNeed and dDOn
 if biasNeed and dWOn
     bW := request.security(sym, "1W", f_tfBiasC(dashLen), lookahead=barmerge.lookahead_off)
 
-dOpen = request.security(sym, "1D", open, lookahead=barmerge.lookahead_off)
-wOpen = request.security(sym, "1W", open, lookahead=barmerge.lookahead_off)
+// Current-period open per timeframe, computed natively from period boundaries.
+// This is exact on every bar — including Replay — unlike request.security(open),
+// which lags to the previous period on historical bars.
+f_pOpen(simple string tf) =>
+    var float op = na
+    if timeframe.change(tf)
+        op := open
+    op
+op1   = f_pOpen("1")
+op5   = f_pOpen("5")
+op15  = f_pOpen("15")
+op30  = f_pOpen("30")
+op60  = f_pOpen("60")
+op240 = f_pOpen("240")
+opD   = f_pOpen("1D")
+opW   = f_pOpen("1W")
 var float sesOpen = na
 anySes = in1 or in2 or in3 or in4
 if anySes and not anySes[1]
@@ -586,6 +604,11 @@ f_word(int b) =>
     b == 1 ? "BULLISH" : b == -1 ? "BEARISH" : "RANGE"
 f_col(int b) =>
     b == 1 ? dBull : b == -1 ? dBear : dFlat
+// vs-open wording: ABOVE / BELOW the current period's open (— when unknown)
+f_oWord(float op) =>
+    na(op) ? "—" : close > op ? "ABOVE" : close < op ? "BELOW" : "AT"
+f_oCol(float op) =>
+    na(op) ? dFlat : close > op ? dBull : close < op ? dBear : dFlat
 
 // ---- Dashboard 1: structure bias per timeframe ------------------------------
 var table dash = na
@@ -631,30 +654,54 @@ if dashOn and barstate.islast
         table.cell(dash, 1, r, f_word(b1), text_size=f_sz(dashSz), text_halign=text.align_right, text_color=f_col(b1), bgcolor=bgc)
         r += 1
 
-// ---- Dashboard 2: session / daily / weekly + overall trend ------------------
+// ---- Dashboard 2: the same timeframe ladder, measured against period opens --
+// Rows are driven by the SAME dXOn checkboxes as the structure table, in the
+// same order, so the two panels always mirror and alignment reads row vs row.
 var table dash2 = na
 if dash2On and barstate.islast
     if na(dash2)
-        dash2 := table.new(f_pos(dash2Pos), 2, 6, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
-    table.clear(dash2, 0, 0, 1, 5)
+        dash2 := table.new(f_pos(dash2Pos), 2, 12, border_width=1, frame_width=1, frame_color=color.new(color.gray, 60))
+    table.clear(dash2, 0, 0, 1, 11)
     bgh2 = color.new(color.gray, 85)
+    bgc2 = color.new(color.gray, 92)
     table.cell(dash2, 0, 0, "BIAS", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
-    table.cell(dash2, 1, 0, "STATE", text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh2)
+    table.cell(dash2, 1, 0, "vs OPEN", text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=color.gray, bgcolor=bgh2)
     r2 = 1
+    if dWOn
+        table.cell(dash2, 0, r2, "W", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(opW), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(opW), bgcolor=bgc2)
+        r2 += 1
+    if dDOn
+        table.cell(dash2, 0, r2, "D", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(opD), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(opD), bgcolor=bgc2)
+        r2 += 1
+    if d240On
+        table.cell(dash2, 0, r2, "4H", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(op240), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op240), bgcolor=bgc2)
+        r2 += 1
+    if d60On
+        table.cell(dash2, 0, r2, "1H", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(op60), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op60), bgcolor=bgc2)
+        r2 += 1
+    if d30On
+        table.cell(dash2, 0, r2, "30m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(op30), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op30), bgcolor=bgc2)
+        r2 += 1
+    if d15On
+        table.cell(dash2, 0, r2, "15m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(op15), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op15), bgcolor=bgc2)
+        r2 += 1
+    if d5On
+        table.cell(dash2, 0, r2, "5m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(op5), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op5), bgcolor=bgc2)
+        r2 += 1
+    if d1On
+        table.cell(dash2, 0, r2, "1m", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgc2)
+        table.cell(dash2, 1, r2, f_oWord(op1), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(op1), bgcolor=bgc2)
+        r2 += 1
     if d2Ses
-        sB = na(sesOpen) ? 0 : close > sesOpen ? 1 : close < sesOpen ? -1 : 0
         table.cell(dash2, 0, r2, "Session", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
-        table.cell(dash2, 1, r2, na(sesOpen) ? "—" : f_word(sB), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=na(sesOpen) ? dFlat : f_col(sB), bgcolor=bgh2)
-        r2 += 1
-    if d2Day
-        dB = na(dOpen) ? 0 : close > dOpen ? 1 : close < dOpen ? -1 : 0
-        table.cell(dash2, 0, r2, "Daily", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
-        table.cell(dash2, 1, r2, f_word(dB), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_col(dB), bgcolor=bgh2)
-        r2 += 1
-    if d2Wk
-        wB = na(wOpen) ? 0 : close > wOpen ? 1 : close < wOpen ? -1 : 0
-        table.cell(dash2, 0, r2, "Weekly", text_size=f_sz(dash2Sz), text_halign=text.align_left, text_color=color.gray, bgcolor=bgh2)
-        table.cell(dash2, 1, r2, f_word(wB), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_col(wB), bgcolor=bgh2)
+        table.cell(dash2, 1, r2, f_oWord(sesOpen), text_size=f_sz(dash2Sz), text_halign=text.align_right, text_color=f_oCol(sesOpen), bgcolor=bgh2)
         r2 += 1
     if d2Trd
         // majority vote across every timeframe enabled in the structure table
