@@ -29,6 +29,51 @@ showPrev = input.bool(true,  "Show previous range", group=gVis)
 showHist = input.bool(false, "Show historical ranges", group=gVis)
 maxHist  = input.int(20, "Max historical ranges kept", minval=1, maxval=200, group=gVis)
 
+// ===================== RANGE SLOTS (optional) ================================
+// Pick WHICH ranges exist on the chart, by the time their candle OPENED. Built
+// on the slot study: the session ranking reproduced across seven instruments
+// sharing nothing but a clock. Master switch OFF = every range draws, exactly
+// as always. ON = only ranges from ticked slots are drawn or traded — a muted
+// range draws nothing and arms no setup, so you can never be signalled into a
+// range you have chosen not to see.
+// The six session boxes apply when the Range timeframe is 4H; the 24 hour boxes
+// apply when it is 1H; any other range timeframe shows every range regardless.
+// Pre-ticked = the best-measured slots (4H: London PM, NY open, Daily open;
+// 1H: 17, 18, 11, 02, 16 SAST — the 06:00-09:00 block tested worst everywhere).
+gSlot = "Range slots  (optional)"
+slotOn = input.bool(false, "Only show selected range slots", group=gSlot, tooltip="Off (default) = every range draws, original behaviour. On = only ranges whose candle OPENED inside a ticked slot below exist on the chart — the rest draw nothing and produce no setups. 4H range timeframe uses the six session boxes; 1H uses the 24 hour boxes; any other range timeframe is unaffected.")
+slotTz = input.string("Africa/Johannesburg", "Slot timezone", options=["Africa/Johannesburg","America/New_York","Europe/London","UTC","Exchange"], group=gSlot, tooltip="The hour boxes below are read in this zone. Africa/Johannesburg = SAST, matching the study.")
+ses0 = input.bool(true,  "23/00 Daily open",   inline="q1", group=gSlot)
+ses1 = input.bool(false, "03/04 Asia",         inline="q1", group=gSlot)
+ses2 = input.bool(false, "07/08 London open",  inline="q2", group=gSlot)
+ses3 = input.bool(true,  "11/12 London PM",    inline="q2", group=gSlot)
+ses4 = input.bool(true,  "15/16 NY open",      inline="q3", group=gSlot)
+ses5 = input.bool(false, "19/20 NY afternoon", inline="q3", group=gSlot)
+hr0  = input.bool(false, "00", inline="h1", group=gSlot)
+hr1  = input.bool(false, "01", inline="h1", group=gSlot)
+hr2  = input.bool(true,  "02", inline="h1", group=gSlot)
+hr3  = input.bool(false, "03", inline="h1", group=gSlot)
+hr4  = input.bool(false, "04", inline="h1", group=gSlot)
+hr5  = input.bool(false, "05", inline="h1", group=gSlot)
+hr6  = input.bool(false, "06", inline="h2", group=gSlot)
+hr7  = input.bool(false, "07", inline="h2", group=gSlot)
+hr8  = input.bool(false, "08", inline="h2", group=gSlot)
+hr9  = input.bool(false, "09", inline="h2", group=gSlot)
+hr10 = input.bool(false, "10", inline="h2", group=gSlot)
+hr11 = input.bool(true,  "11", inline="h2", group=gSlot)
+hr12 = input.bool(false, "12", inline="h3", group=gSlot)
+hr13 = input.bool(false, "13", inline="h3", group=gSlot)
+hr14 = input.bool(false, "14", inline="h3", group=gSlot)
+hr15 = input.bool(false, "15", inline="h3", group=gSlot)
+hr16 = input.bool(true,  "16", inline="h3", group=gSlot)
+hr17 = input.bool(true,  "17", inline="h3", group=gSlot)
+hr18 = input.bool(true,  "18", inline="h4", group=gSlot)
+hr19 = input.bool(false, "19", inline="h4", group=gSlot)
+hr20 = input.bool(false, "20", inline="h4", group=gSlot)
+hr21 = input.bool(false, "21", inline="h4", group=gSlot)
+hr22 = input.bool(false, "22", inline="h4", group=gSlot)
+hr23 = input.bool(false, "23", inline="h4", group=gSlot)
+
 gCol   = "Range box — Colours & Style"
 curCol   = input.color(color.new(#2962FF, 0),  "Current range", group=gCol)
 prevCol  = input.color(color.new(color.gray, 0),  "Previous range", group=gCol)
@@ -443,6 +488,24 @@ atrTf = request.security(sym, tfIn, ta.atr(14)[1], lookahead=barmerge.lookahead_
 // chart-TF ATR — an alternative pad unit, and the tolerance for equal highs/lows
 atrChart = ta.atr(14)
 
+// ---- range slot filter ------------------------------------------------------
+// Is the range whose candle opened at time t in an enabled slot? The 4H session
+// index is ((h+1) % 24) / 4, which puts 23:00 and 00:00 opens in the same
+// daily-open bucket (broker 4H grids shift an hour with US daylight saving, so
+// each session lands on two adjacent SAST hours — the study labels both).
+var sesSel = array.from(ses0, ses1, ses2, ses3, ses4, ses5)
+var hrSel  = array.from(hr0, hr1, hr2, hr3, hr4, hr5, hr6, hr7, hr8, hr9, hr10, hr11, hr12, hr13, hr14, hr15, hr16, hr17, hr18, hr19, hr20, hr21, hr22, hr23)
+slotTzUse = slotTz == "Exchange" ? syminfo.timezone : slotTz
+f_slotVis(int t) =>
+    bool v = true
+    if slotOn and not na(t)
+        h = hour(t, slotTzUse)
+        if tfMs == 14400000
+            v := array.get(sesSel, int(((h + 1) % 24) / 4))
+        else if tfMs == 3600000
+            v := array.get(hrSel, h)
+    v
+
 var array<line> hiA   = array.new<line>()
 var array<line> loA   = array.new<line>()
 var array<line> eqA   = array.new<line>()
@@ -647,8 +710,10 @@ var label labEq = na
 HIDE = color.new(color.gray, 100)
 
 newClosed = not na(cHigh) and not na(cOpenT) and (na(cOpenT[1]) or cOpenT != cOpenT[1])
+// does this range's slot pass the picker? (always true with the picker off)
+slotOk = f_slotVis(cOpenT)
 
-if newClosed
+if newClosed and slotOk
     startT = cOpenT
     endT   = cOpenT + liveN * tfMs
     eqv    = (cHigh + cLow) / 2.0
@@ -794,7 +859,7 @@ f_watchTimeOk(int t0) =>
 // A range smaller than the size floor still DRAWS exactly as always — it just
 // arms no watch, because the smallest ranges were the worst-testing bucket on
 // every instrument.
-if newClosed and showSetup and (setup2c or setup3c) and not na(cHigh) and not na(cLow) and (setupMinRng <= 0 or cHigh - cLow >= setupMinRng * nz(atrTf, 0))
+if newClosed and slotOk and showSetup and (setup2c or setup3c) and not na(cHigh) and not na(cLow) and (setupMinRng <= 0 or cHigh - cLow >= setupMinRng * nz(atrTf, 0))
     array.push(wHi, cHigh)
     array.push(wLo, cLow)
     array.push(wOpenT, cOpenT)
