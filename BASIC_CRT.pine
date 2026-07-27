@@ -75,12 +75,19 @@ swKeep  = input.int(12, "Keep last N sweep markers (all TFs)", minval=1, maxval=
 
 // ===================== BREAKS (optional, per timeframe) ======================
 // Same two candles as a sweep, opposite outcome. A CLOSED candle takes out the
-// PRIOR candle's high/low and CLOSES BEYOND it — the level was broken, not
-// rejected. So wherever a sweep was "supposed" to happen but the close never
+// PRIOR candle's high/low and finishes BEYOND it — the level was broken, not
+// rejected. So wherever a sweep was "supposed" to happen but the candle never
 // came back inside, you get a "Break" tag instead. Mirrors the sweep layer
 // exactly: master switch, per-timeframe switches, own design, size and colours.
+//
+// ONE TAG PER CANDLE. A candle that wicks through one side of the prior range
+// and expands clean through the other is a single event — a break — not a break
+// plus a phantom sweep of the side it only passed through. Classification runs
+// before display, so which layers you have switched on never changes what a
+// candle IS.
 gBrk = "Breaks  (optional)"
-showBreak   = input.bool(false, "Show breaks (closed BEYOND the level)", group=gBrk, tooltip="Master switch for the whole break layer. A break = the candle took the prior high/low and closed past it instead of reclaiming.")
+showBreak   = input.bool(false, "Show breaks (closed BEYOND the level)", group=gBrk, tooltip="Master switch for the whole break layer. A break = the candle took the prior high/low and finished past it instead of reclaiming.")
+brkStrict   = input.bool(true,  "Break needs the FULL body outside", group=gBrk, tooltip="ON (recommended): the candle's whole body — open AND close — must sit clear of the level. A candle whose body still straddles the level is not a break; it is indecision, and gets no tag at all. OFF: the close alone being outside is enough, which tags body-straddling candles as breaks too.")
 breakDesign = input.string("Label", "Break marker design", options=["Label","Triangle B","Circle B"], group=gBrk, tooltip="Label = pointer tag ('Break'). Triangle B / Circle B = minimal shape with a 'B' on the breaking candle.")
 breakLbl    = input.bool(true,  "Show 'Break' text (Label design only)", group=gBrk)
 breakTf     = input.bool(true,  "Title each break with its timeframe", group=gBrk, tooltip="On = '4H Break', '1H Break' etc.")
@@ -469,36 +476,55 @@ f_breakMark(bool bull, int atT, float y, string tfName) =>
     array.push(brLbA, lb)
     while array.size(brLbA) > brKeep
         label.delete(array.shift(brLbA))
-// One pass over a timeframe's last two closed candles. Taking out the prior
-// level is the shared condition; the CLOSE decides which layer gets the marker:
-//   closed back inside  -> sweep  (liquidity taken and rejected)
-//   closed beyond       -> break  (level actually gone)
-// The two outcomes are mutually exclusive, so a candle is never tagged twice.
-// swEn / brEn are this timeframe's own switches, evaluated independently.
+// One pass over a timeframe's last two closed candles, A (older) and B (the one
+// just closed). Taking out A's high or low is the shared condition; what B does
+// by the time it FINISHES decides the classification.
+//
+// Everything here comes from the [1]-offset bar of the source timeframe, so B is
+// always a fully closed candle — nothing is ever classified mid-formation.
+//
+// BREAK  — B expands clear of the level. With brkStrict on, the whole body
+//          (open AND close) has to be outside; a body still straddling the level
+//          is indecision, not a break, and gets nothing.
+// SWEEP  — B took the level and closed back INSIDE the range. Rejection.
+//
+// The classification is decided for the CANDLE, once, before any drawing. That
+// is what stops an outside candle — one that wicks below A's low and expands
+// through A's high — from being tagged as a sweep AND a break at the same time.
+// A break outranks a sweep because expansion through a level is a strictly
+// stronger statement than a wick through the opposite one.
+//
+// Note the gate is `isBreak`, NOT `brEn and isBreak`: a break candle stays a
+// break even when the break layer is switched off, so turning breaks off can
+// never make phantom sweeps appear.
 //
 // bT is the source candle's OPEN time. On a chart TF below the source TF that
 // is the far LEFT edge of the candle — an hour to the left of the wick for a 1H
 // marker on a 2m chart — which is why an untethered tag appears floating over
 // empty space. msLen lets us anchor at the candle's last chart bar instead, i.e.
 // where the sweep or break was actually confirmed.
-f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bC, int bT, int msLen, bool nb) =>
-    if nb and not na(aLoV) and not na(aHiV) and not na(bC)
+f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bO, float bC, int bT, int msLen, bool nb) =>
+    if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC)
         tookLo = bLoV < aLoV
         tookHi = bHiV > aHiV
+        bodyHi = math.max(bO, bC)
+        bodyLo = math.min(bO, bC)
+        brUp = tookHi and (brkStrict ? bodyLo > aHiV : bC > aHiV)
+        brDn = tookLo and (brkStrict ? bodyHi < aLoV : bC < aLoV)
+        // brUp and brDn cannot both be true: aHiV >= aLoV makes them exclusive.
+        isBreak = brUp or brDn
+        swDn = not isBreak and tookHi and bC < aHiV   // took the high, closed back inside
+        swUp = not isBreak and tookLo and bC > aLoV   // took the low,  closed back inside
         swT = sweepAnchor == "Candle open" ? bT : bT + msLen - 1
         brT = breakAnchor == "Candle open" ? bT : bT + msLen - 1
-        if tookLo
-            if bC > aLoV
-                if swEn
-                    f_sweepMark(true, swT, bLoV, tfName)
-            else if brEn
-                f_breakMark(false, brT, bLoV, tfName)
-        if tookHi
-            if bC < aHiV
-                if swEn
-                    f_sweepMark(false, swT, bHiV, tfName)
-            else if brEn
-                f_breakMark(true, brT, bHiV, tfName)
+        if brEn and brUp
+            f_breakMark(true, brT, bHiV, tfName)
+        if brEn and brDn
+            f_breakMark(false, brT, bLoV, tfName)
+        if swEn and swDn
+            f_sweepMark(false, swT, bHiV, tfName)
+        if swEn and swUp
+            f_sweepMark(true, swT, bLoV, tfName)
 
 // how far past the stop anchor to sit, in whichever unit is selected, plus the
 // flat tick buffer. rngH is the height of the CRT range this setup came from, so
@@ -661,48 +687,48 @@ if newClosed
 sw5 = showSweep and swp5On
 br5 = showBreak and brk5On
 if sw5 or br5
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "5",   [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("5m", sw5, br5, al, ah, bl, bh, bc, int(bt), 300000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "5",   [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("5m", sw5, br5, al, ah, bl, bh, bo, bc, int(bt), 300000, not na(bt) and bt != bt[1])
 sw15 = showSweep and swp15On
 br15 = showBreak and brk15On
 if sw15 or br15
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "15",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("15m", sw15, br15, al, ah, bl, bh, bc, int(bt), 900000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "15",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("15m", sw15, br15, al, ah, bl, bh, bo, bc, int(bt), 900000, not na(bt) and bt != bt[1])
 sw30 = showSweep and swp30On
 br30 = showBreak and brk30On
 if sw30 or br30
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "30",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("30m", sw30, br30, al, ah, bl, bh, bc, int(bt), 1800000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "30",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("30m", sw30, br30, al, ah, bl, bh, bo, bc, int(bt), 1800000, not na(bt) and bt != bt[1])
 sw1 = showSweep and swp1On
 br1H = showBreak and brk1On
 if sw1 or br1H
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "60",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("1H", sw1, br1H, al, ah, bl, bh, bc, int(bt), 3600000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "60",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("1H", sw1, br1H, al, ah, bl, bh, bo, bc, int(bt), 3600000, not na(bt) and bt != bt[1])
 sw2 = showSweep and swp2On
 br2H = showBreak and brk2On
 if sw2 or br2H
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "120", [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("2H", sw2, br2H, al, ah, bl, bh, bc, int(bt), 7200000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "120", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("2H", sw2, br2H, al, ah, bl, bh, bo, bc, int(bt), 7200000, not na(bt) and bt != bt[1])
 sw4 = showSweep and swp4On
 br4H = showBreak and brk4On
 if sw4 or br4H
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "240", [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("4H", sw4, br4H, al, ah, bl, bh, bc, int(bt), 14400000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "240", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("4H", sw4, br4H, al, ah, bl, bh, bo, bc, int(bt), 14400000, not na(bt) and bt != bt[1])
 sw8 = showSweep and swp8On
 br8H = showBreak and brk8On
 if sw8 or br8H
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "480", [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("8H", sw8, br8H, al, ah, bl, bh, bc, int(bt), 28800000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "480", [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("8H", sw8, br8H, al, ah, bl, bh, bo, bc, int(bt), 28800000, not na(bt) and bt != bt[1])
 swD = showSweep and swpDOn
 brD = showBreak and brkDOn
 if swD or brD
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "1D",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("D", swD, brD, al, ah, bl, bh, bc, int(bt), 86400000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "1D",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("D", swD, brD, al, ah, bl, bh, bo, bc, int(bt), 86400000, not na(bt) and bt != bt[1])
 swW = showSweep and swpWOn
 brW = showBreak and brkWOn
 if swW or brW
-    [al,ah,bl,bh,bc,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
-    f_swpBrkScan("W", swW, brW, al, ah, bl, bh, bc, int(bt), 604800000, not na(bt) and bt != bt[1])
+    [al,ah,bl,bh,bo,bc,bt] = request.security(sym, "1W",  [low[2],high[2],low[1],high[1],open[1],close[1],time[1]], lookahead=barmerge.lookahead_off)
+    f_swpBrkScan("W", swW, brW, al, ah, bl, bh, bo, bc, int(bt), 604800000, not na(bt) and bt != bt[1])
 
 // ===================== SETUP TIME FILTER =====================================
 // Evaluated on the CURRENT chart bar — i.e. the bar the reclaim happens on, which
