@@ -180,6 +180,27 @@ tfltDays= input.string("1234567", "Days the windows apply to", group=gTime, tool
 tfltShade = input.bool(false, "Shade the blocked hours on the chart", group=gTime)
 tfltShadeC= input.color(color.new(color.red, 92), "Blocked-hours shade", group=gTime)
 
+// ---- TREND FILTER -----------------------------------------------------------
+// Only take a setup that agrees with higher-timeframe structure. A sweep-and-
+// reclaim WITH the trend and one AGAINST it are different trades, and nothing
+// in this script separated them before now.
+//
+// Bias per timeframe = the same rule the Basic Market Structure dashboard uses:
+// price closing beyond the last confirmed swing high is bullish, beyond the last
+// confirmed swing low is bearish, and it holds that reading until the other side
+// breaks. Read from the LAST CLOSED bar of each timeframe, so a forming 4H
+// candle can never rewrite what a historical setup was allowed to do.
+gBias = "Trend filter"
+biasOn   = input.bool(false, "Only take setups that agree with the trend", group=gBias, tooltip="Longs need bullish structure, shorts need bearish. Off = every setup shows regardless of direction.")
+biasLen  = input.int(5, "Structure pivot length", minval=1, group=gBias, tooltip="Bars either side of a swing on each bias timeframe. Higher = only major turning points count, so the bias flips less often.")
+biasMode = input.string("Majority", "Agreement required", options=["All must agree","Majority","Not opposed"], group=gBias, tooltip="All = every enabled timeframe points the same way (strictest, fewest setups). Majority = more agree than disagree. Not opposed = none point the other way, undecided is fine.")
+bias15On = input.bool(false, "15m", inline="bt1", group=gBias)
+bias30On = input.bool(false, "30m", inline="bt1", group=gBias)
+bias1On  = input.bool(true,  "1H",  inline="bt1", group=gBias)
+bias4On  = input.bool(true,  "4H",  inline="bt2", group=gBias)
+biasDOn  = input.bool(false, "D",   inline="bt2", group=gBias)
+biasWOn  = input.bool(false, "W",   inline="bt2", group=gBias)
+
 // ---- BREAK-EVEN -------------------------------------------------------------
 gBE = "Break-even"
 beOn   = input.bool(true, "Break-even at range EQ", group=gBE, tooltip="Draws a BE line at the range equilibrium. When price reaches it the stop moves to just past entry and a second stop line appears; the original SL fades.")
@@ -480,6 +501,56 @@ var array<string> wSrc  = array.new<string>()
 var array<int> lastRt = array.new<int>(4, 0)   // new-range detector, one per TF
 var int lastEt = na                            // last processed entry-TF bar
 
+// ===================== TREND BIAS ============================================
+// One reading per timeframe: +1 bullish, -1 bearish, 0 undecided. State is
+// sticky — once price closes beyond a confirmed swing the bias holds until the
+// opposite side breaks, so it does not flicker on every bar.
+f_tfBias(int L) =>
+    ph = ta.pivothigh(L, L)
+    pl = ta.pivotlow(L, L)
+    var float lph = na
+    var float lpl = na
+    var int t = 0
+    if not na(ph)
+        lph := ph
+    if not na(pl)
+        lpl := pl
+    if not na(lph) and close > lph
+        t := 1
+    if not na(lpl) and close < lpl
+        t := -1
+    t
+
+// Every reading is taken on the [1] offset — the last CLOSED bar of that
+// timeframe. A forming 4H candle therefore cannot repaint what a setup from
+// three hours ago was permitted to do.
+int bz15 = 0
+int bz30 = 0
+int bz1  = 0
+int bz4  = 0
+int bzD  = 0
+int bzW  = 0
+if biasOn and bias15On
+    bz15 := request.security(sym, "15",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
+if biasOn and bias30On
+    bz30 := request.security(sym, "30",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
+if biasOn and bias1On
+    bz1  := request.security(sym, "60",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
+if biasOn and bias4On
+    bz4  := request.security(sym, "240", f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
+if biasOn and biasDOn
+    bzD  := request.security(sym, "1D",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
+if biasOn and biasWOn
+    bzW  := request.security(sym, "1W",  f_tfBias(biasLen)[1], lookahead=barmerge.lookahead_off)
+
+nBull = (bias15On and bz15 == 1 ? 1 : 0) + (bias30On and bz30 == 1 ? 1 : 0) + (bias1On and bz1 == 1 ? 1 : 0) + (bias4On and bz4 == 1 ? 1 : 0) + (biasDOn and bzD == 1 ? 1 : 0) + (biasWOn and bzW == 1 ? 1 : 0)
+nBear = (bias15On and bz15 == -1 ? 1 : 0) + (bias30On and bz30 == -1 ? 1 : 0) + (bias1On and bz1 == -1 ? 1 : 0) + (bias4On and bz4 == -1 ? 1 : 0) + (biasDOn and bzD == -1 ? 1 : 0) + (biasWOn and bzW == -1 ? 1 : 0)
+nOn   = (bias15On ? 1 : 0) + (bias30On ? 1 : 0) + (bias1On ? 1 : 0) + (bias4On ? 1 : 0) + (biasDOn ? 1 : 0) + (biasWOn ? 1 : 0)
+// With the filter off, or with no timeframe ticked, nothing is filtered — the
+// switch never silently blocks every setup because the user forgot a checkbox.
+biasOkL = not biasOn or nOn == 0 or (biasMode == "All must agree" ? nBull == nOn : biasMode == "Not opposed" ? nBear == 0 : nBull > nBear)
+biasOkS = not biasOn or nOn == 0 or (biasMode == "All must agree" ? nBear == nOn : biasMode == "Not opposed" ? nBull == 0 : nBear > nBull)
+
 // ===================== RANGE DRAWING =========================================
 // One call per enabled range timeframe, each with its own stores and colour, so
 // three ranges can be on screen at once without their histories colliding. The
@@ -737,7 +808,11 @@ f_runEntryBar(float bH, float bL, float bC, int bT, int msLen) =>
                 canS = swH and bC < hi
                 canL = swL and bC > lo
                 wdir = canS and canL ? (bC < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
-                if wdir != 0 and okT
+                // a setup blocked by the trend filter does NOT consume the
+                // watch, exactly like the time filter: if bias flips while the
+                // range is still swept, it can still fire
+                okDir = wdir == 1 ? biasOkL : wdir == -1 ? biasOkS : false
+                if wdir != 0 and okT and okDir
                     rngH = hi - lo
                     pad  = f_slPad(rngH, array.get(wAtr, k), bC)
                     anchor = wdir == -1 ? (slRef == "Range boundary" ? hi : array.get(wExtH, k)) : (slRef == "Range boundary" ? lo : array.get(wExtL, k))
