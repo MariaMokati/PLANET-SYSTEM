@@ -48,7 +48,8 @@ tagTf  = input.bool(false, "Title the range with its timeframe", group=gRng, too
 // The boxes below arrive pre-set to that finding. Everything is one tick away
 // from coming back.
 gSlot  = "Range time filter"
-sltOn  = input.bool(true, "Only use ranges that open in the ticked slots", group=gSlot, tooltip="Applies to the range boxes AND to the sweep/break markers, since a marker describes what happened to a range. Untick to see every range again.")
+sltOn  = input.bool(true, "Only take setups from ranges in the ticked slots", group=gSlot)
+sltScope = input.string("Setups only", "Filter applies to", options=["Setups only","Setups and markers","Ranges too"], group=gSlot, tooltip="Setups only (default): every range is still drawn, every sweep still marked — the filter decides only which ranges produce a TRADE. Setups and markers: muted slots also stop printing sweep/break tags. Ranges too: muted slots draw no range box at all, which leaves the last drawn range sitting on screen through the muted hours — it looks frozen during replay, and that is why it is not the default.")
 sltTz  = input.string("Africa/Johannesburg", "Timezone", options=["Africa/Johannesburg","America/New_York","Europe/London","Asia/Tokyo","UTC","Exchange"], group=gSlot, tooltip="Africa/Johannesburg = SAST, UTC+2 with no daylight saving, so the slots read the same all year.")
 
 // ---- 4H: six sessions. US daylight saving moves each one by an hour, so each
@@ -313,8 +314,11 @@ var label labHi = na
 var label labLo = na
 var label labEq = na
 
-// A new range exists the moment the range timeframe's open time changes.
-newRange = not na(rHigh) and not na(rLow) and not na(rOpenT) and (na(rOpenT[1]) or rOpenT != rOpenT[1]) and f_slotOK(int(rOpenT), tfMs)
+// A new range exists the moment the range timeframe's open time changes. The
+// slot filter is NOT applied here unless it is explicitly scoped to ranges:
+// suppressing a range leaves the previous one on screen through the muted
+// hours, which reads as a frozen chart during replay.
+newRange = not na(rHigh) and not na(rLow) and not na(rOpenT) and (na(rOpenT[1]) or rOpenT != rOpenT[1]) and (sltScope != "Ranges too" or f_slotOK(int(rOpenT), tfMs))
 
 if newRange
     startT  = int(rOpenT)
@@ -450,7 +454,7 @@ f_breakMark(bool bull, int atT, float y, string tfName) =>
 f_swpBrkScan(string tfName, bool swEn, bool brEn, float aLoV, float aHiV, float bLoV, float bHiV, float bO, float bC, int aT, int bT, int msLen, bool nb) =>
     // aT is candle A's own open time, not bT - msLen: across a weekend that
     // subtraction lands on a Saturday and the slot test would read the wrong day.
-    if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC) and f_slotOK(aT, msLen)
+    if nb and not na(aLoV) and not na(aHiV) and not na(bO) and not na(bC) and (sltScope == "Setups only" or f_slotOK(aT, msLen))
         tookLo = bLoV < aLoV
         tookHi = bHiV > aHiV
         bodyHi = math.max(bO, bC)
@@ -560,6 +564,7 @@ if swW or brW
 var array<float> wHi   = array.new<float>()   // the watched range
 var array<float> wLo   = array.new<float>()
 var array<int>   wDead = array.new<int>()     // time this watch stops looking
+var array<int>   wOpen = array.new<int>()     // the range candle's own open time
 
 // one slot per live setup, all pruned together
 var array<line>  uEn = array.new<line>()
@@ -641,10 +646,12 @@ if showSetup and newRange and not na(rOpen) and not na(rClose)
     while k >= 0
         hiW = array.get(wHi, k)
         loW = array.get(wLo, k)
+        aTw = array.get(wOpen, k)
         if bT > array.get(wDead, k)
             array.remove(wHi, k)
             array.remove(wLo, k)
             array.remove(wDead, k)
+            array.remove(wOpen, k)
         else
             tookHi = rHigh > hiW
             tookLo = rLow < loW
@@ -659,6 +666,9 @@ if showSetup and newRange and not na(rOpen) and not na(rClose)
                 array.remove(wHi, k)
                 array.remove(wLo, k)
                 array.remove(wDead, k)
+                array.remove(wOpen, k)
+            if dir != 0 and not f_slotOK(aTw, tfMs)
+                dir := 0                       // range outside the ticked slots
             if dir != 0
                 rngH = hiW - loW
                 lvl  = dir == -1 ? hiW : loW
@@ -677,10 +687,12 @@ if showSetup and newRange and not na(rOpen) and not na(rClose)
     array.push(wHi, rHigh)
     array.push(wLo, rLow)
     array.push(wDead, bT + setWatch * tfMs)
+    array.push(wOpen, bT)
     while array.size(wHi) > 8
         array.shift(wHi)
         array.shift(wLo)
         array.shift(wDead)
+        array.shift(wOpen)
 
 // ---- outcome, resolved on CHART bars --------------------------------------
 // A finer chart resolves the order of events more precisely, and a bar that
