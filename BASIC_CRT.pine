@@ -171,6 +171,18 @@ setupSlC   = input.color(color.new(color.red, 0),    "Stop-loss line", group=gSe
 setupLineW = input.int(2, "TP / SL line width", minval=1, maxval=4, group=gSet, tooltip="Raise for bolder, more visible TP / SL dotted lines.")
 setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 
+// ---- SETUP QUALITY (noise filter) -------------------------------------------
+// From the noise study (NOISE_STUDY.md): the worst setups are hesitant reclaims
+// that barely close back inside the level, and setups from shrunken ranges.
+// Filtering both — plus the session cut the slot picker already provides — kept
+// 15% of setups and moved the survivors from -0.067 R to +0.036 R net across
+// seven instruments (positive on six of seven).
+gQual = "Setup quality  (noise filter)"
+qualRec   = input.bool(true, "Confirming close must land inside the reclaim band", group=gQual, tooltip="The single biggest noise cut, and it improved ALL seven instruments tested. Measures where the confirming close lands, as a share of the range back in from the swept level. Closes that barely scrape back inside (under ~25%) are hesitant, no-displacement reclaims — the worst bucket in the data at -0.145 R per trade — and closes past ~75% are chasing a move that has already happened. A bar closing outside the band does NOT kill the setup: a later bar closing inside the band can still fire it.")
+qualRecLo = input.float(25, "Reclaim band from (% back inside)", minval=0, maxval=100, step=5, group=gQual)
+qualRecHi = input.float(75, "Reclaim band to (% back inside)", minval=0, maxval=100, step=5, group=gQual)
+qualSize  = input.bool(true, "Skip ranges smaller than the median of the last 20", group=gQual, tooltip="The smallest ranges were the worst-testing quintile on every instrument. The floor is RELATIVE — the median height of the previous 20 ranges — so it self-calibrates to the instrument and the volatility regime instead of guessing a fixed number. Improved six of seven instruments. The range itself still draws; it just arms no setup.")
+
 // ---- STOP LOSS --------------------------------------------------------------
 // How the stop is built, in three independent stages:
 //
@@ -856,10 +868,22 @@ f_watchTimeOk(int t0) =>
 // NOT wait for the whole next HTF candle to close. SL beyond the swept extreme,
 // TP the opposite range extreme. Use a chart TF below the range TF for precision.
 // 2-candle = reclaim in the very next candle; 3-candle allows one candle later.
-// A range smaller than the size floor still DRAWS exactly as always — it just
-// arms no watch, because the smallest ranges were the worst-testing bucket on
-// every instrument.
-if newClosed and slotOk and showSetup and (setup2c or setup3c) and not na(cHigh) and not na(cLow) and (setupMinRng <= 0 or cHigh - cLow >= setupMinRng * nz(atrTf, 0))
+// rolling range-height history for the relative size floor. Every range counts
+// toward the regime — including slot-muted ones — because the regime describes
+// the instrument, not the selection. rngMed is read BEFORE this candle is
+// pushed, so the floor compares against the PRIOR 20 ranges, as in the study.
+var array<float> rngHist = array.new<float>()
+float rngMed = array.size(rngHist) >= 5 ? array.median(rngHist) : na
+sizeOk = not qualSize or na(rngMed) or cHigh - cLow >= rngMed
+if newClosed and not na(cHigh) and not na(cLow)
+    array.push(rngHist, cHigh - cLow)
+    while array.size(rngHist) > 20
+        array.shift(rngHist)
+
+// A range smaller than either size floor still DRAWS exactly as always — it
+// just arms no watch, because the smallest ranges were the worst-testing
+// bucket on every instrument.
+if newClosed and slotOk and sizeOk and showSetup and (setup2c or setup3c) and not na(cHigh) and not na(cLow) and (setupMinRng <= 0 or cHigh - cLow >= setupMinRng * nz(atrTf, 0))
     array.push(wHi, cHigh)
     array.push(wLo, cLow)
     array.push(wOpenT, cOpenT)
@@ -932,7 +956,15 @@ if showSetup and barstate.isconfirmed and array.size(wHi) > 0
             refC = htfConf ? cClose : close
             wdir = canS and canL ? (refC < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
             tOk = tfltRef == "Entry bar" ? setupTimeOk : f_watchTimeOk(array.get(wOpenT, k))
-            if wdir != 0 and tOk
+            // reclaim band: where the confirming close sits, as a share of the
+            // range measured back in from the swept level. A close outside the
+            // band skips THIS bar only — the watch stays alive, so a later bar
+            // closing inside the band can still fire the setup.
+            bool qOk = true
+            if qualRec and wdir != 0
+                recPos = (wdir == -1 ? hi - refC : refC - lo) / (hi - lo)
+                qOk := recPos >= qualRecLo / 100 and recPos <= qualRecHi / 100
+            if wdir != 0 and tOk and qOk
                 rngH = hi - lo
                 pad  = f_slPad(rngH)
                 // the sweep wick as of the confirming candle
