@@ -478,9 +478,11 @@ managed — not a hundred mediocre prints.**
 - `timeframe.in_seconds()` for durations; session strings "HHMM-HHMM" parsed
   with `str.split`/`str.substring`/`str.tonumber`; `hour(t, tz)` /
   `dayofweek(t, tz)` for arbitrary-timestamp session checks.
-- Watch expiries are wall-clock; range-candle-close confirmations arriving
-  after a session gap are rescued by judging the candle's OPEN time against
-  the deadline (already in the baseline — preserve it).
+- Watch progression is EVENT-driven, never wall-clock: C2 is "the first range
+  candle that closes after C1" and the C3 window ends when a range candle newer
+  than C2 reports. That is what makes weekends, holidays and session gaps
+  harmless — a wall-clock deadline would kill valid setups whose C3 spans a
+  weekend. Preserve this.
 - `barstate.isconfirmed` gates the setup engine (no intrabar firing).
 
 ## PART 9 — HOW TO START
