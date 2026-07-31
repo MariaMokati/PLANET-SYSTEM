@@ -144,7 +144,15 @@ A compressed timeline. Each item is a scar with a rule attached.
 7. **The rendering rebuke** (see Law 2). Setups draw in `bar_index` space,
    anchored at the entry bar, short dotted lines, tiny labels. Full spec in
    Part 4.
-8. **The 20% strategy**: an earlier strategy version was scrapped at ~20%
+8. **The entry-model swap (current model).** The live sweep-and-reclaim entry
+   was replaced with the completed **C1 → C2 → C3** sequence at the user's
+   explicit, detailed instruction: C2 must finish and qualify before anything
+   can fire, its extremes freeze, and only a body close beyond the opposite side
+   of C2 during C3 triggers the trade. It fires later than the old model, so
+   entries sit further from the swept level and per-trade R:R drops even though
+   the stop logic is identical — that is inherent to the model, not a bug. Its
+   expectancy has NOT yet been measured; say so whenever it comes up.
+9. **The 20% strategy**: an earlier strategy version was scrapped at ~20%
    profitability. The user's target for the system overall: at minimum half
    of setups ending green. Under the current bank-half-at-TP1 management the
    measured green rate is ~63% (Part 5) — report such numbers with their
@@ -191,46 +199,66 @@ against the actual paste (the paste wins if they differ).
   bullish break aqua / bearish orange, anchored at the candle's last chart
   bar (the verified `confT` formula) or candle open, pruned stores.
 
-### 4.4 CRT setups (the trading core)
-- When a range candle closes, a WATCH is armed (parallel arrays: hi, lo,
-  openT, deadline, sweptHigh?, sweptLow?, extremes). 2-candle mode (default):
-  the sweep+reclaim must complete within the next range candle. 3-candle
-  mode: one candle later allowed.
-- Fire condition (entry rule, fixed by the user): range swept, then a FULL
-  BAR CLOSES BACK INSIDE the range. Two confirmation modes exist:
-  `Chart bar close (original)` (default) and `Range candle close (research)`
-  (~+0.07 R measured, fires only when the range-TF candle itself closes back
-  inside; gap-reporting handled by judging candle open time vs deadline).
-- Direction: swept high + close back inside → short; swept low → long; both
-  swept → side of EQ tie-break.
-- **Rendering (sacred):** at the entry bar (`bar_index` space): entry line +
-  "LE"/"SE" tiny label (teal long / maroon short), TP line + "TP" (green),
-  SL line + "SL" (red), TP1/BE line at EQ + label (orange #FF9800), all
-  SHORT dotted lines (4 bars long), width setting, labels
-  `label.style_label_left` on transparent bg. Outcomes update label text:
-  "TP ✓", "SL ✗", "TP1 ✓". On TP1 touch, stop moves to entry ± 10% of
-  original risk (setting), original SL line fades to 70-transparency, a new
-  dotted line + "TP1 SL" label appears at the moved stop.
-- Stop construction: anchor options — `Half the range past the level
-  (research)` (default; = level ± 50% of range height, never tighter than the
-  actual sweep wick), `Swept extreme` (the wick), `Range boundary`. Plus a
-  pad (units: ATR of range TF (default 0.1×) / ATR of chart TF / % of range /
-  % of price / points) and an optional minimum-stop floor measured from ENTRY
-  (% of range height) and a flat tick buffer.
-- `Only show setups with RR ≥` — default 0 (OFF; the filter measured harmful
-  on all seven instruments).
-- `Skip ranges smaller than (× ATR of range TF)` — default 0 (off).
-- Both-touched bar rule in outcome tracking: if one bar reaches TP1-trigger
-  and the stop, it resolves as a stop-out (never flatter the result).
+### 4.4 CRT setups — the C1 → C2 → C3 model (the trading core)
+- **This is the current entry model. It replaced a live sweep-and-reclaim model
+  and must not be reverted.** The sequence, all on the SELECTED range timeframe
+  (`tfIn` — 30m, 1H, 4H, Daily, whatever is chosen; never hard-coded):
+  - **C1** — the closed range candle. A watch is armed at its close (Stage 0).
+    Arming respects the slot picker, the size floors and `setupMinRng`.
+  - **C2** — the next range candle. It must **COMPLETE**; nothing can fire while
+    it forms. On its close it qualifies only if it **took out a C1 level and
+    CLOSED BACK INSIDE C1**: short if `C2.high > C1.high and C2.close < C1.high`,
+    long if `C2.low < C1.low and C2.close > C1.low`. A C2 closing outside C1
+    kills the watch outright. Took both sides → direction settled by which half
+    of C1 it closed in. On qualification C2's **high and low are FROZEN** and
+    never change again (Stage 1).
+  - **C3** — the following range candle is the execution window. The chart
+    timeframe is now purely the execution timeframe. The trade fires on the
+    first **body close beyond the OPPOSITE side of the frozen C2** — short: a
+    close below C2's low; long: a close above C2's high. A wick through, or a
+    touch, is not a confirmation. No structure, displacement, FVG, OB, CHoCH or
+    liquidity logic is required or permitted in this confirmation.
+  - **Expiry** — if C3 closes unfired the watch is deleted. C4 cannot fire it
+    unless the C4-extension switch is on.
+- Direction/entry: entry price = the close of the confirming bar.
+  TP = the opposite C1 extreme (short → C1 low, long → C1 high).
+- Stop: unchanged architecture; the **completed C2 sweep extreme** is handed in
+  as the swept level (short → C2 high, long → C2 low), then the anchor / pad /
+  minimum-floor stages run exactly as before.
+- Watch store (parallel arrays, push/shift/remove together):
+  `wHi, wLo, wOpenT` (C1), `wStage` (0 = awaiting C2, 1 = armed), `wDir`,
+  `wC2H, wC2L, wC2T` (frozen C2), `wLeft` (range candles the window still
+  covers). Capped at 10.
+- Verified by bar-by-bar emulation over **561,659 gold 5m bars against 4H
+  ranges**: 15,267 C1s → 8,691 C2s rejected → 6,574 qualified → 3,275 fired,
+  3,299 expired unfired; **zero invariant violations** (every entry inside C3
+  and beyond the frozen C2 extreme, every C2 = C1+1, no leaked watches).
+- **Rendering (sacred, unchanged by the model swap):** at the entry bar
+  (`bar_index` space): entry line + "LE"/"SE" tiny label (teal long / maroon
+  short), TP line + "TP" (green), SL line + "SL" (red), TP1/BE line at the C1
+  EQ + label (orange #FF9800) — all SHORT dotted lines (4 bars), width setting,
+  `label.style_label_left` on transparent backgrounds. Outcomes rewrite the
+  label text: "TP ✓", "SL ✗", "TP1 ✓". On TP1 touch the stop moves to entry ±
+  10% of original risk, the original SL line fades to 70-transparency and a new
+  dotted line + "TP1 SL" label is drawn.
+- Settings in this group: `setup2c` "Confirm during C3 (standard)" (default on)
+  and `setup3c` "Also allow confirmation during C4" (default off — C3-only is
+  the specified behaviour); `setupConf` "Setup confirms on" = which close
+  confirms, any chart bar (default) or C3's own close; `setupMinRng`;
+  `setupMinRR` default 0 (the RR filter measured harmful on all seven
+  instruments).
+- Both-touched-bar rule in outcome tracking: a bar reaching both the TP1
+  trigger and the stop resolves as a stop-out — never flatter the result.
 
 ### 4.5 Setup quality filters (from the noise study)
-- Reclaim band: confirming close must land 25–75% (settings) of the range
-  back inside from the swept level; a bar outside the band skips that bar
-  only, the watch stays alive. Range-size floor: skip ranges smaller than the
-  median of the previous 20 ranges. **In the pasted script these default ON.
-  Your first sanctioned change: flip both defaults to OFF** (user decision —
-  nothing may block trades until watched live; keep the measured numbers in
-  the tooltips).
+- **Reclaim band** — judges **C2's close**: how far back inside C1 it landed, as
+  a share of the range measured in from the swept level (settings 25–75%).
+  **Default OFF**, deliberately: leaving it on would silently narrow the C2
+  qualification rule, which is defined as sweep + close back inside, full stop.
+  When on, a C2 outside the band is rejected and no watch is armed.
+- **Range-size floor** — skip ranges smaller than the median of the previous 20
+  ranges (rolling `rngHist`, every range counts toward the regime including
+  slot-muted ones). Default ON. This is C1-side minimum-range filtering.
 
 ### 4.6 Setup time filter
 - Block window (default 19:00–00:00 SAST, on when master enabled) and Allow
@@ -321,25 +349,27 @@ Almost every result below is downstream of it.
 Everything below was explicitly decided by the user via selectable questions
 on 2026-07-28. Decisions are final; do not reopen them.
 
-### 6.1 Entry models — a dropdown, four models
-The one thing the user said is allowed to change about existing behaviour is
-HOW trades are entered. Offer:
-1. **Chart-bar reclaim close** — current behaviour, stays the default.
-2. **Range-candle close** — already present as "Setup confirms on"; fold
-   cleanly into the entry-model concept without changing its behaviour.
-3. **Retest limit at the level** — after confirmation (per the chosen
-   confirmation mode), place a visual limit level AT the swept range
-   high/low. Entry happens if price returns there. Draw the pending level in
-   the design language (short dotted line + tiny label, e.g. "LE ▸"), and
-   cancel/fade it if TP-side extreme is hit first or after N range candles
-   (setting, default 1). This is the model that buys the big R:R when it
-   fills — say honestly that some winners run without filling.
-4. **LTF structure-shift** — after the sweep, enter on the first chart-TF
-   CHoCH in the trade's favour: price closes beyond the most recent confirmed
-   pivot (pivot length setting, default 5) against the sweep direction.
-   Earliest entry, tightest stop — remind the user tight stops magnify cost
-   in R (Part 5.1).
-Never offer an equilibrium entry (banned).
+### 6.1 Entry models — variants layered on the C1 → C2 → C3 base
+The C1 → C2 → C3 sequence in Part 4.4 is the BASE MODEL and is settled: C2 must
+complete and qualify, its extremes freeze, and confirmation happens during C3.
+Do not revert it, do not reinterpret it, do not add structure requirements to
+the confirmation. What may still be offered is HOW the confirming entry is
+priced once C3 is armed:
+1. **Chart bar close** (current default) — the first chart-TF bar in the window
+   that body-closes beyond the frozen C2 extreme; entry at that close.
+2. **Range candle close** — only C3's own close counts; fires later, larger.
+   (Both 1 and 2 already exist as the `setupConf` dropdown.)
+3. **Retest limit at the level** — after the C3 confirmation prints, place a
+   visual limit back at the broken C2 extreme and enter THERE if price returns.
+   Draw the pending level in the design language (short dotted line + tiny
+   label, e.g. "LE ▸") and cancel/fade it if the C1 target is reached first or
+   the window ends (setting). This is the variant that buys the biggest R:R when
+   it fills — say honestly that some winners run without filling.
+4. **LTF structure-shift** — after the C3 confirmation, enter on the first
+   chart-TF CHoCH in the trade's favour (close beyond the last confirmed pivot;
+   pivot length a setting). Earliest fill, tightest stop — remind the user that
+   tight stops magnify cost in R (Part 5.1).
+Never offer an equilibrium entry (banned, Part 3 item 6).
 
 ### 6.2 Management — thirds with a structure-trailed runner
 - **TP1 = range EQ: close ⅓. TP2 = opposite extreme: close ⅓. Final ⅓ =
