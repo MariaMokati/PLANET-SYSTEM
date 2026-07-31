@@ -159,9 +159,9 @@ brKeep  = input.int(12, "Keep last N break markers (all TFs)", minval=1, maxval=
 // below the range TF. Marks the setup only — NOT financial advice; validate it.
 gSet = "CRT setups  (optional)"
 showSetup  = input.bool(false, "Show CRT setups (entry / SL / TP / RR)", group=gSet)
-setup2c    = input.bool(true,  "2-candle setups (range → sweep → reclaim)", group=gSet, tooltip="LIVE entry: once the range candle closes, the next candle's price sweeps the range high/low and impulsively reclaims back inside → enter on the reclaim BAR (not at the HTF close). Use a chart TF below the range TF (e.g. 5m chart, 4H range) for precision. Target the opposite extreme; SL beyond the sweep.")
-setup3c    = input.bool(false, "3-candle setups (allow reclaim one candle later)", group=gSet, tooltip="Same live logic but the sweep+reclaim may complete up to two candles after the range instead of one.")
-setupConf  = input.string("Chart bar close (original)", "Setup confirms on", options=["Chart bar close (original)","Range candle close (research)"], group=gSet, tooltip="What counts as the full bar closing back inside the range. Chart bar close = the first CHART-timeframe bar that closes back inside fires the setup — the original behaviour, earliest in, tightest stop. Range candle close = the RANGE-timeframe candle itself must close back inside; it fires later but measured about +0.07 R per trade better across seven instruments, because the earlier entry's tighter stop makes a fixed spread a much bigger share of the risk.")
+setup2c    = input.bool(true,  "Confirm during C3 (standard)", group=gSet, tooltip="The C1 → C2 → C3 model. C1 is the closed range candle. C2 is the NEXT range candle and must COMPLETE: it qualifies only if it took out a C1 level and closed back inside C1. Its high and low are then frozen. During C3 the trade triggers the moment a close finishes BEYOND the opposite side of C2. No trade can occur while C2 is still forming.")
+setup3c    = input.bool(false, "Also allow confirmation during C4", group=gSet, tooltip="Off (default) = the armed setup lives only through C3; if C3 closes with no confirmation the watch is deleted. On = the same frozen C2 levels stay armed for one further range candle.")
+setupConf  = input.string("Chart bar close (original)", "Setup confirms on", options=["Chart bar close (original)","Range candle close (research)"], group=gSet, tooltip="WHICH close has to finish beyond the frozen C2 extreme. Chart bar close (default) = the first CHART-timeframe bar inside the window that body-closes beyond it — a wick through is not enough. Range candle close = only C3's own close counts, which fires later and larger.")
 setupMinRng= input.float(0.0, "Skip ranges smaller than (× ATR of range TF)", minval=0, step=0.1, group=gSet, tooltip="0 = take every range (default). Bigger ranges tested better than smaller ones on every instrument, monotonically — the smallest ranges were the worst bucket everywhere. Try 1.0 to drop them. The range still draws exactly as always; it just arms no setup.")
 setupMinRR = input.float(0.0, "Only show setups with RR ≥", minval=0, step=0.1, group=gSet, tooltip="0 = off (measured default). Filtering for RR ≥ 1.5 tested WORSE on all seven instruments — it keeps the setups whose sweeps barely ran and throws away the survivable stops; on gold it roughly doubled the loss per trade. Raise it only if you have your own reason to.")
 setupLongC = input.color(color.new(color.teal, 0),   "Long setup", group=gSet)
@@ -178,7 +178,7 @@ setKeep    = input.int(6, "Keep last N setups", minval=1, maxval=50, group=gSet)
 // 15% of setups and moved the survivors from -0.067 R to +0.036 R net across
 // seven instruments (positive on six of seven).
 gQual = "Setup quality  (noise filter)"
-qualRec   = input.bool(true, "Confirming close must land inside the reclaim band", group=gQual, tooltip="The single biggest noise cut, and it improved ALL seven instruments tested. Measures where the confirming close lands, as a share of the range back in from the swept level. Closes that barely scrape back inside (under ~25%) are hesitant, no-displacement reclaims — the worst bucket in the data at -0.145 R per trade — and closes past ~75% are chasing a move that has already happened. A bar closing outside the band does NOT kill the setup: a later bar closing inside the band can still fire it.")
+qualRec   = input.bool(false, "C2 close must land inside the reclaim band", group=gQual, tooltip="OFF by default so C2 qualifies on the rule alone: it swept a C1 level and closed back inside C1. ON adds a quality gate measuring WHERE C2 closed, as a share of the range back in from the swept level. In testing, closes that barely scrape back inside (under ~25%) were the worst bucket at -0.145 R per trade, and closes past ~75% chase a move that already happened; the 25-75% band improved all seven instruments. A C2 outside the band is rejected outright — the setup is not armed.")
 qualRecLo = input.float(25, "Reclaim band from (% back inside)", minval=0, maxval=100, step=5, group=gQual)
 qualRecHi = input.float(75, "Reclaim band to (% back inside)", minval=0, maxval=100, step=5, group=gQual)
 qualSize  = input.bool(true, "Skip ranges smaller than the median of the last 20", group=gQual, tooltip="The smallest ranges were the worst-testing quintile on every instrument. The floor is RELATIVE — the median height of the previous 20 ranges — so it self-calibrates to the instrument and the volatility regime instead of guessing a fixed number. Improved six of seven instruments. The range itself still draws; it just arms no setup.")
@@ -543,15 +543,18 @@ var array<line>  sBeLn    = array.new<line>()    // the EQ trigger line
 var array<label> sBeLb    = array.new<label>()   // its "BE" tag
 var array<line>  sBeSLn   = array.new<line>()    // the moved stop line (drawn on arm)
 var array<label> sBeSLb   = array.new<label>()
-// live setup watches: each = a closed HTF range being watched for a sweep+reclaim
-var array<float> wHi   = array.new<float>()
-var array<float> wLo   = array.new<float>()
-var array<int>   wOpenT= array.new<int>()   // the range candle's OPEN time (for the formation-time filter)
-var array<int>   wDead = array.new<int>()
-var array<bool>  wSwH  = array.new<bool>()
-var array<bool>  wSwL  = array.new<bool>()
-var array<float> wExtH = array.new<float>()
-var array<float> wExtL = array.new<float>()
+// live setup watches: each = a closed range candle (C1) tracked through the
+// C1 → C2 → C3 sequence. Stage 0 = C1 set, waiting for C2 to COMPLETE.
+// Stage 1 = C2 completed and qualified, its extremes frozen, C3 running.
+var array<float> wHi    = array.new<float>()   // C1 high
+var array<float> wLo    = array.new<float>()   // C1 low
+var array<int>   wOpenT = array.new<int>()     // C1 open time (for the formation-time filter)
+var array<int>   wStage = array.new<int>()     // 0 = awaiting C2, 1 = armed through C3
+var array<int>   wDir   = array.new<int>()     // -1 short, +1 long (set when C2 qualifies)
+var array<float> wC2H   = array.new<float>()   // frozen C2 high
+var array<float> wC2L   = array.new<float>()   // frozen C2 low
+var array<int>   wC2T    = array.new<int>()    // C2 open time (window reference)
+var array<int>   wLeft   = array.new<int>()    // range candles the window still covers
 
 // draw one sweep marker (design-aware) at a bar-time, pruning the shared store.
 // tfName titles the marker so a 4H sweep never gets confused with a 1H one.
@@ -861,13 +864,30 @@ f_watchTimeOk(int t0) =>
         ok := not blkHit and (not alwOn or alwHit)
     ok
 
-// ===================== OPTIONAL: CRT setups (live sweep → reclaim) ============
-// The range = the last CLOSED range-TF candle. The MOMENT it closes we arm a
-// watch and then track live chart-TF bars: when price sweeps the range high/low
-// and a bar CLOSES back inside (the impulsive reclaim), we enter THERE — we do
-// NOT wait for the whole next HTF candle to close. SL beyond the swept extreme,
-// TP the opposite range extreme. Use a chart TF below the range TF for precision.
-// 2-candle = reclaim in the very next candle; 3-candle allows one candle later.
+// ===================== OPTIONAL: CRT setups (C1 → C2 → C3) ===================
+// THE MODEL, in full:
+//   C1  the closed range candle. Arming it is unchanged — slot filter, size
+//       floor and drawing all behave exactly as before.
+//   C2  the NEXT range-TF candle. It must COMPLETE before anything can happen;
+//       no trade is possible while C2 is still forming. On its close it either
+//       qualifies — it took out a C1 level and CLOSED BACK INSIDE C1 — or the
+//       setup is rejected outright. A C2 that closes outside C1 kills the watch.
+//       On qualification C2's high and low are FROZEN and never change again.
+//   C3  the following range-TF candle. The chart timeframe is now purely the
+//       execution timeframe: the trade fires on the first close that finishes
+//       BEYOND the opposite side of the frozen C2 — a body close, never a wick,
+//       never a touch. Short: a close below C2's low. Long: a close above C2's
+//       high. No structure, displacement, FVG or CHoCH is required.
+//       If C3 closes with no confirmation the watch is deleted; C4 cannot fire
+//       it unless the C4 extension switch is on.
+// Everything downstream is untouched: TP is still the opposite C1 extreme, the
+// stop still runs through the existing anchor/pad/minimum architecture with the
+// COMPLETED C2 sweep extreme supplied as the swept level, and break-even, RR,
+// the time filter and all rendering behave exactly as they always have.
+//
+// C1/C2/C3 are always candles of the SELECTED range timeframe (tfIn) — 30m, 4H,
+// Daily, whatever is chosen — never a hard-coded timeframe.
+//
 // rolling range-height history for the relative size floor. Every range counts
 // toward the regime — including slot-muted ones — because the regime describes
 // the instrument, not the selection. rngMed is read BEFORE this candle is
@@ -887,108 +907,125 @@ if newClosed and slotOk and sizeOk and showSetup and (setup2c or setup3c) and no
     array.push(wHi, cHigh)
     array.push(wLo, cLow)
     array.push(wOpenT, cOpenT)
-    array.push(wDead, cOpenT + (setup3c ? 3 : 2) * tfMs)
-    array.push(wSwH, false)
-    array.push(wSwL, false)
-    array.push(wExtH, cHigh)
-    array.push(wExtL, cLow)
+    array.push(wStage, 0)
+    array.push(wDir, 0)
+    array.push(wC2H, na)
+    array.push(wC2L, na)
+    array.push(wC2T, 0)
+    array.push(wLeft, 0)
     while array.size(wHi) > 10
         array.shift(wHi)
         array.shift(wLo)
         array.shift(wOpenT)
-        array.shift(wDead)
-        array.shift(wSwH)
-        array.shift(wSwL)
-        array.shift(wExtH)
-        array.shift(wExtL)
+        array.shift(wStage)
+        array.shift(wDir)
+        array.shift(wC2H)
+        array.shift(wC2L)
+        array.shift(wC2T)
+        array.shift(wLeft)
 
 htfConf = setupConf != "Chart bar close (original)"
 if showSetup and barstate.isconfirmed and array.size(wHi) > 0
     k = array.size(wHi) - 1
     while k >= 0
-        // With range-candle confirmation, a candle that closed INSIDE the watch
-        // window can be reported on a chart bar past it (a weekend or session
-        // gap sits between them). Judge the candle's open time, not the
-        // reporting bar, so those legitimate confirmations are not thrown away.
-        rescue = htfConf and newClosed and not na(cOpenT) and cOpenT < array.get(wDead, k)
-        if time > array.get(wDead, k) and not rescue
-            array.remove(wHi, k)
-            array.remove(wLo, k)
-            array.remove(wOpenT, k)
-            array.remove(wDead, k)
-            array.remove(wSwH, k)
-            array.remove(wSwL, k)
-            array.remove(wExtH, k)
-            array.remove(wExtL, k)
-        else
-            hi = array.get(wHi, k)
-            lo = array.get(wLo, k)
-            // sweep state and swept extreme as they stood BEFORE this chart bar.
-            // The range-candle confirmation judges the candle that just CLOSED,
-            // and the current chart bar already belongs to the next one.
-            pSwH = array.get(wSwH, k)
-            pSwL = array.get(wSwL, k)
-            pExH = array.get(wExtH, k)
-            pExL = array.get(wExtL, k)
-            if high > pExH
-                array.set(wExtH, k, high)
-            if low < pExL
-                array.set(wExtL, k, low)
-            swH = pSwH or high > hi
-            swL = pSwL or low < lo
-            array.set(wSwH, k, swH)
-            array.set(wSwL, k, swL)
-            eqR  = (hi + lo) / 2.0
-            bool canS = false
-            bool canL = false
-            if htfConf
-                // fires only when a range-TF candle just closed, judged on THAT
-                // candle: it swept the watched range and its own close is back
-                // inside. This is the entry that measured best.
-                if newClosed
-                    canS := pSwH and cClose < hi
-                    canL := pSwL and cClose > lo
-            else
-                // original behaviour: the first CHART bar that closes back
-                // inside after the sweep fires the setup
-                canS := swH and close < hi   // swept the high, now reclaimed back inside
-                canL := swL and close > lo   // swept the low,  now reclaimed back inside
-            refC = htfConf ? cClose : close
-            wdir = canS and canL ? (refC < eqR ? -1 : 1) : canS ? -1 : canL ? 1 : 0
+        hi = array.get(wHi, k)
+        lo = array.get(wLo, k)
+        int stage = array.get(wStage, k)
+        bool drop = false
+        // a range-TF candle has just reported its completed values this bar
+        bool rangeClosed = newClosed and not na(cOpenT)
+
+        // ---- STAGE 0 — C1 is set; wait for C2 to COMPLETE ------------------
+        // The first range candle to close AFTER C1 is C2, whatever the calendar
+        // gap between them, so weekends and session breaks never mis-pair them.
+        if stage == 0
+            if rangeClosed and cOpenT > array.get(wOpenT, k)
+                // judged on C2's own completed values: it must have TAKEN a C1
+                // level and CLOSED back inside C1
+                qShort = cHigh > hi and cClose < hi   // swept above C1 high, closed back in
+                qLong  = cLow  < lo and cClose > lo   // swept below C1 low,  closed back in
+                if qShort or qLong
+                    // a C2 that took both sides is settled by which half of C1
+                    // it closed in, the same convention the marker layer uses
+                    dir = qShort and qLong ? (cClose < (hi + lo) / 2.0 ? -1 : 1) : qShort ? -1 : 1
+                    bool bandOk = true
+                    if qualRec
+                        recPos = (dir == -1 ? hi - cClose : cClose - lo) / (hi - lo)
+                        bandOk := recPos >= qualRecLo / 100 and recPos <= qualRecHi / 100
+                    if bandOk
+                        // FREEZE C2 — these values never move again
+                        array.set(wDir, k, dir)
+                        array.set(wC2H, k, cHigh)
+                        array.set(wC2L, k, cLow)
+                        array.set(wC2T, k, cOpenT)
+                        array.set(wLeft, k, setup3c ? 2 : 1)
+                        array.set(wStage, k, 1)
+                        stage := 1
+                    else
+                        drop := true
+                else
+                    // C2 closed outside C1 (or never took a level): no setup
+                    drop := true
+
+        // ---- STAGE 1 — C2 frozen; C3 is the execution window ---------------
+        if not drop and stage == 1
+            dir = array.get(wDir, k)
+            c2h = array.get(wC2H, k)
+            c2l = array.get(wC2L, k)
+            lvl = dir == -1 ? c2l : c2h        // the OPPOSITE side of C2
+            int left = array.get(wLeft, k)
+            // true on the first chart bar after a window candle finished
+            bool windowEnded = rangeClosed and cOpenT > array.get(wC2T, k)
+            bool fired = false
+            float refC = na
+            if windowEnded
+                // in range-candle-close mode the window candle's OWN close is
+                // the confirmation; then the window advances
+                if htfConf
+                    refC := cClose
+                    fired := dir == -1 ? cClose < lvl : cClose > lvl
+                left := left - 1
+                array.set(wLeft, k, left)
+            if not fired and not htfConf and left > 0
+                // default: the first confirmed CHART bar inside the window that
+                // BODY-closes beyond the frozen C2 extreme. A wick through it,
+                // or a touch, is not a confirmation.
+                refC := close
+                fired := dir == -1 ? close < lvl : close > lvl
             tOk = tfltRef == "Entry bar" ? setupTimeOk : f_watchTimeOk(array.get(wOpenT, k))
-            // reclaim band: where the confirming close sits, as a share of the
-            // range measured back in from the swept level. A close outside the
-            // band skips THIS bar only — the watch stays alive, so a later bar
-            // closing inside the band can still fire the setup.
-            bool qOk = true
-            if qualRec and wdir != 0
-                recPos = (wdir == -1 ? hi - refC : refC - lo) / (hi - lo)
-                qOk := recPos >= qualRecLo / 100 and recPos <= qualRecHi / 100
-            if wdir != 0 and tOk and qOk
+            if fired and tOk
                 rngH = hi - lo
                 pad  = f_slPad(rngH)
-                // the sweep wick as of the confirming candle
-                wickA = wdir == -1 ? (htfConf ? pExH : array.get(wExtH, k)) : (htfConf ? pExL : array.get(wExtL, k))
+                // the COMPLETED C2 sweep extreme is the swept level handed to
+                // the existing stop architecture, unchanged
+                wickA = dir == -1 ? c2h : c2l
                 // anchor: half the range past the swept level (never tighter
                 // than the wick — the config that tested best on all seven
                 // instruments), or the wick itself, or the bare range boundary
-                anchor = slRef == "Range boundary" ? (wdir == -1 ? hi : lo) : slRef == "Swept extreme" ? wickA : (wdir == -1 ? math.max(hi + 0.5 * rngH, wickA) : math.min(lo - 0.5 * rngH, wickA))
-                float sl = wdir == -1 ? anchor + pad : anchor - pad
-                // floor measured from ENTRY, so a reclaim that closes right on
-                // top of the swept wick still gets a survivable stop
+                anchor = slRef == "Range boundary" ? (dir == -1 ? hi : lo) : slRef == "Swept extreme" ? wickA : (dir == -1 ? math.max(hi + 0.5 * rngH, wickA) : math.min(lo - 0.5 * rngH, wickA))
+                float sl = dir == -1 ? anchor + pad : anchor - pad
+                // floor measured from ENTRY, so a confirmation that lands right
+                // on top of the swept wick still gets a survivable stop
                 if slMinOn
                     minD = slMinPct / 100.0 * rngH
-                    sl := wdir == -1 ? math.max(sl, refC + minD) : math.min(sl, refC - minD)
-                tp = wdir == -1 ? lo : hi
-                f_makeSetup(wdir, refC, sl, tp, eqR, bar_index)
-                array.remove(wHi, k)
-                array.remove(wLo, k)
-                array.remove(wOpenT, k)
-                array.remove(wDead, k)
-                array.remove(wSwH, k)
-                array.remove(wSwL, k)
-                array.remove(wExtH, k)
-                array.remove(wExtL, k)
+                    sl := dir == -1 ? math.max(sl, refC + minD) : math.min(sl, refC - minD)
+                tp = dir == -1 ? lo : hi
+                f_makeSetup(dir, refC, sl, tp, (hi + lo) / 2.0, bar_index)
+                drop := true
+            else if left <= 0
+                // C3 (and C4 when extended) closed with no confirmation
+                drop := true
+
+        if drop
+            array.remove(wHi, k)
+            array.remove(wLo, k)
+            array.remove(wOpenT, k)
+            array.remove(wStage, k)
+            array.remove(wDir, k)
+            array.remove(wC2H, k)
+            array.remove(wC2L, k)
+            array.remove(wC2T, k)
+            array.remove(wLeft, k)
         k := k - 1
 
 // mark TP / SL hits: when price reaches a level, tag the label (✓ win, ✗ loss)
