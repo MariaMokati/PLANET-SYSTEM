@@ -430,8 +430,11 @@ Never offer an equilibrium entry (banned, Part 3 item 6).
   setups agreeing with higher-timeframe structure direction. Label the
   tooltip honestly: encodes how the user selects trades; not validated by
   backtest.
-- **Noise filters (reclaim band, size floor): flip defaults to OFF.** Keep
-  the code, keep the tooltips with the measured numbers.
+- **Noise filters: the reclaim band is ALREADY off** (it judges C2's close —
+  Part 4.5). The **range-size floor (`qualSize`) is still ON** and is the one
+  left to flip to OFF. Keep both code paths and their measured tooltips.
+  Note `setupMinRng` is a SEPARATE, older ATR-multiple floor that already
+  defaults to 0 — do not confuse the two.
 - Never add any filter the user didn't ask for. Their words: *"I don't want
   us to constantly be blocking important trades."*
 
@@ -443,8 +446,12 @@ Never offer an equilibrium entry (banned, Part 3 item 6).
   script with a short changelog naming exactly which lines/sections changed.
 - Setups remain rare and high-grade: with defaults, expect a handful across
   the watchlist per day, not dozens.
-- Pine budget respected: count `request.security` calls before building each
-  layer (baseline uses ~20 of the 40); prune every new drawing store.
+- Pine budget respected: **count `request.security` calls in the pasted script
+  yourself before building each layer — do not trust a number quoted here.**
+  At the time of writing the baseline sits at 32 of the 40 limit, so headroom
+  is thin: budget every new layer explicitly (one call on the selected ORB
+  timeframe covers all four sessions; chart-TF pivots need none) and say so
+  before you write code. Prune every new drawing store.
 
 ---
 
@@ -492,7 +499,21 @@ managed — not a hundred mediocre prints.**
 2. Ask your clarifying questions — selectable options only, max ~8, focused
    on genuine ambiguities (e.g. simultaneous CRT+ORB trades on one chart,
    runner label text, ORB session colours).
-3. Propose the build order — suggested: (a) flip noise-filter defaults +
+3. **Verify the paste matches this document before anything else.** If the
+   pasted script's setup engine does not contain the `wStage`/`wC2H`/`wC2L`
+   watch arrays and the C1 → C2 → C3 logic of Part 4.4, you have an OUT OF
+   DATE copy — stop and ask the user to repaste; do not rebuild the model from
+   scratch on top of an old baseline. Other tells of the current version:
+   `qualRec` (reclaim band, default false) and `qualSize` (median-of-20 range
+   floor, default true) both exist in a "Setup quality" group; ~197 inputs;
+   32 `request.security` calls; ~1,300 lines.
+4. Propose the build order — suggested: (a) flip the `qualSize` default +
    entry-model dropdown, (b) thirds management + stop ladder + runner CHoCH,
    (c) ORB layer, (d) CRT breakouts + confluence, (e) HTF alignment filter —
    get a yes, then build one layer at a time, full script every time.
+
+A note on TradingView input behaviour that matters here: inputs bind
+positionally and saved values persist on an existing chart instance, so
+changing an input's DEFAULT in code does not change what an already-applied
+copy shows. When a default is flipped, tell the user to flip it in the
+settings panel too, or to use Reset settings.
