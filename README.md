@@ -72,6 +72,17 @@ live = SL / TP1 / TP2 / TP3.
 Create Alert → condition **LMX v3** → pick the event → **"Once per bar close"**. Add
 a second alert on the strategy set to **"Order fills only"** for exact fills.
 
+## Notion trade journal (optional)
+Pine cannot call an API, so journalling is a relay: the strategy emits a JSON
+`alert()` → TradingView webhook → a Cloudflare Worker → a Notion database row.
+Turn it on with *Emit JSON alert() payloads* in the **Webhook** input group (off
+by default; it adds nothing to the trading logic) and create the alert with
+condition **"Any alert() function call"**. Setup, schema and troubleshooting:
+[`integrations/notion/README.md`](./integrations/notion/README.md).
+**Same honesty rule as above:** the Worker is **unit-tested locally only** — it
+has never been deployed, nor run against a live Notion workspace or a live
+TradingView alert from this repo.
+
 ## Backtest setup & validation
 1. Add to chart → **Strategy Tester**. Keep the built-in commission (0.02%) & slippage (1 tick).
 2. Need **100+ trades** before any opinion; ignore < 30.

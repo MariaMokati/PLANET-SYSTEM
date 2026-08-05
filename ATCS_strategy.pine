@@ -87,6 +87,10 @@ showDash= input.bool(true, "Show dashboard", group=gV)
 allowL  = input.bool(true, "Allow longs", group=gV)
 allowS  = input.bool(true, "Allow shorts", group=gV)
 
+gWh = "Webhook (Notion trade journal)"
+whOn     = input.bool(false, "Emit JSON alert() payloads", group=gWh, tooltip="Additive only: builds a JSON message for the webhook relay. Changes no trading logic. Create the alert with condition = 'Any alert() function call'.")
+whSecret = input.string("", "Webhook Secret", group=gWh, tooltip="Shared secret checked by the relay Worker (see integrations/notion). Use letters/digits/dashes only; quotes and backslashes are sanitised out of the JSON.")
+
 // =============================================================================
 // MODULE 0 — normalisation (ATR only, no direction)
 // =============================================================================
@@ -629,3 +633,77 @@ alertcondition(exitedL, "LMX Long Closed",  "LMX long closed {{ticker}} {{interv
 alertcondition(exitedS, "LMX Short Closed", "LMX short closed {{ticker}} {{interval}}")
 alertcondition(lock, "LMX Daily Lockout", "LMX daily risk lockout {{ticker}} {{interval}}")
 alertcondition(sigL or sigS, "LMX Any Entry", "LMX entry {{ticker}} {{interval}}")
+
+// =============================================================================
+// MODULE 17b — WEBHOOK PAYLOAD (JSON for the Notion trade journal)
+// -----------------------------------------------------------------------------
+// PURELY ADDITIVE. This module reads existing signal flags and emits alert()
+// messages next to the alertcondition()s above. It sets no state, places no
+// order, and changes no threshold — remove it and the strategy behaves exactly
+// as before. It is off until you tick "Emit JSON alert() payloads" in the
+// Webhook input group.
+//
+// Pine is sandboxed and cannot call an HTTP API, so the JSON leaves as an alert
+// message: strategy -> TradingView webhook -> relay Worker -> Notion.
+// The contract lives in integrations/notion/src/payload.js; the setup guide in
+// integrations/notion/README.md.
+//
+// The alertcondition() strings above are compile-time constants and cannot hold
+// series values, which is why the payload has to go through alert(). In
+// TradingView create the alert with condition = "Any alert() function call".
+// =============================================================================
+
+// Pine has no JSON encoder. Rather than emit backslash escapes (easy to get
+// wrong by hand, unreadable in the alert log) the text is SANITISED: a double
+// quote becomes a single quote and a backslash becomes a forward slash, so the
+// result never needs an escape sequence at all.
+f_jsonSafe(string s) =>
+    string a = str.replace_all(s, "\\", "/")
+    str.replace_all(a, '"', "'")
+
+// ,"key":value — emitted only when the value exists, so an absent field is
+// genuinely absent rather than null (Notion rejects null on typed properties).
+// Fixed-point format so prices never come out in scientific notation.
+f_jsonNum(string k, float v) =>
+    na(v) ? "" : ',"' + k + '":' + str.tostring(v, "#.#####")
+
+// ,"key":"value" — same rule, plus sanitising. Empty string means absent.
+f_jsonStr(string k, string v) =>
+    str.length(v) == 0 ? "" : ',"' + k + '":"' + f_jsonSafe(v) + '"'
+
+// One payload builder for every event, so the JSON shape can only be wrong in
+// one place. Optional numerics are passed as na when the event has no such
+// level (an exit knows the fill price, not the original entry/stop/target).
+f_payload(string ev, string dir, float px, float en, float sl, float tg, float q, string nt) =>
+    string j = '{"event":"' + f_jsonSafe(ev) + '"'
+    j := j + f_jsonStr("secret", whSecret)
+    j := j + ',"symbol":"' + f_jsonSafe(syminfo.tickerid) + '"'
+    j := j + ',"timeframe":"' + f_jsonSafe(timeframe.period) + '"'
+    j := j + ',"direction":"' + dir + '"'
+    j := j + ',"price":' + str.tostring(px, "#.#####")
+    j := j + f_jsonNum("entry", en)
+    j := j + f_jsonNum("stop", sl)
+    j := j + f_jsonNum("target", tg)
+    j := j + f_jsonNum("quality", q)
+    j := j + f_jsonStr("session", sessTxt)
+    j := j + f_jsonStr("note", nt)
+    j := j + ',"time":"' + str.format_time(time_close, "yyyy-MM-dd'T'HH:mm:ss'Z'", "GMT") + '"'
+    j + "}"
+
+// Entries: the full setup is known here (pEntry/pSL/pTP2/pScore were just set).
+if whOn and sigL
+    alert(f_payload("entry", "long", close, pEntry, pSL, pTP2, pScore, pReason), alert.freq_once_per_bar_close)
+if whOn and sigS
+    alert(f_payload("entry", "short", close, pEntry, pSL, pTP2, pScore, pReason), alert.freq_once_per_bar_close)
+
+// Exits: the setup has already been cleared above, so only the price is sent.
+if whOn and exitedL
+    alert(f_payload("exit", "long", close, na, na, na, na, "LMX long closed"), alert.freq_once_per_bar_close)
+if whOn and exitedS
+    alert(f_payload("exit", "short", close, na, na, na, na, "LMX short closed"), alert.freq_once_per_bar_close)
+
+// Sweeps: journalled with the direction they imply, not a position direction.
+if whOn and sweptSell and discount
+    alert(f_payload("sweep", "long", close, na, na, na, na, "LMX sell-side liquidity swept in discount"), alert.freq_once_per_bar_close)
+if whOn and sweptBuy and premium
+    alert(f_payload("sweep", "short", close, na, na, na, na, "LMX buy-side liquidity swept in premium"), alert.freq_once_per_bar_close)

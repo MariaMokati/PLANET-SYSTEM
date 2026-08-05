@@ -1,0 +1,15 @@
+{
+  "name": "planet-system-notion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker that turns LMX v3 TradingView alerts into Notion trade-journal rows.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "wrangler": "^3.86.0"
+  }
+}

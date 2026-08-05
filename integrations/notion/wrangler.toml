@@ -1,0 +1,25 @@
+name = "planet-system-notion"
+main = "src/index.js"
+compatibility_date = "2024-11-06"
+
+# -----------------------------------------------------------------------------
+# SECRETS — do NOT put them in this file. This file is committed to git.
+#
+# Set them with wrangler instead (they are stored encrypted by Cloudflare):
+#
+#   wrangler secret put NOTION_TOKEN        # ntn_... / secret_... internal integration token
+#   wrangler secret put NOTION_DATABASE_ID  # 32-char id from the database URL
+#   wrangler secret put WEBHOOK_SECRET      # any long random string you also paste into the strategy
+#
+# For local development use `.dev.vars` (gitignored) — see .dev.vars.example.
+# -----------------------------------------------------------------------------
+
+# Non-secret configuration would go here. Nothing needs it today; kept as a
+# reminder that [vars] is plaintext and is the WRONG place for the three
+# secrets above.
+#
+# [vars]
+# LOG_LEVEL = "info"
+
+# [observability]
+# enabled = true
