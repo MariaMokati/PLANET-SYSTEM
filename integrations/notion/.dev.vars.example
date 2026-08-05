@@ -1,0 +1,24 @@
+# Local development secrets for `wrangler dev`.
+#
+# Copy this file to `.dev.vars` and fill in real values:
+#
+#   cp .dev.vars.example .dev.vars
+#
+# `.dev.vars` is gitignored and MUST NEVER be committed. If you ever paste a
+# real token into a tracked file, rotate it in Notion immediately — a token that
+# has touched a git history is a leaked token.
+#
+# In production these three live in Cloudflare, set via `wrangler secret put`,
+# not in any file.
+
+# Notion internal integration token (Notion > Settings > Connections >
+# Develop or manage integrations > your integration > Internal Integration Secret).
+NOTION_TOKEN=
+
+# The trade-journal database id: the 32-hex-char chunk in the database URL,
+# https://www.notion.so/<workspace>/<DATABASE_ID>?v=<view id>
+NOTION_DATABASE_ID=
+
+# Any long random string. The same value goes into the strategy's
+# "Webhook Secret" input in TradingView.
+WEBHOOK_SECRET=
