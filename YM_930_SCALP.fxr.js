@@ -18,18 +18,20 @@
  *      Never on 9:31.
  *   7. One trade a day, first break only. Win or lose, you are done.
  *
- * WHAT IT DRAWS (all via plot.line, so it reads cleanly in the legend):
- *   Buy Stop / Sell Stop  — the two orders, live from 9:29 until resolved
- *   Entry / Stop / Target — only after a break triggers
- *
- * HONESTY: this is a drawing + bookkeeping tool. It does not place orders and
- * it makes no profitability claim. Two intrabar ambiguities are unknowable
- * from OHLC alone and are resolved conservatively — both are documented at
- * their decision points below and one is exposed as an input.
+ * PORTABILITY NOTES — this file deliberately avoids:
+ *   Date / Date.UTC ...... all calendar work is integer math on epoch ms
+ *   try / catch .......... no exception handling anywhere
+ *   globalThis ........... nothing is read off the global object
+ *   null reassignment .... every mutable holds ONE type for its whole life;
+ *                          "unset" is NaN for numbers and '' for strings
+ *   string slicing ....... the day key is a plain integer, e.g. 20260807
+ *   arrays of objects .... bar history is five parallel number arrays
+ * Every mutable is seeded with a value of its final type, so a type-checking
+ * editor has nothing to complain about.
  * ========================================================================= */
 
 /* ---------------------------------------------------------------------------
- * Input groups
+ * Input groups and option labels
  * ------------------------------------------------------------------------ */
 const G_SETUP = 'Setup';
 const G_RISK = 'Risk (ticks)';
@@ -42,141 +44,170 @@ const MODE_PIVOT = 'Swing Pivots (frozen at 9:29)';
 const TIE_SKIP = 'Skip the day (safest)';
 const TIE_DIRECTION = 'Follow candle direction';
 
-/* Bars we keep in memory. Enough for any pivot lookback, bounded so a long
- * replay session cannot grow without limit. */
+const DAY_MS = 86400000;
 const MAX_BARS = 1500;
 
 /* ---------------------------------------------------------------------------
- * Persistent state (survives across ticks)
+ * Bar history — parallel number arrays, index 0 oldest, last = current bar
  * ------------------------------------------------------------------------ */
-const bars = []; // [{ t, o, h, l, c }] — index 0 oldest, last = current bar
-let lastBarTime = null; // epoch ms of the bar currently being built
-let barIntervalMs = null; // inferred from the two most recent bar opens
+const barT = [];
+const barO = [];
+const barH = [];
+const barL = [];
+const barC = [];
 
-let pivotHigh = null; // most recent CONFIRMED pivot high (mode: pivots)
-let pivotLow = null; // most recent CONFIRMED pivot low
+let lastBarTime = 0; // 0 = nothing seen yet
+let barIntervalMs = 0; // 0 = not yet inferred
 
-let dayKey = null; // ET calendar day, e.g. "2026-08-07"
-let buyStop = null; // resting buy-stop price
-let sellStop = null; // resting sell-stop price
-let upperDead = false; // that side was killed before the open
+let pivotHigh = NaN; // most recent CONFIRMED pivot high
+let pivotLow = NaN;
+
+let dayKey = 0; // ET calendar day as an integer, e.g. 20260807
+let buyStop = NaN;
+let sellStop = NaN;
+let upperDead = false; // side killed before the open
 let lowerDead = false;
-let levelsFrozen = false; // levels locked in for the day
-let position = null; // 'long' | 'short' | null
-let entry = null;
-let stop = null;
-let target = null;
-let outcome = null; // 'TP' | 'SL' | null
+let levelsFrozen = false;
+let position = ''; // '' | 'long' | 'short'
+let entry = NaN;
+let stop = NaN;
+let target = NaN;
+let outcome = ''; // '' | 'TP' | 'SL'
 let dayFinished = false; // one trade a day — first break only
+
+/* NaN is the "unset" marker for every number above. */
+const isSet = (x) => x === x;
+
+/* ---------------------------------------------------------------------------
+ * Calendar math on raw epoch milliseconds.
+ *
+ * Howard Hinnant's civil-date algorithms, which are exact for any proleptic
+ * Gregorian date and need nothing but integer division.
+ * ------------------------------------------------------------------------ */
+const floorDiv = (a, b) => Math.floor(a / b);
+
+const civilFromDays = (z0) => {
+  const z = z0 + 719468;
+  const era = floorDiv(z, 146097);
+  const doe = z - era * 146097;
+  const yoe = floorDiv(
+    doe - floorDiv(doe, 1460) + floorDiv(doe, 36524) - floorDiv(doe, 146096),
+    365
+  );
+  const doy = doe - (365 * yoe + floorDiv(yoe, 4) - floorDiv(yoe, 100));
+  const mp = floorDiv(5 * doy + 2, 153);
+  const d = doy - floorDiv(153 * mp + 2, 5) + 1;
+  const m = mp < 10 ? mp + 3 : mp - 9;
+  return { y: yoe + era * 400 + (m <= 2 ? 1 : 0), m: m, d: d };
+};
+
+const daysFromCivil = (y0, m, d) => {
+  const y = y0 - (m <= 2 ? 1 : 0);
+  const era = floorDiv(y, 400);
+  const yoe = y - era * 400;
+  const mp = m > 2 ? m - 3 : m + 9;
+  const doy = floorDiv(153 * mp + 2, 5) + d - 1;
+  const doe = yoe * 365 + floorDiv(yoe, 4) - floorDiv(yoe, 100) + doy;
+  return era * 146097 + doe - 719468;
+};
+
+/* Day 0 of the epoch is a Thursday, so shifting by 4 puts Sunday at 0. */
+const nthSundayDays = (y, m, nth) => {
+  const first = daysFromCivil(y, m, 1);
+  const dow = ((first % 7) + 11) % 7;
+  return first + ((7 - dow) % 7) + (nth - 1) * 7;
+};
 
 /* ---------------------------------------------------------------------------
  * Eastern Time without a timezone library.
  *
  * Chart data arrives in UTC. The strategy is defined on the New York wall
- * clock, which means the 9:30 open lands on a different UTC hour in summer
- * than in winter. Rather than trust an ambient timezone, we derive the offset
- * from the US DST rule in force since 2007:
- *   starts 2nd Sunday of March,   02:00 local standard  = 07:00 UTC
- *   ends   1st Sunday of November, 02:00 local daylight = 06:00 UTC
+ * clock, so the 9:30 open sits on a different UTC hour in summer than in
+ * winter. Rather than trust an ambient timezone, derive the offset from the
+ * US DST rule in force since 2007:
+ *   starts 2nd Sunday of March,    02:00 local standard  = 07:00 UTC
+ *   ends   1st Sunday of November, 02:00 local daylight  = 06:00 UTC
  * ------------------------------------------------------------------------ */
-const nthSundayUtc = (year, monthIdx, nth) => {
-  const first = Date.UTC(year, monthIdx, 1);
-  const dow = new Date(first).getUTCDay(); // 0 = Sunday
-  const day = 1 + ((7 - dow) % 7) + (nth - 1) * 7;
-  return Date.UTC(year, monthIdx, day);
-};
-
 const etOffsetMinutes = (utcMs) => {
-  const y = new Date(utcMs).getUTCFullYear();
-  const dstStart = nthSundayUtc(y, 2, 2) + 7 * 3600000; // March, 07:00 UTC
-  const dstEnd = nthSundayUtc(y, 10, 1) + 6 * 3600000; // November, 06:00 UTC
+  const y = civilFromDays(floorDiv(utcMs, DAY_MS)).y;
+  const dstStart = nthSundayDays(y, 3, 2) * DAY_MS + 7 * 3600000;
+  const dstEnd = nthSundayDays(y, 11, 1) * DAY_MS + 6 * 3600000;
   return utcMs >= dstStart && utcMs < dstEnd ? -240 : -300; // EDT : EST
 };
 
 const etParts = (utcMs) => {
-  const d = new Date(utcMs + etOffsetMinutes(utcMs) * 60000);
+  const local = utcMs + etOffsetMinutes(utcMs) * 60000;
+  const days = floorDiv(local, DAY_MS);
+  const msOfDay = local - days * DAY_MS;
+  const c = civilFromDays(days);
   return {
-    key:
-      d.getUTCFullYear() +
-      '-' +
-      ('0' + (d.getUTCMonth() + 1)).slice(-2) +
-      '-' +
-      ('0' + d.getUTCDate()).slice(-2),
-    hh: d.getUTCHours(),
-    mm: d.getUTCMinutes(),
+    key: c.y * 10000 + c.m * 100 + c.d,
+    hh: floorDiv(msOfDay, 3600000),
+    mm: floorDiv(msOfDay, 60000) % 60,
   };
 };
 
 /* ---------------------------------------------------------------------------
  * FXR host adapter.
  *
- * These two functions are the ONLY places this file touches the shape of the
- * data FXR hands us. They feature-detect rather than assume, so the indicator
- * works whether the host passes a candle object, a series object of
- * arrays/accessors, an array of candles, or exposes globals.
+ * The only two places this file touches the shape of the data FXR hands us.
+ * They feature-detect rather than assume, so the indicator works whether the
+ * host passes a candle object, an array of candles, or accessor functions.
  * ------------------------------------------------------------------------ */
-const asNumber = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
+const asNumber = (v) => (typeof v === 'number' && v === v && v * 0 === 0 ? v : NaN);
 
-/* Epoch milliseconds from whatever the host calls "now": a number (seconds or
- * milliseconds), a Date, or a moment-like object. */
-const toEpochMs = (m) => {
-  if (m == null) return null;
-  const direct = asNumber(m);
-  if (direct !== null) return direct < 1e12 ? direct * 1000 : direct;
-  if (typeof m.valueOf === 'function') {
-    const v = asNumber(m.valueOf());
-    if (v !== null) return v < 1e12 ? v * 1000 : v;
-  }
-  if (typeof m.getTime === 'function') return asNumber(m.getTime());
-  if (typeof m.unix === 'function') {
-    const u = asNumber(m.unix());
-    if (u !== null) return u * 1000;
-  }
-  return null;
-};
-
-/* Pull one OHLC field off a candidate source, trying the shapes the host
- * might use: plain number, zero-arg accessor, or array (newest last). */
-const pluck = (src, names) => {
-  if (!src || typeof src !== 'object') return null;
+const pick = (src, names) => {
+  if (!src) return NaN;
   for (let i = 0; i < names.length; i++) {
-    const v = src[names[i]];
-    if (v == null) continue;
-    const plain = asNumber(v);
-    if (plain !== null) return plain;
-    if (typeof v === 'function') {
-      try {
-        const r = asNumber(v.call(src, 0));
-        if (r !== null) return r;
-      } catch (e) {
-        /* accessor needs different args — fall through */
-      }
+    let v = src[names[i]];
+    if (v === undefined || v === null) continue;
+    if (typeof v === 'function') v = v(0);
+    if (v && typeof v === 'object' && typeof v.length === 'number' && v.length > 0) {
+      v = v[v.length - 1];
     }
-    if (Array.isArray(v) && v.length) {
-      const a = asNumber(v[v.length - 1]);
-      if (a !== null) return a;
-    }
+    const n = asNumber(v);
+    if (isSet(n)) return n;
   }
-  return null;
+  return NaN;
 };
+
+/* Epoch milliseconds from whatever the host calls "now": a number in seconds
+ * or milliseconds, a Date, or a moment-like object. */
+const toEpochMs = (m) => {
+  let v = m;
+  if (v && typeof v === 'object') {
+    if (typeof v.getTime === 'function') v = v.getTime();
+    else if (typeof v.unix === 'function') v = v.unix() * 1000;
+    else if (typeof v.valueOf === 'function') v = v.valueOf();
+  }
+  const n = asNumber(v);
+  if (!isSet(n)) return NaN;
+  return n < 1e12 ? n * 1000 : n;
+};
+
+/* Writes into the four scratch values below rather than allocating, so no
+ * object shape has to be inferred anywhere. */
+let inO = NaN;
+let inH = NaN;
+let inL = NaN;
+let inC = NaN;
 
 const readBar = (series) => {
-  const candidates = [series];
-  if (Array.isArray(series) && series.length) {
-    candidates.unshift(series[series.length - 1]);
+  let src = series;
+  if (src && typeof src === 'object' && typeof src.length === 'number' && src.length > 0) {
+    const last = src[src.length - 1];
+    if (last && typeof last === 'object') src = last;
   }
-  if (typeof globalThis !== 'undefined') candidates.push(globalThis);
-
-  for (let i = 0; i < candidates.length; i++) {
-    const s = candidates[i];
-    const h = pluck(s, ['high', 'h', 'High']);
-    const l = pluck(s, ['low', 'l', 'Low']);
-    if (h === null || l === null) continue;
-    const c = pluck(s, ['close', 'c', 'Close', 'closeC']);
-    const o = pluck(s, ['open', 'o', 'Open']);
-    return { o: o !== null ? o : c !== null ? c : h, h: h, l: l, c: c !== null ? c : h };
-  }
-  return null;
+  const h = pick(src, ['high', 'h', 'High']);
+  const l = pick(src, ['low', 'l', 'Low']);
+  if (!isSet(h) || !isSet(l)) return false;
+  const c = pick(src, ['close', 'c', 'Close', 'closeC']);
+  const o = pick(src, ['open', 'o', 'Open']);
+  inH = h;
+  inL = l;
+  inC = isSet(c) ? c : h;
+  inO = isSet(o) ? o : inC;
+  return true;
 };
 
 /* ---------------------------------------------------------------------------
@@ -189,29 +220,19 @@ const readBar = (series) => {
  * every one of its members as a pivot and the real swing gets overwritten by
  * the most recent piece of chop.
  * ------------------------------------------------------------------------ */
-const isPivotHigh = (i, len) => {
-  const h = bars[i].h;
-  for (let k = i - len; k <= i + len; k++) {
-    if (k === i || k < 0 || k >= bars.length) continue;
-    if (bars[k].h >= h) return false;
-  }
-  return true;
-};
-
-const isPivotLow = (i, len) => {
-  const l = bars[i].l;
-  for (let k = i - len; k <= i + len; k++) {
-    if (k === i || k < 0 || k >= bars.length) continue;
-    if (bars[k].l <= l) return false;
-  }
-  return true;
-};
-
 const updatePivots = (len) => {
-  const i = bars.length - 1 - len; // the bar that just became confirmable
+  const i = barH.length - 1 - len; // the bar that just became confirmable
   if (i < len) return;
-  if (isPivotHigh(i, len)) pivotHigh = bars[i].h;
-  if (isPivotLow(i, len)) pivotLow = bars[i].l;
+
+  let high = true;
+  let low = true;
+  for (let k = i - len; k <= i + len; k++) {
+    if (k === i || k < 0 || k >= barH.length) continue;
+    if (barH[k] >= barH[i]) high = false;
+    if (barL[k] <= barL[i]) low = false;
+  }
+  if (high) pivotHigh = barH[i];
+  if (low) pivotLow = barL[i];
 };
 
 /* ---------------------------------------------------------------------------
@@ -219,16 +240,16 @@ const updatePivots = (len) => {
  * ------------------------------------------------------------------------ */
 const resetDay = (key) => {
   dayKey = key;
-  buyStop = null;
-  sellStop = null;
+  buyStop = NaN;
+  sellStop = NaN;
   upperDead = false;
   lowerDead = false;
   levelsFrozen = false;
-  position = null;
-  entry = null;
-  stop = null;
-  target = null;
-  outcome = null;
+  position = '';
+  entry = NaN;
+  stop = NaN;
+  target = NaN;
+  outcome = '';
   dayFinished = false;
 };
 
@@ -243,7 +264,7 @@ init = () => {
     MODE_CANDLE,
     'mode',
     [MODE_CANDLE, MODE_PIVOT],
-    'Candle: the 9:29 bar\'s own wick high and wick low. ' +
+    'Candle: the 9:29 bar own wick high and wick low. ' +
       'Pivots: the last confirmed swing high/low before 9:29, where a break ' +
       'during the 9:29 candle kills that side.',
     G_SETUP
@@ -308,43 +329,57 @@ init = () => {
  * onTick — runs on every price update
  * ------------------------------------------------------------------------ */
 onTick = (length, moment, series, ta, inputs) => {
-  const blank = () => {
-    plot.line('Buy Stop', null, inputs.cBuy);
-    plot.line('Sell Stop', null, inputs.cSell);
-    plot.line('Entry', null, inputs.cEntry);
-    plot.line('Stop Loss', null, inputs.cStop);
-    plot.line('Take Profit', null, inputs.cTarget);
+  const draw = (a, b, c, d, e) => {
+    plot.line('Buy Stop', a, inputs.cBuy);
+    plot.line('Sell Stop', b, inputs.cSell);
+    plot.line('Entry', c, inputs.cEntry);
+    plot.line('Stop Loss', d, inputs.cStop);
+    plot.line('Take Profit', e, inputs.cTarget);
   };
 
   const t = toEpochMs(moment);
-  const bar = readBar(series);
-  if (t === null || !bar) return blank();
+  if (!isSet(t) || !readBar(series)) return draw(NaN, NaN, NaN, NaN, NaN);
 
-  /* ---- bar bookkeeping: is this a new bar, or the current one updating? -- */
-  if (lastBarTime === null || t > lastBarTime) {
-    if (lastBarTime !== null) barIntervalMs = t - lastBarTime;
-    bars.push({ t: t, o: bar.o, h: bar.h, l: bar.l, c: bar.c });
-    if (bars.length > MAX_BARS) bars.shift();
+  /* ---- bar bookkeeping: a new bar, or the current one updating? ---------- */
+  if (lastBarTime === 0 || t > lastBarTime) {
+    if (lastBarTime !== 0) barIntervalMs = t - lastBarTime;
+    barT.push(t);
+    barO.push(inO);
+    barH.push(inH);
+    barL.push(inL);
+    barC.push(inC);
+    if (barT.length > MAX_BARS) {
+      barT.shift();
+      barO.shift();
+      barH.shift();
+      barL.shift();
+      barC.shift();
+    }
     lastBarTime = t;
     if (inputs.mode === MODE_PIVOT) updatePivots(inputs.pivotLen);
-  } else if (bars.length) {
-    const cur = bars[bars.length - 1];
-    cur.h = Math.max(cur.h, bar.h);
-    cur.l = Math.min(cur.l, bar.l);
-    cur.c = bar.c;
+  } else if (barT.length > 0) {
+    const j = barT.length - 1;
+    if (inH > barH[j]) barH[j] = inH;
+    if (inL < barL[j]) barL[j] = inL;
+    barC[j] = inC;
   } else {
-    return blank();
+    return draw(NaN, NaN, NaN, NaN, NaN);
   }
 
   /* ---- refuse to signal on the wrong timeframe -------------------------- */
-  if (inputs.enforce1m && barIntervalMs !== null && barIntervalMs !== 60000) {
-    return blank();
+  if (inputs.enforce1m && barIntervalMs !== 0 && barIntervalMs !== 60000) {
+    return draw(NaN, NaN, NaN, NaN, NaN);
   }
 
   const et = etParts(t);
   if (et.key !== dayKey) resetDay(et.key);
 
-  const cur = bars[bars.length - 1];
+  const j = barT.length - 1;
+  const curO = barO[j];
+  const curH = barH[j];
+  const curL = barL[j];
+  const curC = barC[j];
+
   const tick = inputs.tickSize;
   const offset = inputs.offsetTicks * tick;
   const isSetupBar = et.hh === 9 && et.mm === 29;
@@ -353,38 +388,36 @@ onTick = (length, moment, series, ta, inputs) => {
   /* ---- STEP 2: mark the levels ------------------------------------------ */
   if (isSetupBar) {
     if (inputs.mode === MODE_CANDLE) {
-      /* The 9:29 candle's own wicks. It updates live as that bar forms and is
-       * final the moment the bar closes — which is when the orders go in. */
-      buyStop = cur.h + offset;
-      sellStop = cur.l - offset;
+      /* The 9:29 candle's own wicks. Updates live as that bar forms and is
+       * final the moment it closes — which is when the orders go in. */
+      buyStop = curH + offset;
+      sellStop = curL - offset;
       levelsFrozen = true;
-    } else if (!levelsFrozen) {
+    } else if (!levelsFrozen && isSet(pivotHigh) && isSet(pivotLow)) {
       /* Freeze the last swing pivots CONFIRMED before 9:29 opened. */
-      if (pivotHigh !== null && pivotLow !== null) {
-        buyStop = pivotHigh + offset;
-        sellStop = pivotLow - offset;
-        levelsFrozen = true;
-      }
+      buyStop = pivotHigh + offset;
+      sellStop = pivotLow - offset;
+      levelsFrozen = true;
     }
 
     /* STEP 6, first half: a break during the 9:29 candle kills that side.
      * Only meaningful for pivots — a candle cannot break its own extremes. */
     if (levelsFrozen && inputs.mode === MODE_PIVOT) {
-      if (cur.h >= buyStop) upperDead = true;
-      if (cur.l <= sellStop) lowerDead = true;
+      if (curH >= buyStop) upperDead = true;
+      if (curL <= sellStop) lowerDead = true;
     }
   }
 
   /* ---- STEPS 3, 6, 7: the 9:30 candle is the only trigger window -------- */
-  if (isTriggerBar && levelsFrozen && !dayFinished && position === null) {
-    const hitLong = !upperDead && cur.h >= buyStop;
-    const hitShort = !lowerDead && cur.l <= sellStop;
+  if (isTriggerBar && levelsFrozen && !dayFinished && position === '') {
+    const hitLong = !upperDead && curH >= buyStop;
+    const hitShort = !lowerDead && curL <= sellStop;
 
-    let side = null;
+    let side = '';
     if (hitLong && hitShort) {
       /* Both stops filled inside one bar. OHLC does not record the order of
        * events, so we either stand down or infer from where it closed. */
-      if (inputs.tiePolicy === TIE_DIRECTION) side = cur.c >= cur.o ? 'long' : 'short';
+      if (inputs.tiePolicy === TIE_DIRECTION) side = curC >= curO ? 'long' : 'short';
     } else if (hitLong) {
       side = 'long';
     } else if (hitShort) {
@@ -404,33 +437,36 @@ onTick = (length, moment, series, ta, inputs) => {
     }
 
     /* Whatever happened, the window is now shut. Never enter on 9:31. */
-    if (side === null && (hitLong || hitShort)) dayFinished = true;
+    if (side === '' && (hitLong || hitShort)) dayFinished = true;
   }
 
   /* No break on the 9:30 candle at all = no trade day. */
-  if (levelsFrozen && position === null && !dayFinished) {
+  if (levelsFrozen && position === '' && !dayFinished) {
     if (et.hh > 9 || (et.hh === 9 && et.mm > 30)) dayFinished = true;
   }
 
   /* ---- STEPS 4 & 5: resolve the trade ----------------------------------- */
-  if (position !== null && outcome === null) {
-    const stopHit = position === 'long' ? cur.l <= stop : cur.h >= stop;
-    const targetHit = position === 'long' ? cur.h >= target : cur.l <= target;
+  if (position !== '' && outcome === '') {
+    const stopHit = position === 'long' ? curL <= stop : curH >= stop;
+    const targetHit = position === 'long' ? curH >= target : curL <= target;
     /* If a single bar spans both, we assume the stop went first. Fixed 3:1
      * systems flatter themselves when scored the other way. */
     if (stopHit) outcome = 'SL';
     else if (targetHit) outcome = 'TP';
-    if (outcome !== null) dayFinished = true;
+    if (outcome !== '') dayFinished = true;
   }
 
   /* ---- render ----------------------------------------------------------- */
-  const live = levelsFrozen && outcome === null;
-  const showLevels =
-    live && (inputs.showPre || et.hh > 9 || (et.hh === 9 && et.mm >= 30));
+  const resting = levelsFrozen && outcome === '' && position === '';
+  const afterOpen = et.hh > 9 || (et.hh === 9 && et.mm >= 30);
+  const showLevels = resting && (inputs.showPre || afterOpen);
+  const inTrade = position !== '' && outcome === '';
 
-  plot.line('Buy Stop', showLevels && !upperDead && position === null ? buyStop : null, inputs.cBuy);
-  plot.line('Sell Stop', showLevels && !lowerDead && position === null ? sellStop : null, inputs.cSell);
-  plot.line('Entry', position !== null && outcome === null ? entry : null, inputs.cEntry);
-  plot.line('Stop Loss', position !== null && outcome === null ? stop : null, inputs.cStop);
-  plot.line('Take Profit', position !== null && outcome === null ? target : null, inputs.cTarget);
+  draw(
+    showLevels && !upperDead ? buyStop : NaN,
+    showLevels && !lowerDead ? sellStop : NaN,
+    inTrade ? entry : NaN,
+    inTrade ? stop : NaN,
+    inTrade ? target : NaN
+  );
 };

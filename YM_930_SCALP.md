@@ -135,6 +135,25 @@ Zone rectangles were left out on purpose. `rectangle()` exists but its exact
 signature could not be confirmed, and a guessed drawing call that throws would
 take the whole indicator down with it. Lines carry the whole strategy anyway.
 
+## Language subset
+
+The FXR editor flagged the first version throughout, so the script now sticks to
+a deliberately narrow slice of JavaScript. It uses **no** `Date` or `Date.UTC`
+(all calendar work is integer math on epoch milliseconds), no `try`/`catch`, no
+`globalThis`, no string slicing, and no arrays of objects — bar history is five
+parallel number arrays.
+
+The rule that mattered most: **every mutable variable is seeded with a value of
+its final type and never changes type.** "Unset" is `NaN` for numbers and `''`
+for strings, never `null`. A variable declared `let x = null` and later assigned
+a number is an error on every subsequent line that touches it under a
+type-checking editor, which is exactly the shape of "errors scattered down the
+whole file".
+
+The test suite enforces this: the sandbox it runs the indicator in has `Date`,
+`isFinite`, `Array` and `Number` removed entirely, so any reliance on them fails
+the run rather than passing quietly.
+
 ---
 
 ## Not tested on ES, NQ, or US30
