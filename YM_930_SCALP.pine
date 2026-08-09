@@ -19,7 +19,7 @@
 // =============================================================================
 
 indicator("YM 9:30 Opening Break", "YM 9:30 Break", overlay = true,
-     max_boxes_count = 500, max_labels_count = 500)
+     max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
 
 // ─── Inputs ──────────────────────────────────────────────────────────────────
 const string G_SET = "Setup"
@@ -31,6 +31,8 @@ const string MODE_CANDLE = "9:29 candle high/low"
 const string MODE_PIVOT  = "Swing pivots (frozen at 9:29)"
 const string TIE_SKIP    = "Skip the day (safest)"
 const string TIE_DIR     = "Follow candle direction"
+const string EB_CLOSE    = "Close only (recommended)"
+const string EB_RANGE    = "Full bar range"
 
 levelMode  = input.string(MODE_CANDLE, "Level source", options = [MODE_CANDLE, MODE_PIVOT], group = G_SET,
      tooltip = "Candle: the 9:29 bar's own wick high and wick low. Pivots: the last confirmed " +
@@ -52,7 +54,15 @@ offTicks   = input.int(1, "Order offset (ticks)", minval = 0, group = G_RSK,
      tooltip = "How far ABOVE the high the buy stop rests, and below the low for the sell stop. " +
                "0 rests exactly on the level.")
 
+entryBarMode = input.string(EB_CLOSE, "Entry-bar stop/target test", options = [EB_CLOSE, EB_RANGE], group = G_RSK,
+     tooltip = "On the bar you entered on, the bar's extreme usually happened BEFORE the break, " +
+               "while price was still travelling to your level. Testing the stop against it marks " +
+               "nearly every trade a loser. Close only tests the entry bar's close, which price " +
+               "must genuinely have reached after entry.")
+
 showPre    = input.bool(true, "Show levels before the open", group = G_VIS)
+keepBars   = input.int(20, "Keep levels drawn for (bars)", minval = 0, maxval = 500, group = G_VIS,
+     tooltip = "How far the level lines carry on past the moment the day is decided.")
 showZones  = input.bool(true, "Shade the stop and target zones", group = G_VIS)
 showMarks  = input.bool(true, "Label each outcome", group = G_VIS)
 cBuy       = input.color(#26A69A, "Buy stop",    group = G_VIS)
@@ -111,8 +121,12 @@ var int losses   = 0
 var int noTrades = 0
 var int skipped  = 0
 
-var box slBox = na
-var box tpBox = na
+var box  slBox    = na
+var box  tpBox    = na
+var line buyLn    = na
+var line sellLn   = na
+var int  freezeAt = na
+var int  entryBar = na
 
 // previous-bar values, read before this bar's logic mutates them
 string prevSide = tradeSide[1]
@@ -132,6 +146,10 @@ if tfOk
         targetPx  := na
         outcome   := ""
         dayDone   := false
+        entryBar  := na
+        buyLn     := na
+        sellLn    := na
+        freezeAt  := na
 
     // ─── STEP 2: mark the levels on the 9:29 candle ─────────────────────────
     if setupBar
@@ -150,6 +168,22 @@ if tfOk
                 upperDead := true
             if low <= sellStop
                 lowerDead := true
+        // draw the two levels as a segment anchored on this bar
+        if armed and na(buyLn) and na(freezeAt)
+            buyLn  := line.new(bar_index, buyStop,  bar_index + 1, buyStop,  color = cBuy,  width = 2)
+            sellLn := line.new(bar_index, sellStop, bar_index + 1, sellStop, color = cSell, width = 2)
+        if not na(buyLn)
+            line.set_y1(buyLn, buyStop)
+            line.set_y2(buyLn, buyStop)
+        if not na(sellLn)
+            line.set_y1(sellLn, sellStop)
+            line.set_y2(sellLn, sellStop)
+        if upperDead and not na(buyLn)
+            line.delete(buyLn)
+            buyLn := na
+        if lowerDead and not na(sellLn)
+            line.delete(sellLn)
+            sellLn := na
 
     // ─── STEPS 3, 6, 7: the 9:30 candle is the only trigger window ──────────
     if triggerBar and armed and not dayDone and tradeSide == ""
@@ -171,11 +205,13 @@ if tfOk
             entryPx   := buyStop
             stopPx    := entryPx - slTicks * tick
             targetPx  := entryPx + tpTicks * tick
+            entryBar  := bar_index
         else if side == "short"
             tradeSide := "short"
             entryPx   := sellStop
             stopPx    := entryPx + slTicks * tick
             targetPx  := entryPx - tpTicks * tick
+            entryBar  := bar_index
 
         // window shut either way — never enter on 9:31
         if side == "" and (hitLong or hitShort)
@@ -189,8 +225,14 @@ if tfOk
 
     // ─── STEPS 4 & 5: resolve ───────────────────────────────────────────────
     if tradeSide != "" and outcome == ""
-        bool stopHit   = tradeSide == "long" ? low <= stopPx : high >= stopPx
-        bool targetHit = tradeSide == "long" ? high >= targetPx : low <= targetPx
+        // On the entry bar the extreme usually predates the break, so testing
+        // against it invents losses. The close is the one price we know was
+        // reached after entry.
+        bool onEntryBar = bar_index == entryBar and entryBarMode == EB_CLOSE
+        float loRef = onEntryBar ? close : low
+        float hiRef = onEntryBar ? close : high
+        bool stopHit   = tradeSide == "long" ? loRef <= stopPx : hiRef >= stopPx
+        bool targetHit = tradeSide == "long" ? hiRef >= targetPx : loRef <= targetPx
         // A bar spanning both is scored as the stop. Fixed-R systems flatter
         // themselves when scored the other way, and a backtest that reads
         // better than the trading did is worse than useless.
@@ -203,15 +245,26 @@ if tfOk
         if outcome != ""
             dayDone := true
 
+    // ─── level lines: extend until the day is decided, then a short tail ────
+    if dayDone and na(freezeAt)
+        freezeAt := bar_index + keepBars
+    if na(freezeAt) or bar_index <= freezeAt
+        if not na(buyLn)
+            line.set_x2(buyLn, bar_index + 1)
+        if not na(sellLn)
+            line.set_x2(sellLn, bar_index + 1)
+
 // ─── Drawing ─────────────────────────────────────────────────────────────────
 bool justEntered = tradeSide != "" and (na(prevSide) or prevSide == "")
 bool justClosed  = outcome != "" and (na(prevOut) or prevOut == "")
 bool inTrade     = tradeSide != "" and outcome == ""
-bool resting     = armed and tradeSide == "" and outcome == ""
+bool resting     = armed and tradeSide == "" and outcome == "" and not dayDone
 bool levelsOn    = tfOk and resting and not na(buyStop) and (showPre or etH > 9 or (etH == 9 and etM >= 30))
 
-plot(levelsOn and not upperDead ? buyStop  : na, "Buy Stop",    color = cBuy,    linewidth = 2, style = plot.style_linebr)
-plot(levelsOn and not lowerDead ? sellStop : na, "Sell Stop",   color = cSell,   linewidth = 2, style = plot.style_linebr)
+// Levels are drawn as line objects above so they cannot run to the right edge
+// forever; these keep the numbers available in the Data Window.
+plot(levelsOn and not upperDead ? buyStop  : na, "Buy Stop",  color = cBuy,  display = display.data_window)
+plot(levelsOn and not lowerDead ? sellStop : na, "Sell Stop", color = cSell, display = display.data_window)
 plot(inTrade ? entryPx  : na, "Entry",       color = color.gray, linewidth = 1, style = plot.style_linebr)
 plot(inTrade ? stopPx   : na, "Stop Loss",   color = cStop,      linewidth = 2, style = plot.style_linebr)
 plot(inTrade ? targetPx : na, "Take Profit", color = cTarget,    linewidth = 2, style = plot.style_linebr)
@@ -222,9 +275,11 @@ if showZones and justEntered
     tpBox := box.new(bar_index, math.max(entryPx, targetPx), bar_index + 1, math.min(entryPx, targetPx),
          border_color = color.new(cTarget, 40), bgcolor = color.new(cTarget, 85))
 
-if inTrade and not na(slBox)
-    box.set_right(slBox, bar_index + 1)
-    box.set_right(tpBox, bar_index + 1)
+if inTrade
+    if not na(slBox)
+        box.set_right(slBox, bar_index + 1)
+    if not na(tpBox)
+        box.set_right(tpBox, bar_index + 1)
 
 if showMarks and justClosed
     float markY = outcome == "TP" ? (tradeSide == "long" ? high : low) : (tradeSide == "long" ? low : high)
