@@ -105,22 +105,26 @@ const etParts = (utcMs) => {
 /* ---------------------------------------------------------------------------
  * Host adapter
  * ------------------------------------------------------------------------ */
+/* NOTE: never write `typeof someObject.member` anywhere in this file. FXR's
+ * engine does not evaluate typeof on a property access correctly — it reported
+ * a plain object's missing .getTime as 'function' and then threw calling it.
+ * Detect shapes by coercion and truthiness instead. */
+
 const field = (src, a, b) => {
   if (!src) return NaN;
   let v = src[a];
   if (v === undefined || v === null) v = src[b];
-  if (typeof v === 'function') v = v(0);
-  return num(v);
+  const direct = num(v);
+  if (isSet(direct)) return direct;
+  if (v && v.call) return num(v(0)); // accessor form, e.g. high(0)
+  return NaN;
 };
 
+/* Epoch milliseconds from a number (seconds or ms), a Date, or a moment-like
+ * object. Multiplying by 1 runs valueOf on all three without naming a method. */
 const stamp = (m) => {
-  let v = m;
-  if (v && typeof v === 'object') {
-    if (typeof v.getTime === 'function') v = v.getTime();
-    else if (typeof v.unix === 'function') v = v.unix() * 1000;
-    else if (typeof v.valueOf === 'function') v = v.valueOf();
-  }
-  const n = num(v);
+  let n = num(m);
+  if (!isSet(n)) n = num(m * 1);
   if (!isSet(n)) return NaN;
   return n < 1e12 ? n * 1000 : n;
 };
@@ -144,9 +148,7 @@ onTick = (length, moment, series, ta, inputs) => {
   if (!isSet(t)) return draw(NaN, NaN, NaN, NaN, NaN);
 
   let src = series;
-  if (src && typeof src === 'object' && typeof src.length === 'number' && src.length > 0) {
-    src = src[src.length - 1];
-  }
+  if (src && src.length > 0 && src[src.length - 1]) src = src[src.length - 1];
   const h = field(src, 'high', 'h');
   const l = field(src, 'low', 'l');
   if (!isSet(h) || !isSet(l)) return draw(NaN, NaN, NaN, NaN, NaN);
