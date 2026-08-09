@@ -9,9 +9,19 @@
  *   Window  : the 9:30 candle only. Never 9:31.
  *   Limit   : one trade a day, first break only.
  *
- * Deliberately minimal API surface — indicator(), plot.line(), and reading the
- * bar. No inputs, no arrays, no top-level statements other than declarations.
- * Settings are the constants directly below.
+ * ---------------------------------------------------------------------------
+ * HOUSE RULES for this file, learned from FXR rejecting earlier versions.
+ * Breaking any of them has produced a runtime TypeError on a live chart:
+ *
+ *   1. EVERY `if` gets braces. Two separate failures traced back to
+ *      brace-less ifs: one ran its body when the condition was false, one
+ *      skipped a `return` when the condition was true.
+ *   2. NEVER `typeof someObject.member`. The engine reported a missing
+ *      .getTime as 'function' and then threw calling it.
+ *   3. NEVER the `!` operator. Compare against false, undefined or null
+ *      explicitly.
+ *   4. No Date, no try/catch, no arrays, no top-level statements other than
+ *      declarations and the init / onTick assignments.
  * ========================================================================= */
 
 const TICK = 1; // YM and MYM tick 1.00 index point
@@ -41,7 +51,8 @@ let done = false;
 
 /* NaN is the "unset" marker for every number above. */
 const isSet = (x) => x === x;
-const num = (v) => (typeof v === 'number' && v === v && v * 0 === 0 ? v : NaN);
+const isNum = (v) => typeof v === 'number' && v === v && v * 0 === 0;
+const num = (v) => (isNum(v) === true ? v : NaN);
 const floorDiv = (a, b) => Math.floor(a / b);
 
 /* ---------------------------------------------------------------------------
@@ -105,18 +116,24 @@ const etParts = (utcMs) => {
 /* ---------------------------------------------------------------------------
  * Host adapter
  * ------------------------------------------------------------------------ */
-/* NOTE: never write `typeof someObject.member` anywhere in this file. FXR's
- * engine does not evaluate typeof on a property access correctly — it reported
- * a plain object's missing .getTime as 'function' and then threw calling it.
- * Detect shapes by coercion and truthiness instead. */
+const isNothing = (v) => v === undefined || v === null;
 
+/* Read one OHLC field, trying the long name then the short one, and calling
+ * it if the host exposes accessors rather than plain numbers. */
 const field = (src, a, b) => {
-  if (!src) return NaN;
+  if (isNothing(src) === true) {
+    return NaN;
+  }
   let v = src[a];
-  if (v === undefined || v === null) v = src[b];
-  const direct = num(v);
-  if (isSet(direct)) return direct;
-  if (v && v.call) return num(v(0)); // accessor form, e.g. high(0)
+  if (isNothing(v) === true) {
+    v = src[b];
+  }
+  if (isNum(v) === true) {
+    return v;
+  }
+  if (isNothing(v) === false && isNothing(v.call) === false) {
+    return num(v(0));
+  }
   return NaN;
 };
 
@@ -124,9 +141,16 @@ const field = (src, a, b) => {
  * object. Multiplying by 1 runs valueOf on all three without naming a method. */
 const stamp = (m) => {
   let n = num(m);
-  if (!isSet(n)) n = num(m * 1);
-  if (!isSet(n)) return NaN;
-  return n < 1e12 ? n * 1000 : n;
+  if (isSet(n) === false) {
+    n = num(m * 1);
+  }
+  if (isSet(n) === false) {
+    return NaN;
+  }
+  if (n < 1e12) {
+    return n * 1000;
+  }
+  return n;
 };
 
 /* ------------------------------------------------------------------------ */
@@ -145,27 +169,56 @@ onTick = (length, moment, series, ta, inputs) => {
   };
 
   const t = stamp(moment);
-  if (!isSet(t)) return draw(NaN, NaN, NaN, NaN, NaN);
+  if (isSet(t) === false) {
+    draw(NaN, NaN, NaN, NaN, NaN);
+    return;
+  }
 
+  /* The bar may arrive as the 3rd argument or the 4th, as a single candle or
+   * as a list of them. Take whichever actually carries a high and a low. */
   let src = series;
-  if (src && src.length > 0 && src[src.length - 1]) src = src[src.length - 1];
-  const h = field(src, 'high', 'h');
-  const l = field(src, 'low', 'l');
-  if (!isSet(h) || !isSet(l)) return draw(NaN, NaN, NaN, NaN, NaN);
+  if (isNothing(src) === true) {
+    src = ta;
+  }
+  if (isNothing(src) === false && src.length > 0) {
+    const last = src[src.length - 1];
+    if (isNothing(last) === false) {
+      src = last;
+    }
+  }
+
+  let h = field(src, 'high', 'h');
+  let l = field(src, 'low', 'l');
+  if (isSet(h) === false || isSet(l) === false) {
+    const alt = ta;
+    h = field(alt, 'high', 'h');
+    l = field(alt, 'low', 'l');
+  }
+  if (isSet(h) === false || isSet(l) === false) {
+    draw(NaN, NaN, NaN, NaN, NaN);
+    return;
+  }
 
   /* new bar, or the current one still forming? */
   if (lastBarTime === 0 || t > lastBarTime) {
-    if (lastBarTime !== 0) barIntervalMs = t - lastBarTime;
+    if (lastBarTime !== 0) {
+      barIntervalMs = t - lastBarTime;
+    }
     lastBarTime = t;
     curH = h;
     curL = l;
   } else {
-    if (h > curH) curH = h;
-    if (l < curL) curL = l;
+    if (h > curH) {
+      curH = h;
+    }
+    if (l < curL) {
+      curL = l;
+    }
   }
 
-  if (ENFORCE_1M && barIntervalMs !== 0 && barIntervalMs !== 60000) {
-    return draw(NaN, NaN, NaN, NaN, NaN);
+  if (ENFORCE_1M === true && barIntervalMs !== 0 && barIntervalMs !== 60000) {
+    draw(NaN, NaN, NaN, NaN, NaN);
+    return;
   }
 
   const et = etParts(t);
@@ -192,20 +245,20 @@ onTick = (length, moment, series, ta, inputs) => {
   }
 
   /* the 9:30 candle is the only trigger window */
-  if (et.hh === 9 && et.mm === 30 && armed && !done && position === '') {
+  if (et.hh === 9 && et.mm === 30 && armed === true && done === false && position === '') {
     const hitLong = curH >= buyStop;
     const hitShort = curL <= sellStop;
 
-    if (hitLong && hitShort) {
+    if (hitLong === true && hitShort === true) {
       /* both stops filled inside one bar and OHLC cannot say which was
        * first, so stand down for the day */
       done = true;
-    } else if (hitLong) {
+    } else if (hitLong === true) {
       position = 'long';
       entry = buyStop;
       stopPx = entry - SL_TICKS * TICK;
       targetPx = entry + TP_TICKS * TICK;
-    } else if (hitShort) {
+    } else if (hitShort === true) {
       position = 'short';
       entry = sellStop;
       stopPx = entry + SL_TICKS * TICK;
@@ -214,29 +267,36 @@ onTick = (length, moment, series, ta, inputs) => {
   }
 
   /* no break on the 9:30 candle at all = no trade day */
-  if (armed && position === '' && !done) {
-    if (et.hh > 9 || (et.hh === 9 && et.mm > 30)) done = true;
+  if (armed === true && position === '' && done === false) {
+    if (et.hh > 9 || (et.hh === 9 && et.mm > 30)) {
+      done = true;
+    }
   }
 
   /* resolve. A bar spanning both is scored as the stop. */
   if (position !== '' && outcome === '') {
     const stopHit = position === 'long' ? curL <= stopPx : curH >= stopPx;
     const targetHit = position === 'long' ? curH >= targetPx : curL <= targetPx;
-    if (stopHit) outcome = 'SL';
-    else if (targetHit) outcome = 'TP';
-    if (outcome !== '') done = true;
+    if (stopHit === true) {
+      outcome = 'SL';
+    } else if (targetHit === true) {
+      outcome = 'TP';
+    }
+    if (outcome !== '') {
+      done = true;
+    }
   }
 
-  const resting = armed && outcome === '' && position === '';
+  const resting = armed === true && outcome === '' && position === '';
   const afterOpen = et.hh > 9 || (et.hh === 9 && et.mm >= 30);
-  const show = resting && (SHOW_BEFORE_OPEN || afterOpen);
+  const show = resting === true && (SHOW_BEFORE_OPEN === true || afterOpen === true);
   const inTrade = position !== '' && outcome === '';
 
   draw(
-    show ? buyStop : NaN,
-    show ? sellStop : NaN,
-    inTrade ? entry : NaN,
-    inTrade ? stopPx : NaN,
-    inTrade ? targetPx : NaN
+    show === true ? buyStop : NaN,
+    show === true ? sellStop : NaN,
+    inTrade === true ? entry : NaN,
+    inTrade === true ? stopPx : NaN,
+    inTrade === true ? targetPx : NaN
   );
 };
