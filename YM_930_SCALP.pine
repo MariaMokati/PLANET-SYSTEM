@@ -7,15 +7,20 @@
 //   1. YM only, 1-minute time frame.
 //   2. Mark the levels at 9:29 a.m. New York — wicks, not bodies.
 //   3. Buy stop above the high, sell stop below the low.
-//   4. Stop loss: 10 ticks, fixed.
-//   5. Take profit: 30 ticks, fixed 3:1.
+//   4. Stop loss: fixed, in points (default 20).
+//   5. Take profit: fixed, in points (default 40).
 //   6. Enter ONLY on the 9:30 candle. No break on 9:30 = no trade. Never 9:31.
 //   7. One trade a day, first break only.
 //
+// If BOTH levels break inside the 9:30 candle you are in a trade regardless —
+// a resting stop order fills the moment price touches it. The only real
+// unknown is which side filled first, so that is what the tie policy picks,
+// and standing down is now just one option rather than the default.
+//
 // HONESTY: this marks levels and scores the result. It places no orders and
-// makes no profitability claim. Two intrabar situations cannot be resolved
-// from OHLC and are handled conservatively — both are flagged at their
-// decision points below, and one is exposed as an input.
+// makes no profitability claim. Intrabar ordering cannot be recovered from
+// OHLC; every place that matters is flagged at its decision point below and
+// exposed as an input.
 // =============================================================================
 
 indicator("YM 9:30 Opening Break", "YM 9:30 Break", overlay = true,
@@ -29,8 +34,10 @@ const string G_STA = "Stats"
 
 const string MODE_CANDLE = "9:29 candle high/low"
 const string MODE_PIVOT  = "Swing pivots (frozen at 9:29)"
-const string TIE_SKIP    = "Skip the day (safest)"
+const string TIE_NEAR    = "Nearest to the open (default)"
+const string TIE_ADVERSE = "Conservative (adverse side first)"
 const string TIE_DIR     = "Follow candle direction"
+const string TIE_SKIP    = "Skip the day"
 const string EB_CLOSE    = "Close only (recommended)"
 const string EB_RANGE    = "Full bar range"
 
@@ -39,18 +46,22 @@ levelMode  = input.string(MODE_CANDLE, "Level source", options = [MODE_CANDLE, M
                "swing high/low before 9:29, where a break during the 9:29 candle kills that side.")
 pivotLen   = input.int(5, "Pivot lookback", minval = 2, maxval = 50, group = G_SET,
      tooltip = "Bars either side of a swing point. Swing Pivots mode only.")
-tiePolicy  = input.string(TIE_SKIP, "If both levels break on the 9:30 candle", options = [TIE_SKIP, TIE_DIR], group = G_SET,
-     tooltip = "OHLC cannot say which side filled first inside one bar. Skip is honest; " +
-               "Direction assumes the close tells you where price went last.")
+tiePolicy  = input.string(TIE_NEAR, "If both levels break on the 9:30 candle", options = [TIE_NEAR, TIE_ADVERSE, TIE_DIR, TIE_SKIP], group = G_SET,
+     tooltip = "You are in a trade either way — a resting stop fills on touch. This only picks " +
+               "WHICH side filled first. Nearest: price starts at the open and must travel, so " +
+               "the closer level is reached first (and a gap open beyond a level breaks it at once). " +
+               "Conservative: the classic O-L-H-C on an up bar, so the side against the candle " +
+               "goes first. Direction: the close says where price ended up. Skip: stand down.")
 tz         = input.string("America/New_York", "Exchange timezone", group = G_SET)
 enforce1m  = input.bool(true, "Only run on a 1-minute chart", group = G_SET)
 
-autoTick   = input.bool(true, "Use the symbol's own tick size", group = G_RSK,
-     tooltip = "YM and MYM tick 1.00 index point. Turn off to set it by hand.")
-manualTick = input.float(1.0, "Manual tick size", minval = 0.01, step = 0.01, group = G_RSK)
-slTicks    = input.int(10, "Stop loss (ticks)", minval = 1, group = G_RSK)
-tpTicks    = input.int(30, "Take profit (ticks)", minval = 1, group = G_RSK)
-offTicks   = input.int(1, "Order offset (ticks)", minval = 0, group = G_RSK,
+autoPoint  = input.bool(true, "Take the point size from the symbol", group = G_RSK,
+     tooltip = "YM and MYM move in 1.00 index points, so a tick and a point are the same thing " +
+               "here. Turn this off to set it by hand.")
+manualPoint = input.float(1.0, "Manual point size", minval = 0.01, step = 0.01, group = G_RSK)
+slPts      = input.int(20, "Stop loss (points)", minval = 1, maxval = 1000, group = G_RSK)
+tpPts      = input.int(40, "Take profit (points)", minval = 1, maxval = 1000, group = G_RSK)
+offPts     = input.int(1, "Order offset (points)", minval = 0, maxval = 100, group = G_RSK,
      tooltip = "How far ABOVE the high the buy stop rests, and below the low for the sell stop. " +
                "0 rests exactly on the level.")
 
@@ -85,8 +96,8 @@ bool setupBar   = etH == 9 and etM == 29
 bool triggerBar = etH == 9 and etM == 30
 bool pastOpen   = etH > 9 or (etH == 9 and etM > 30)
 
-float tick = autoTick ? syminfo.mintick : manualTick
-float off  = offTicks * tick
+float ptSize = autoPoint ? syminfo.mintick : manualPoint
+float off    = offPts * ptSize
 
 // ─── Swing pivots (Swing Pivots mode) ────────────────────────────────────────
 // ta.pivothigh confirms `pivotLen` bars after the fact, which is exactly why
@@ -191,10 +202,20 @@ if tfOk
         bool hitShort = not lowerDead and low <= sellStop
         string side = ""
         if hitLong and hitShort
-            // Both stops filled inside one bar. OHLC records no ordering, so
-            // either stand down or infer from where it closed.
-            if tiePolicy == TIE_DIR
+            // Both stops filled inside one bar. You ARE in a trade — a resting
+            // stop fills on touch — so the only question is which went first.
+            if tiePolicy == TIE_NEAR
+                // price starts at the open and has to travel to reach a level,
+                // so the closer one is touched first. A gap open beyond a level
+                // makes that distance negative, which breaks it immediately.
+                side := (open - sellStop) <= (buyStop - open) ? "short" : "long"
+            else if tiePolicy == TIE_ADVERSE
+                // classic O-L-H-C on an up bar: the extreme against the
+                // candle's direction is reached first
+                side := close >= open ? "short" : "long"
+            else if tiePolicy == TIE_DIR
                 side := close >= open ? "long" : "short"
+            // TIE_SKIP leaves side empty and the day stands down
         else if hitLong
             side := "long"
         else if hitShort
@@ -203,14 +224,14 @@ if tfOk
         if side == "long"
             tradeSide := "long"
             entryPx   := buyStop
-            stopPx    := entryPx - slTicks * tick
-            targetPx  := entryPx + tpTicks * tick
+            stopPx    := entryPx - slPts * ptSize
+            targetPx  := entryPx + tpPts * ptSize
             entryBar  := bar_index
         else if side == "short"
             tradeSide := "short"
             entryPx   := sellStop
-            stopPx    := entryPx + slTicks * tick
-            targetPx  := entryPx - tpTicks * tick
+            stopPx    := entryPx + slPts * ptSize
+            targetPx  := entryPx - tpPts * ptSize
             entryBar  := bar_index
 
         // window shut either way — never enter on 9:31
@@ -284,44 +305,53 @@ if inTrade
 if showMarks and justClosed
     float markY = outcome == "TP" ? (tradeSide == "long" ? high : low) : (tradeSide == "long" ? low : high)
     label.new(bar_index, markY,
-         outcome == "TP" ? "+" + str.tostring(tpTicks) + "t" : "-" + str.tostring(slTicks) + "t",
+         outcome == "TP" ? "+" + str.tostring(tpPts) + "pts" : "-" + str.tostring(slPts) + "pts",
          style = outcome == "TP" ? (tradeSide == "long" ? label.style_label_down : label.style_label_up)
                                  : (tradeSide == "long" ? label.style_label_up   : label.style_label_down),
          color = outcome == "TP" ? color.new(cTarget, 20) : color.new(cStop, 20),
          textcolor = color.white, size = size.small)
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
-// A 3:1 system needs better than 25% to break even, so the win rate is
-// coloured against that line rather than against 50%.
-var table stats = table.new(position.top_right, 2, 7, border_width = 1,
+var table stats = table.new(position.top_right, 2, 9, border_width = 1,
      frame_color = color.new(color.gray, 60), frame_width = 1)
 
 int   taken   = wins + losses
 float winRate = taken > 0 ? 100.0 * wins / taken : na
-int   netTick = wins * tpTicks - losses * slTicks
+int   netPts  = wins * tpPts - losses * slPts
+// break-even for a fixed R is 1/(1+R), so the win rate is judged against the
+// reward:risk actually configured rather than a hardcoded number
+float rr      = slPts > 0 ? tpPts / slPts : na
+float bEven   = na(rr) ? na : 100.0 / (1.0 + rr)
 
 if showStats and barstate.islast
     table.cell(stats, 0, 0, "YM 9:30 Break", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
     table.cell(stats, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
 
-    table.cell(stats, 0, 1, "Trades", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 1, str.tostring(taken), text_color = color.white, text_size = size.small)
+    table.cell(stats, 0, 1, "Risk / reward", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 1, str.tostring(slPts) + " / " + str.tostring(tpPts) + " pts  (" + str.tostring(rr, "#.##") + "R)",
+         text_color = color.white, text_size = size.small)
 
-    table.cell(stats, 0, 2, "Won / lost", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 2, str.tostring(wins) + " / " + str.tostring(losses), text_color = color.white, text_size = size.small)
+    table.cell(stats, 0, 2, "Break-even", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 2, na(bEven) ? "—" : str.tostring(bEven, "#.#") + "%", text_color = color.gray, text_size = size.small)
 
-    table.cell(stats, 0, 3, "Win rate", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 3, na(winRate) ? "—" : str.tostring(winRate, "#.#") + "%",
-         text_color = na(winRate) ? color.gray : (winRate >= 25 ? cTarget : cStop), text_size = size.small)
+    table.cell(stats, 0, 3, "Trades", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 3, str.tostring(taken), text_color = color.white, text_size = size.small)
 
-    table.cell(stats, 0, 4, "Net ticks", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 4, str.tostring(netTick), text_color = netTick >= 0 ? cTarget : cStop, text_size = size.small)
+    table.cell(stats, 0, 4, "Won / lost", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 4, str.tostring(wins) + " / " + str.tostring(losses), text_color = color.white, text_size = size.small)
 
-    table.cell(stats, 0, 5, "No-trade days", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 5, str.tostring(noTrades), text_color = color.white, text_size = size.small)
+    table.cell(stats, 0, 5, "Win rate", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 5, na(winRate) ? "—" : str.tostring(winRate, "#.#") + "%",
+         text_color = na(winRate) or na(bEven) ? color.gray : (winRate >= bEven ? cTarget : cStop), text_size = size.small)
 
-    table.cell(stats, 0, 6, "Skipped (both broke)", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 6, str.tostring(skipped), text_color = color.white, text_size = size.small)
+    table.cell(stats, 0, 6, "Net points", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 6, str.tostring(netPts), text_color = netPts >= 0 ? cTarget : cStop, text_size = size.small)
+
+    table.cell(stats, 0, 7, "No-trade days", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 7, str.tostring(noTrades), text_color = color.white, text_size = size.small)
+
+    table.cell(stats, 0, 8, "Skipped (both broke)", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 8, str.tostring(skipped), text_color = skipped > 0 ? color.orange : color.white, text_size = size.small)
 
 if barstate.islast and not tfOk
     label.new(bar_index, high, "Switch to a 1-minute chart", style = label.style_label_down,
