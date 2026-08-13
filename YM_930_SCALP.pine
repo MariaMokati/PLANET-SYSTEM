@@ -411,24 +411,46 @@ else
     cdText := "shut for today"
     cdCol  := color.gray
 
-var table clockPanel = table.new(position.bottom_right, 2, 5, border_width = 1,
+// A delayed feed makes this strategy impossible to trade live: the 9:29 candle
+// does not reach the chart until minutes after the window has already shut.
+float feedLagMin = (timenow - time_close) / 60000.0
+string feedTxt = "live"
+color  feedCol = chart.fg_color
+if feedLagMin > 1.5 and feedLagMin < 60
+    feedTxt := "DELAYED ~" + str.tostring(math.round(feedLagMin), "#") + " min"
+    feedCol := color.red
+else if feedLagMin >= 60
+    feedTxt := "market closed / stale"
+    feedCol := color.gray
+
+bool   symOk  = str.contains(syminfo.ticker, "YM")
+string symTxt = symOk ? syminfo.ticker : syminfo.ticker + "  — NOT YM"
+color  symCol = symOk ? chart.fg_color : color.red
+
+var table clockPanel = table.new(position.bottom_right, 2, 7, border_width = 1,
      frame_color = color.new(color.gray, 60), frame_width = 1)
 
 if showClock and barstate.islast
     table.cell(clockPanel, 0, 0, "Mark levels", text_color = color.gray, text_size = size.small)
-    table.cell(clockPanel, 1, 0, hhmm(setupTs, localTz) + "  (9:29 NY)", text_color = color.white, text_size = size.small)
+    table.cell(clockPanel, 1, 0, hhmm(setupTs, localTz) + "  (9:29 NY)", text_color = chart.fg_color, text_size = size.small)
 
     table.cell(clockPanel, 0, 1, "Orders in by", text_color = color.gray, text_size = size.small)
-    table.cell(clockPanel, 1, 1, hhmm(trigTs, localTz) + "  (9:30 NY)", text_color = color.white, text_size = size.small)
+    table.cell(clockPanel, 1, 1, hhmm(trigTs, localTz) + "  (9:30 NY)", text_color = chart.fg_color, text_size = size.small)
 
     table.cell(clockPanel, 0, 2, "New York now", text_color = color.gray, text_size = size.small)
-    table.cell(clockPanel, 1, 2, hhmm(timenow, tz), text_color = color.white, text_size = size.small)
+    table.cell(clockPanel, 1, 2, hhmm(timenow, tz), text_color = chart.fg_color, text_size = size.small)
 
     table.cell(clockPanel, 0, 3, "Your clock now", text_color = color.gray, text_size = size.small)
-    table.cell(clockPanel, 1, 3, hhmm(timenow, localTz), text_color = color.white, text_size = size.small)
+    table.cell(clockPanel, 1, 3, hhmm(timenow, localTz), text_color = chart.fg_color, text_size = size.small)
 
     table.cell(clockPanel, 0, 4, "Countdown", text_color = color.gray, text_size = size.small)
-    table.cell(clockPanel, 1, 4, cdText, text_color = color.white, bgcolor = color.new(cdCol, 25), text_size = size.small)
+    table.cell(clockPanel, 1, 4, cdText, text_color = chart.fg_color, bgcolor = color.new(cdCol, 25), text_size = size.small)
+
+    table.cell(clockPanel, 0, 5, "Data feed", text_color = color.gray, text_size = size.small)
+    table.cell(clockPanel, 1, 5, feedTxt, text_color = feedCol, text_size = size.small)
+
+    table.cell(clockPanel, 0, 6, "Symbol", text_color = color.gray, text_size = size.small)
+    table.cell(clockPanel, 1, 6, symTxt, text_color = symCol, text_size = size.small)
 
 // ─── Stats ───────────────────────────────────────────────────────────────────
 var table stats = table.new(position.top_right, 2, 10, border_width = 1,
@@ -449,28 +471,28 @@ string stopDesc = stopMode == SL_RANGE ? "range +" + str.tostring(rangeBuf) + " 
 string tgtDesc  = tgtMode == TP_R ? str.tostring(tpR, "#.##") + "R" : str.tostring(tpPts) + " pts fixed"
 
 if showStats and barstate.islast
-    table.cell(stats, 0, 0, "YM 9:30 Break", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
-    table.cell(stats, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
+    table.cell(stats, 0, 0, "YM 9:30 Break", text_color = chart.fg_color, bgcolor = color.new(color.gray, 30), text_size = size.small)
+    table.cell(stats, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = chart.fg_color, bgcolor = color.new(color.gray, 30), text_size = size.small)
 
     table.cell(stats, 0, 1, "Stop", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 1, stopDesc, text_color = color.white, text_size = size.small)
+    table.cell(stats, 1, 1, stopDesc, text_color = chart.fg_color, text_size = size.small)
 
     table.cell(stats, 0, 2, "Target", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 2, tgtDesc, text_color = color.white, text_size = size.small)
+    table.cell(stats, 1, 2, tgtDesc, text_color = chart.fg_color, text_size = size.small)
 
     table.cell(stats, 0, 3, "Risk avg / worst", text_color = color.gray, text_size = size.small)
     table.cell(stats, 1, 3, na(avgRisk) ? "—" : str.tostring(avgRisk, "#.#") + " / " + str.tostring(maxRiskSeen, "#.#") + " pts",
-         text_color = color.white, text_size = size.small)
+         text_color = chart.fg_color, text_size = size.small)
 
     table.cell(stats, 0, 4, "Payoff / break-even", text_color = color.gray, text_size = size.small)
     table.cell(stats, 1, 4, na(payoff) ? "—" : str.tostring(payoff, "#.##") + "R / " + str.tostring(bEven, "#.#") + "%",
-         text_color = color.white, text_size = size.small)
+         text_color = chart.fg_color, text_size = size.small)
 
     table.cell(stats, 0, 5, "Trades", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 5, str.tostring(taken), text_color = color.white, text_size = size.small)
+    table.cell(stats, 1, 5, str.tostring(taken), text_color = chart.fg_color, text_size = size.small)
 
     table.cell(stats, 0, 6, "Won / lost", text_color = color.gray, text_size = size.small)
-    table.cell(stats, 1, 6, str.tostring(wins) + " / " + str.tostring(losses), text_color = color.white, text_size = size.small)
+    table.cell(stats, 1, 6, str.tostring(wins) + " / " + str.tostring(losses), text_color = chart.fg_color, text_size = size.small)
 
     table.cell(stats, 0, 7, "Win rate", text_color = color.gray, text_size = size.small)
     table.cell(stats, 1, 7, na(winRate) ? "—" : str.tostring(winRate, "#.#") + "%",
@@ -481,7 +503,7 @@ if showStats and barstate.islast
 
     table.cell(stats, 0, 9, "No trade / skip / wide", text_color = color.gray, text_size = size.small)
     table.cell(stats, 1, 9, str.tostring(noTrades) + " / " + str.tostring(skipped) + " / " + str.tostring(tooWide),
-         text_color = tooWide > 0 ? color.orange : color.white, text_size = size.small)
+         text_color = tooWide > 0 ? color.orange : chart.fg_color, text_size = size.small)
 
 if barstate.islast and not tfOk
     label.new(bar_index, high, "Switch to a 1-minute chart", style = label.style_label_down,
