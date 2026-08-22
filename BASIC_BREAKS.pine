@@ -34,7 +34,7 @@
 // nothing here has been Strategy-Tester validated. Compile it, look at it on
 // your own instrument, and judge it yourself.
 // =============================================================================
-indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500)
+indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
 
 // ===================== BREAK CONFIRMATION ====================================
 gCf = "Break confirmation"
@@ -49,7 +49,8 @@ bullOn = input.bool(true, "Count breaks of HIGHS (bullish)", group = gDir, toolt
 
 // ===================== RESET RULES ===========================================
 gRs = "Reset — when does the count go back to 1st"
-rstFlip = input.bool(true, "Reset on direction flip", group = gRs, tooltip = "On (default): the moment price breaks a HIGH, the bearish count is cleared, and vice versa. Keeps 1-2-3 tied to one leg.")
+rstFlip = input.bool(true, "Reset on direction flip", group = gRs, tooltip = "On (default): an opposite-direction break clears the count. How big that break has to be is set below.")
+rstFlipMode = input.string("Only past the sequence anchor", "…but only when the flip is", options = ["Only past the sequence anchor", "Any opposite break"], group = gRs, tooltip = "Only past the sequence anchor (default) — the count survives small counter-moves inside a leg and only resets when price actually closes back through the level the sequence started from. This is what makes a sell-off count 1st, 2nd, 3rd straight down instead of restarting at 1st every time a minor high is taken.\nAny opposite break — the older, blunter behaviour: ANY break the other way clears the count.")
 rstCap = input.bool(false, "Restart at 1st after the Nth break", group = gRs, tooltip = "On: count 1-2-…-N then start again at 1st. Treats every N breaks as a finished sequence. Takes precedence over the numbering cap below.")
 rstCapN = input.int(3, "…after how many", minval = 2, maxval = 20, group = gRs)
 rstSess = input.bool(false, "Reset on a new period", group = gRs, tooltip = "On: both counters clear at the start of each day / week / session, so break numbers are always relative to the current period.")
@@ -58,11 +59,34 @@ rstSessStr = input.session("0930-1600", "Session window", group = gRs, tooltip =
 rstTz = input.string("America/New_York", "Session timezone", group = gRs)
 rstZone = input.bool(false, "Reset when price returns through the anchor", group = gRs, tooltip = "The anchor is the opposite level standing when the 1st break fired — the high the sell-off started from. On: closing back beyond it ends the sequence and the next break is a 1st again.")
 
+// ===================== SEQUENCE ANCHOR =======================================
+// The anchor is the level the sequence started from. It decides two things: when
+// a counter-break is big enough to reset the count, and how far the zone on the
+// 1st break reaches. Using the minor swing that happened to be standing at the
+// 1st break makes the count restart on every shallow pullback — which is why the
+// leg extreme is the default.
+gAn = "Sequence anchor"
+anchMode = input.string("Extreme of the last N bars", "The anchor is", options = ["Extreme of the last N bars", "The swing at the 1st break"], group = gAn, tooltip = "Extreme of the last N bars (default) — the highest high (or lowest low) of the leg the break came out of. A shallow pullback inside the leg no longer resets the count, so a sell-off numbers 1st, 2nd, 3rd straight down.\nThe swing at the 1st break — the minor pivot standing at the moment of the break. Tighter zones, and the count restarts far more often.")
+anchLook = input.int(50, "Anchor lookback (bars)", minval = 5, maxval = 500, group = gAn, tooltip = "How far back to look for the leg extreme. Bigger = a more distant anchor, a longer-lived sequence and a taller zone.")
+
 // ===================== NUMBERING =============================================
 gNum = "Numbering"
 numCapOn = input.bool(false, "Stop numbering after N breaks", group = gNum, tooltip = "Off (default): the count keeps climbing — 4th, 5th, 6th… On: only the first N get an ordinal, and 'Beyond the cap' decides what happens to the rest.")
 numCapN = input.int(3, "…numbered up to", minval = 1, maxval = 20, group = gNum)
 capMode = input.string("Draw without a number", "Beyond the cap", options = ["Draw without a number", "Draw nothing"], group = gNum, tooltip = "Draw without a number — the line still appears, just unlabelled: the chart stays as clean as a hand annotation. Draw nothing — the sequence is treated as finished until it resets.")
+
+// ===================== ZONE ON THE 1st BREAK =================================
+gZ = "Supply / demand zone from the 1st break"
+zoneOn = input.bool(true, "Draw a zone on the 1st break", group = gZ, tooltip = "A bearish 1st break leaves a SUPPLY zone above it, a bullish 1st break leaves a DEMAND zone below it, each with its 50% line — the boxes you draw by hand.")
+zoneSrc = input.string("Anchor to the break level", "Zone spans", options = ["Anchor to the break level", "Breaking candle", "Broken swing candle"], group = gZ, tooltip = "Anchor to the break level (default) — from the extreme the move started from across to the level that was broken. This is what the boxes on your own charts span.\nBreaking candle — only the high and low of the candle that made the break.\nBroken swing candle — the high and low of the swing candle itself.")
+zoneMid = input.bool(true, "Show the 50% line", group = gZ)
+zSupTxt = input.string("Supply Zone 50%", "Supply label", group = gZ)
+zDemTxt = input.string("Demand Zone 50%", "Demand label", group = gZ)
+zSupC = input.color(color.new(#F23645, 0), "Supply", inline = "z1", group = gZ)
+zDemC = input.color(color.new(#2962FF, 0), "Demand", inline = "z1", group = gZ)
+zFade = input.int(88, "Zone fill transparency", minval = 0, maxval = 100, group = gZ)
+zoneStop = input.string("Freeze at mitigation", "When price closes back through it", options = ["Freeze at mitigation", "Delete at mitigation", "Never stop"], group = gZ, tooltip = "Freeze (default) — the box stops extending but stays on the chart as history. Delete — it disappears once used. Never stop — it keeps extending right forever.")
+zKeep = input.int(6, "Keep last N zones per layer", minval = 1, maxval = 50, group = gZ)
 
 // ===================== LEVEL SOURCE 1 — SWING ================================
 gL1 = "Levels 1 — SWING  (confirmed pivots)"
@@ -173,7 +197,22 @@ f_prune(array<line> la, array<label> lb, int keepN) =>
         label.delete(array.shift(lb))
     array.size(la)
 
+f_prunez(array<box> ba, array<line> la, array<label> lb, int keepN) =>
+    while array.size(ba) > keepN
+        box.delete(array.shift(ba))
+    while array.size(la) > keepN
+        line.delete(array.shift(la))
+    while array.size(lb) > keepN
+        label.delete(array.shift(lb))
+    array.size(ba)
+
 atr14 = ta.atr(14)
+
+// leg extremes, read once and shared by every layer
+anchHiN = ta.highest(anchLook)
+anchLoN = ta.lowest(anchLook)
+anchHiNBar = bar_index + ta.highestbars(anchLook)
+anchLoNBar = bar_index + ta.lowestbars(anchLook)
 
 // period resets — evaluated once, shared by every layer
 inSess = not na(time(timeframe.period, rstSessStr, rstTz))
@@ -197,6 +236,30 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
     var int pendHiBar = na
     var float pendLo = na
     var int pendLoBar = na
+    // the OHLC candle that formed each active level, kept so a zone can be
+    // built from it without reaching back through history by a variable offset
+    var float actHiCH = na
+    var float actHiCL = na
+    var float actLoCH = na
+    var float actLoCL = na
+    var float pendHiCH = na
+    var float pendHiCL = na
+    var float pendLoCH = na
+    var float pendLoCL = na
+    // zone stores and the one live zone per direction
+    var array<box> zbx = array.new<box>()
+    var array<line> zmd = array.new<line>()
+    var array<label> zlb = array.new<label>()
+    var box liveSupBox = na
+    var line liveSupMid = na
+    var label liveSupLbl = na
+    var float liveSupTop = na
+    var bool liveSupOn = false
+    var box liveDemBox = na
+    var line liveDemMid = na
+    var label liveDemLbl = na
+    var float liveDemBot = na
+    var bool liveDemOn = false
     var int nBull = 0
     var int nBear = 0
     var float anchBull = na
@@ -216,8 +279,12 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
     if mode == "Candle"
         actHi := high[1]
         actHiBar := bar_index - 1
+        actHiCH := high[1]
+        actHiCL := low[1]
         actLo := low[1]
         actLoBar := bar_index - 1
+        actLoCH := high[1]
+        actLoCL := low[1]
         hiUsed := false
         loUsed := false
     else if mode == "Protected"
@@ -226,17 +293,25 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
         if not na(rawPh)
             pendHi := rawPh
             pendHiBar := bar_index - len
+            pendHiCH := high[len]
+            pendHiCL := low[len]
             if not na(pendLo) and (na(actLoBar) or actLoBar != pendLoBar)
                 actLo := pendLo
                 actLoBar := pendLoBar
+                actLoCH := pendLoCH
+                actLoCL := pendLoCL
                 loUsed := false
                 loJustSet := true
         if not na(rawPl)
             pendLo := rawPl
             pendLoBar := bar_index - len
+            pendLoCH := high[len]
+            pendLoCL := low[len]
             if not na(pendHi) and (na(actHiBar) or actHiBar != pendHiBar)
                 actHi := pendHi
                 actHiBar := pendHiBar
+                actHiCH := pendHiCH
+                actHiCL := pendHiCL
                 hiUsed := false
                 hiJustSet := true
     else
@@ -245,6 +320,8 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
             if na(actHiBar) or actHiBar != nbH
                 actHi := rawPh
                 actHiBar := nbH
+                actHiCH := high[len]
+                actHiCL := low[len]
                 hiUsed := false
                 hiJustSet := true
         if not na(rawPl)
@@ -252,6 +329,8 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
             if na(actLoBar) or actLoBar != nbL
                 actLo := rawPl
                 actLoBar := nbL
+                actLoCH := high[len]
+                actLoCL := low[len]
                 loUsed := false
                 loJustSet := true
 
@@ -279,6 +358,32 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
             nBull := 0
             anchBull := na
 
+    // ---- keep the live zones extending, and retire them on mitigation ------
+    if liveSupOn and not na(liveSupBox)
+        box.set_right(liveSupBox, bar_index)
+        if not na(liveSupMid)
+            line.set_x2(liveSupMid, bar_index)
+            if not na(liveSupLbl)
+                label.set_x(liveSupLbl, int(math.avg(box.get_left(liveSupBox), bar_index)))
+        if zoneStop != "Never stop" and close > liveSupTop
+            if zoneStop == "Delete at mitigation"
+                box.delete(liveSupBox)
+                line.delete(liveSupMid)
+                label.delete(liveSupLbl)
+            liveSupOn := false
+    if liveDemOn and not na(liveDemBox)
+        box.set_right(liveDemBox, bar_index)
+        if not na(liveDemMid)
+            line.set_x2(liveDemMid, bar_index)
+            if not na(liveDemLbl)
+                label.set_x(liveDemLbl, int(math.avg(box.get_left(liveDemBox), bar_index)))
+        if zoneStop != "Never stop" and close < liveDemBot
+            if zoneStop == "Delete at mitigation"
+                box.delete(liveDemBox)
+                line.delete(liveDemMid)
+                label.delete(liveDemLbl)
+            liveDemOn := false
+
     bool evalOk = on and (not waitClose or barstate.isconfirmed)
 
     // ---- bearish: a low gets taken out -------------------------------------
@@ -286,13 +391,46 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
         loUsed := true
         firedBear := true
         lvlBear := actLo
-        if rstFlip and nBull > 0
+        if rstFlip and nBull > 0 and (rstFlipMode == "Any opposite break" or (not na(anchBull) and close < anchBull))
             nBull := 0
             anchBull := na
         int cand = (rstCap and nBear >= rstCapN) ? 1 : nBear + 1
         nBear := cand
         if cand == 1
-            anchBear := na(actHi) ? high : actHi
+            anchBear := anchMode == "The swing at the 1st break" ? (na(actHi) ? high : actHi) : anchHiN
+            if zoneOn
+                float zTop = na
+                float zBot = na
+                int zLeft = bar_index
+                if zoneSrc == "Breaking candle"
+                    zTop := high
+                    zBot := low
+                    zLeft := bar_index
+                else if zoneSrc == "Broken swing candle"
+                    zTop := actLoCH
+                    zBot := actLoCL
+                    zLeft := actLoBar
+                else
+                    zTop := anchBear
+                    zBot := actLo
+                    zLeft := anchMode == "The swing at the 1st break" ? (na(actHiBar) ? actLoBar : int(math.min(actLoBar, actHiBar))) : int(math.min(actLoBar, anchHiNBar))
+                if not na(zTop) and not na(zBot) and zTop > zBot
+                    box zb = box.new(zLeft, zTop, bar_index, zBot, xloc = xloc.bar_index, border_color = color.new(zSupC, 45), border_width = 1, bgcolor = color.new(zSupC, zFade))
+                    array.push(zbx, zb)
+                    line zm = na
+                    label zl = na
+                    if zoneMid
+                        float zMid = math.avg(zTop, zBot)
+                        zm := line.new(zLeft, zMid, bar_index, zMid, xloc = xloc.bar_index, color = color.new(zSupC, 0), style = line.style_dashed, width = 1)
+                        array.push(zmd, zm)
+                        zl := label.new(int(math.avg(zLeft, bar_index)), zMid, zSupTxt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = color.new(zSupC, 0), size = f_size(lblSzIn))
+                        array.push(zlb, zl)
+                    liveSupBox := zb
+                    liveSupMid := zm
+                    liveSupLbl := zl
+                    liveSupTop := zTop
+                    liveSupOn := true
+                    f_prunez(zbx, zmd, zlb, zKeep)
         bool numbered = (not numCapOn) or (cand <= numCapN)
         if numbered or capMode == "Draw without a number"
             color c = f_col(cand, false, tBull, tBear)
@@ -312,13 +450,46 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
         hiUsed := true
         firedBull := true
         lvlBull := actHi
-        if rstFlip and nBear > 0
+        if rstFlip and nBear > 0 and (rstFlipMode == "Any opposite break" or (not na(anchBear) and close > anchBear))
             nBear := 0
             anchBear := na
         int cand = (rstCap and nBull >= rstCapN) ? 1 : nBull + 1
         nBull := cand
         if cand == 1
-            anchBull := na(actLo) ? low : actLo
+            anchBull := anchMode == "The swing at the 1st break" ? (na(actLo) ? low : actLo) : anchLoN
+            if zoneOn
+                float zTop = na
+                float zBot = na
+                int zLeft = bar_index
+                if zoneSrc == "Breaking candle"
+                    zTop := high
+                    zBot := low
+                    zLeft := bar_index
+                else if zoneSrc == "Broken swing candle"
+                    zTop := actHiCH
+                    zBot := actHiCL
+                    zLeft := actHiBar
+                else
+                    zTop := actHi
+                    zBot := anchBull
+                    zLeft := anchMode == "The swing at the 1st break" ? (na(actLoBar) ? actHiBar : int(math.min(actHiBar, actLoBar))) : int(math.min(actHiBar, anchLoNBar))
+                if not na(zTop) and not na(zBot) and zTop > zBot
+                    box zb = box.new(zLeft, zTop, bar_index, zBot, xloc = xloc.bar_index, border_color = color.new(zDemC, 45), border_width = 1, bgcolor = color.new(zDemC, zFade))
+                    array.push(zbx, zb)
+                    line zm = na
+                    label zl = na
+                    if zoneMid
+                        float zMid = math.avg(zTop, zBot)
+                        zm := line.new(zLeft, zMid, bar_index, zMid, xloc = xloc.bar_index, color = color.new(zDemC, 0), style = line.style_dashed, width = 1)
+                        array.push(zmd, zm)
+                        zl := label.new(int(math.avg(zLeft, bar_index)), zMid, zDemTxt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = color.new(zDemC, 0), size = f_size(lblSzIn))
+                        array.push(zlb, zl)
+                    liveDemBox := zb
+                    liveDemMid := zm
+                    liveDemLbl := zl
+                    liveDemBot := zBot
+                    liveDemOn := true
+                    f_prunez(zbx, zmd, zlb, zKeep)
         bool numbered = (not numCapOn) or (cand <= numCapN)
         if numbered or capMode == "Draw without a number"
             color c = f_col(cand, true, tBull, tBear)
@@ -336,6 +507,9 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
     // ---- a layer switched off clears itself completely ---------------------
     if not on
         f_prune(lns, lbs, 0)
+        f_prunez(zbx, zmd, zlb, 0)
+        liveSupOn := false
+        liveDemOn := false
         nBull := 0
         nBear := 0
         anchBull := na

@@ -53,13 +53,30 @@ each independently switchable. A bullish 2nd break has nothing to do with the
 bearish count. Turn *Count breaks of HIGHS* off to reproduce a pure sell-off
 annotation.
 
+## 3a. The sequence anchor
+
+The anchor is the level the sequence started from. It decides two things: whether
+a counter-break is big enough to reset the count, and how far the zone on the 1st
+break reaches.
+
+| Anchor mode | Meaning |
+|---|---|
+| **Extreme of the last N bars** *(default, N=50)* | the highest high (bearish) or lowest low (bullish) of the leg the break came out of |
+| The swing at the 1st break | the minor pivot standing at the moment of the break |
+
+This matters more than it looks. With the anchor set to the minor swing, a shallow
+pullback inside a sell-off clears it and the next break is numbered "1st" again —
+which is what produced two consecutive *1st Break* labels on a 5m gold chart. With
+the leg extreme as the anchor, the same sequence numbers 1st → 2nd → 3rd straight
+down, which is how it gets marked by hand.
+
 ## 4. Resets — when the count goes back to 1st
 
 All four are switchable and all four stack.
 
 | Rule | Default | Behaviour |
 |---|---|---|
-| Direction flip | **on** | a break of a HIGH clears the bearish count, and vice versa — keeps 1-2-3 tied to one leg |
+| Direction flip | **on** | a break of a HIGH clears the bearish count, and vice versa. *Only past the sequence anchor* (default) makes the count survive small counter-moves inside a leg; *Any opposite break* is the blunt version |
 | Restart after the Nth | off | count 1…N then start again at 1st; takes precedence over the numbering cap |
 | New period | off | both counters clear at each new day / week / session |
 | Return through the anchor | off | the anchor is the opposite level standing when the 1st break fired — the high the sell-off started from; closing back beyond it ends the sequence |
@@ -70,6 +87,21 @@ Counting continues past the 3rd by default (4th, 5th, 6th…, with correct
 ordinals through 11th/12th/13th). Switch *Stop numbering after N breaks* on and
 everything past N either draws **without a number** (the line still appears, the
 chart stays as clean as a hand annotation) or **stops drawing** entirely.
+
+## 5a. The zone left by the 1st break
+
+A bearish 1st break leaves a **supply zone** above it; a bullish 1st break leaves a
+**demand zone** below it. Each is a box with a dashed 50% line and a label.
+
+| Zone spans | Top / bottom |
+|---|---|
+| **Anchor to the break level** *(default)* | the sequence anchor across to the level that was broken — a leg-sized zone |
+| Breaking candle | the high and low of the candle that made the break |
+| Broken swing candle | the high and low of the swing candle itself |
+
+The box extends right as price moves. When price closes back through it, it either
+**freezes** (default — it stays as history but stops extending), is **deleted**, or
+keeps extending. Each layer keeps its own last N zones.
 
 ## 6. Visuals
 
@@ -100,15 +132,22 @@ breaks mid-bar, and those marks can disappear again before the bar closes.
 ## 9. What was and was not verified
 
 The counting rules were ported to Python and run against synthetic bar series
-before commit. Confirmed there: a staircase down-move produces exactly
-1st → 2nd → 3rd on successive lower lows; the three confirmation modes fire in
-the expected order (wick earliest, then close, then full body); and the bullish
-and bearish counters advance independently on a down-then-up sequence.
+before each commit. Confirmed there:
 
-Not verified: the script has **not been compiled in TradingView** and has not
-been run against real market data from this environment. The direction-flip
-reset was not exercised by an interleaved break sequence — the synthetic series
-used never produced one — so that path rests on inspection only. This is an
-annotation tool; it makes no claim that an Nth break is more or less likely to
-continue. If TradingView reports a compile error, paste it back and it gets
-fixed.
+- a staircase down-move produces exactly 1st → 2nd → 3rd on successive lower lows;
+- the three confirmation modes fire in the expected order (wick earliest, then
+  close, then full body);
+- the bullish and bearish counters advance independently on a down-then-up move;
+- **the anchor mode changes the outcome as claimed.** On a leg carrying a genuine
+  mid-leg bullish break, the swing anchor gives `bear 1 · bull 1 · bear 1 · bear 2`
+  — the count restarting — while the leg-extreme anchor gives
+  `bear 1 · bull 1 · bear 2 · bear 3`. The first version of this change used the
+  swing anchor and did **not** fix the restarting count; the simulation is what
+  caught that.
+
+Not verified: the script has **not been compiled in TradingView from this
+environment** and has not been run against real market data here. The zone
+drawing, mitigation and freezing behaviour is inspection-only — the Python port
+covers the counting and the anchor, not the box objects. This is an annotation
+tool; it makes no claim that an Nth break is more or less likely to continue. If
+TradingView reports a compile error, paste it back and it gets fixed.
