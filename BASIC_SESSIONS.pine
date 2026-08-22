@@ -1,0 +1,582 @@
+//@version=6
+// =============================================================================
+// BASIC SESSIONS  —  exact session open / close marks
+// -----------------------------------------------------------------------------
+// WHY THIS EXISTS
+//   Hand-drawn vertical lines drift. They land on whatever bar edge the mouse
+//   was nearest, they ignore daylight saving, and they have to be redrawn by eye
+//   every week. This script marks every session OPEN and every session CLOSE at
+//   its true timestamp, to the minute, in the timezone the session is actually
+//   defined in — including both DST changeovers, which move a New York session
+//   by an hour against a European or South African clock twice a year.
+//
+// HOW THE MARK IS PLACED (the accuracy claim, stated exactly)
+//   For each session, for each calendar day, the open epoch is built with
+//   timestamp(tz, year, month, day, hh, mm) — a WALL-CLOCK construction, so the
+//   UTC offset for that specific date (summer or winter) is resolved by
+//   TradingView's timezone database, not by an offset typed in by hand. The
+//   close is built the same way on its own calendar date, so a window that
+//   crosses midnight ends at the right wall-clock minute even on the two nights
+//   of the year that are 23 or 25 hours long.
+//   The line is then drawn with xloc.bar_time AT THAT EPOCH. A 09:03 open on a
+//   5-minute chart is drawn three minutes INTO the 09:00 bar — not at its edge.
+//   Nothing snaps to a bar unless you set Anchor = "Bar open".
+//
+// WHAT IT DRAWS
+//   * vertical line + label at every session open   (solid by default)
+//   * vertical line + label at every session close  (dashed by default)
+//   * optional session range box, session high/low lines, session midline
+//   * optional dotted projection of the NEXT open (or the close of the session
+//     running right now) into empty space to the right of price
+//   * a status table: which sessions are open, their exact open and close in
+//     your chosen clock, and a live countdown to the next transition
+//
+// SIX SESSIONS, THREE PRESETS
+//   Presets are New York time (America/New_York, the default session timezone):
+//     ICT killzones   Asia 2000-0000 · London 0200-0500 · NY AM 0700-1000 · NY PM 1300-1600
+//     Classic FX      Sydney 1700-0200 · Tokyo 1900-0400 · London 0300-1130 · New York 0800-1700
+//     CRT models      1AM 0100-0200 · 9AM 0900-1000 · 5PM 1700-1800
+//   Pick "Custom" to use the six editable slots at the bottom of the settings.
+//
+// NON-REPAINTING
+//   Every mark is a pure function of the clock: no price input, no security
+//   call, no lookahead. A mark placed on a historical bar is at the same epoch
+//   it was placed at in real time. Box / high / low / midline track price while
+//   their session is still running, and are final the moment it closes.
+//
+// WHEN A MARK APPEARS vs WHERE IT SITS
+//   Where: always the true epoch. When: the open mark appears on the bar that
+//   contains it, and the close mark appears as the next bar opens, because the
+//   session's high, low and box are only final then. On a 4H chart the close
+//   mark can therefore land on the chart up to four hours after the coordinate
+//   it is drawn at. The ALERTS do not wait: both fire on the tick that passes
+//   the true minute, so a 09:03 open does not alert at 09:00.
+//
+// WHAT IT WILL NOT DO
+//   * it does not invent bars. A session with no bars inside it — a holiday, a
+//     Friday-night Asia window, an instrument that simply is not trading — is
+//     not marked at all, because nothing happened in it.
+//   * it does not guess which day a window belongs to: a session is stamped by
+//     the day it OPENS, so a window across midnight belongs to its opening day.
+//   * it does not silently overflow TradingView's 500-drawings-per-type limit.
+//     Keep last N of each session prunes whole sessions, oldest first.
+//
+// HONESTY
+//   Hand-reviewed against the v6 spec, NOT machine-compiled here. If TradingView
+//   reports anything, paste the message back and it gets fixed.
+// =============================================================================
+indicator("Basic Sessions", "Basic Sessions", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 500)
+
+// ===================== PALETTE ===============================================
+PURPLE  = #6D28D9
+TEAL    = #0D9488
+AMBER   = #F59E0B
+CORAL   = #FB7185
+EMERALD = #10B981
+MAGENTA = #DB2777
+SLATE   = #94A3B8
+INK     = #1E293B
+TRANSP  = color.new(color.gray, 100)
+
+// ===================== 1 · ENGINE ============================================
+gEng = "1 · Engine"
+PR_ICT = "ICT killzones (NY time)"
+PR_FX  = "Classic FX sessions (NY time)"
+PR_CRT = "CRT models 1AM / 9AM / 5PM (NY time)"
+preset = input.string("ICT killzones (NY time)", "Preset", options = ["ICT killzones (NY time)", "Classic FX sessions (NY time)", "CRT models 1AM / 9AM / 5PM (NY time)", "Custom — use my six slots below"], group = gEng, tooltip = "The three presets overwrite the name, window and on/off of the six slots at the bottom. Their windows are written in NEW YORK time, so leave the session timezone on America/New_York while a preset is active. Choose Custom to run your own windows in any timezone.")
+
+tzPick = input.string("America/New_York", "Session timezone", options = ["Exchange (chart)", "UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Europe/Moscow", "Africa/Johannesburg", "Asia/Dubai", "Asia/Kolkata", "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney"], group = gEng, tooltip = "The clock the session windows are WRITTEN in. Daylight saving for this zone is applied automatically, per calendar day — that is what keeps the marks correct through March and November.")
+tzCustom = input.string("", "…or type any IANA zone", group = gEng, tooltip = "Overrides the dropdown when it is not empty. Any zone TradingView accepts works, e.g. America/Sao_Paulo, Asia/Singapore, Pacific/Auckland.")
+
+anchor = input.string("Exact session time", "Anchor marks to", options = ["Exact session time", "Bar open"], group = gEng, tooltip = "Exact = the line sits at the true minute, even if that is inside a bar. This is the whole point of the script. Bar open = the old behaviour, snapped to the bar that contains the event, for people who want the line on a candle edge.")
+keepN  = input.int(8, "Keep last N of each session", minval = 2, maxval = 40, group = gEng, tooltip = "Older sessions are deleted, drawing by drawing. TradingView allows 500 lines / 500 labels / 500 boxes per script: six sessions with open+close lines cost 12 drawings per instance, so N x 12 has to stay under 500 if you enable every slot.")
+tfMax  = input.int(240, "Hide above this chart timeframe (minutes)", minval = 0, group = gEng, tooltip = "Session marks on a daily or weekly chart are noise. 0 = never hide. 240 = the marks disappear above the 4-hour chart.")
+
+// ===================== 2 · OPEN / CLOSE MARKS ================================
+gMrk = "2 · Open / close marks"
+showO   = input.bool(true,  "Mark the open",  inline = "o", group = gMrk)
+oStyle  = input.string("Solid", "", options = ["Solid", "Dashed", "Dotted"], inline = "o", group = gMrk)
+oWidth  = input.int(2, "", minval = 1, maxval = 4, inline = "o", group = gMrk)
+showC   = input.bool(true,  "Mark the close", inline = "c", group = gMrk)
+cStyle  = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], inline = "c", group = gMrk)
+cWidth  = input.int(1, "", minval = 1, maxval = 4, inline = "c", group = gMrk)
+cFade   = input.int(35, "Close-mark fade %", minval = 0, maxval = 90, group = gMrk, tooltip = "The close line is drawn in the same colour as its session, faded by this much, so opens read louder than closes at a glance.")
+
+// ===================== 3 · LABELS ============================================
+gLbl = "3 · Labels"
+showL   = input.bool(true, "Show labels", group = gLbl)
+lblOn   = input.string("Open and close", "Label which mark", options = ["Open and close", "Open only", "Close only"], group = gLbl)
+lblWhat = input.string("Name + event + time", "Label text", options = ["Name + event + time", "Name + time", "Name", "Time"], group = gLbl)
+lblFmt  = input.string("HH:mm", "Time format", options = ["HH:mm", "yyyy-MM-dd HH:mm"], group = gLbl)
+lblPos  = input.string("Bottom", "Label position", options = ["Bottom", "Top"], group = gLbl)
+lblSkin = input.string("Filled", "Label skin", options = ["Filled", "Chip", "Ghost"], group = gLbl, tooltip = "Filled = solid session colour with the text colour below. Chip = chart background with coloured text. Ghost = no background at all.")
+lblSz   = input.string("Tiny", "Label size", options = ["Tiny", "Small", "Normal"], group = gLbl)
+lblTxtC = input.color(color.white, "Filled-label text colour", group = gLbl)
+lblTzP  = input.string("Same as sessions", "Label clock", options = ["Same as sessions", "Exchange (chart)", "UTC", "America/New_York", "America/Chicago", "America/Los_Angeles", "Europe/London", "Europe/Berlin", "Europe/Moscow", "Africa/Johannesburg", "Asia/Dubai", "Asia/Kolkata", "Asia/Shanghai", "Asia/Tokyo", "Australia/Sydney"], group = gLbl, tooltip = "Read the times in YOUR clock while the sessions stay defined in theirs. Define London in Europe/London, read it in Africa/Johannesburg, and both stay right through every DST change.")
+lblTzC  = input.string("", "…or type any IANA zone", group = gLbl)
+oWord   = input.string("open",  "Word for the open",  inline = "w", group = gLbl)
+cWord   = input.string("close", "Word for the close", inline = "w", group = gLbl)
+
+// ===================== 4 · SESSION RANGE (OPTIONAL) ==========================
+gRng = "4 · Session range (optional)"
+showB   = input.bool(false, "Session box", inline = "b", group = gRng)
+boxFade = input.int(90, "", minval = 50, maxval = 99, inline = "b", group = gRng)
+boxBrd  = input.bool(false, "Box border", inline = "b", group = gRng)
+showHL  = input.bool(false, "Keep session high / low after the close", inline = "h", group = gRng)
+hlStyle = input.string("Dotted", "", options = ["Solid", "Dashed", "Dotted"], inline = "h", group = gRng)
+hlExt   = input.int(0, "Extend high / low by N bars", minval = 0, maxval = 200, group = gRng)
+showMid = input.bool(false, "Session midline (EQ)", inline = "m", group = gRng)
+midStyle = input.string("Dashed", "", options = ["Solid", "Dashed", "Dotted"], inline = "m", group = gRng)
+
+// ===================== 5 · NEXT-SESSION PROJECTION ===========================
+gPrj = "5 · Next-session projection"
+projOn  = input.bool(true, "Project the next transition", group = gPrj, tooltip = "A dotted mark to the right of price: the close of the session running right now, or the next open if none is running. It sits at the true future timestamp, so it is a countdown you can see. TradingView only allows drawings up to 500 bars ahead, so it hides itself when the next event is further away than that.")
+projLbl = input.bool(true, "Label the projection", group = gPrj)
+
+// ===================== 6 · STATUS TABLE ======================================
+gTbl = "6 · Status table"
+tblOn  = input.bool(true, "Show the table", group = gTbl)
+tblPos = input.string("Bottom right", "Position", options = ["Top right", "Top left", "Bottom right", "Bottom left", "Middle right"], group = gTbl)
+tblSz  = input.string("Tiny", "Text size", options = ["Tiny", "Small", "Normal"], group = gTbl)
+tblBg  = input.color(color.new(color.white, 0), "Background", inline = "t", group = gTbl)
+tblTx  = input.color(INK, "Text", inline = "t", group = gTbl)
+tblHd  = input.color(PURPLE, "Header", inline = "t", group = gTbl)
+
+// ===================== 7 · ALERTS ============================================
+gAlr = "7 · Alerts"
+alOpen  = input.bool(true, "Alert on session open",  group = gAlr)
+alClose = input.bool(true, "Alert on session close", group = gAlr, tooltip = "Create one alert on this script with condition 'any alert() function call'. The message names the session, the event and the exact time. On the live bar the open alert waits for the true minute to pass, so a 09:03 open does not fire at 09:00.")
+
+// ===================== 8 · THE SIX SESSIONS ==================================
+gSes = "8 · The six sessions"
+DAYTIP = "Days the session may OPEN on, as digits: 1=Sun 2=Mon 3=Tue 4=Wed 5=Thu 6=Fri 7=Sat. A window that crosses midnight is stamped by the day it OPENS. If you add a :days suffix inside the window box itself (0200-0500:23456) that suffix wins."
+s1On = input.bool(true, "1", inline = "s1a", group = gSes)
+s1Nm = input.string("Asia", "", inline = "s1a", group = gSes)
+s1Wn = input.session("2000-0000", "", inline = "s1a", group = gSes)
+s1Cl = input.color(PURPLE, "", inline = "s1a", group = gSes)
+s1Dy = input.string("1234567", "days", inline = "s1b", group = gSes, tooltip = DAYTIP)
+s2On = input.bool(true, "2", inline = "s2a", group = gSes)
+s2Nm = input.string("London", "", inline = "s2a", group = gSes)
+s2Wn = input.session("0200-0500", "", inline = "s2a", group = gSes)
+s2Cl = input.color(TEAL, "", inline = "s2a", group = gSes)
+s2Dy = input.string("1234567", "days", inline = "s2b", group = gSes, tooltip = DAYTIP)
+s3On = input.bool(true, "3", inline = "s3a", group = gSes)
+s3Nm = input.string("NY AM", "", inline = "s3a", group = gSes)
+s3Wn = input.session("0700-1000", "", inline = "s3a", group = gSes)
+s3Cl = input.color(AMBER, "", inline = "s3a", group = gSes)
+s3Dy = input.string("1234567", "days", inline = "s3b", group = gSes, tooltip = DAYTIP)
+s4On = input.bool(true, "4", inline = "s4a", group = gSes)
+s4Nm = input.string("NY PM", "", inline = "s4a", group = gSes)
+s4Wn = input.session("1300-1600", "", inline = "s4a", group = gSes)
+s4Cl = input.color(CORAL, "", inline = "s4a", group = gSes)
+s4Dy = input.string("1234567", "days", inline = "s4b", group = gSes, tooltip = DAYTIP)
+s5On = input.bool(false, "5", inline = "s5a", group = gSes)
+s5Nm = input.string("CRT 5PM", "", inline = "s5a", group = gSes)
+s5Wn = input.session("1700-1800", "", inline = "s5a", group = gSes)
+s5Cl = input.color(EMERALD, "", inline = "s5a", group = gSes)
+s5Dy = input.string("1234567", "days", inline = "s5b", group = gSes, tooltip = DAYTIP)
+s6On = input.bool(false, "6", inline = "s6a", group = gSes)
+s6Nm = input.string("Custom", "", inline = "s6a", group = gSes)
+s6Wn = input.session("0930-1600", "", inline = "s6a", group = gSes)
+s6Cl = input.color(MAGENTA, "", inline = "s6a", group = gSes)
+s6Dy = input.string("1234567", "days", inline = "s6b", group = gSes, tooltip = DAYTIP)
+
+// ===================== TYPES =================================================
+// One INSTANCE = one occurrence of one session on one day. Every drawing that
+// belongs to it is held here, so pruning deletes a whole day cleanly instead of
+// leaving an orphan close line behind an already-deleted open line.
+type Inst
+    line  lnO = na
+    line  lnC = na
+    label lbO = na
+    label lbC = na
+    box   bx  = na
+    line  lnH = na
+    line  lnL = na
+    line  lnM = na
+
+type Sess
+    bool   on
+    string name
+    string win
+    string days
+    color  col
+    int    sm                     // open, as minutes from midnight in the session tz
+    int    dur                    // length in minutes (1..1440)
+    bool   bad   = false          // the window text could not be read
+    int    curS  = na             // exact epoch of the open of the running instance
+    int    curE  = na             // exact epoch of its close
+    float  hi    = na
+    float  lo    = na
+    bool   pendO = false          // an open alert is armed, waiting for the true minute
+    bool   pendC = false          // a close alert is armed, waiting for the true minute
+    Inst   cur   = na             // the instance running right now
+    int    oBar  = na             // bar its open marks were drawn on
+    Inst   mark  = na             // the instance that closed most recently
+    int    mS    = na             // and its open epoch, close epoch, high, low
+    int    mE    = na
+    float  mHi   = na
+    float  mLo   = na
+    int    cBar  = na             // bar its close marks were drawn on
+    array<Inst> insts = na
+    line   proj  = na
+    label  projL = na
+
+// ===================== HELPERS ===============================================
+f_sz(string s) =>
+    s == "Tiny" ? size.tiny : s == "Normal" ? size.normal : size.small
+f_ls(string s) =>
+    s == "Solid" ? line.style_solid : s == "Dashed" ? line.style_dashed : line.style_dotted
+f_pos(string s) =>
+    s == "Top left" ? position.top_left : s == "Bottom right" ? position.bottom_right : s == "Bottom left" ? position.bottom_left : s == "Middle right" ? position.middle_right : position.top_right
+f_tz(string pick, string custom) =>
+    str.length(custom) > 0 ? custom : pick == "Exchange (chart)" ? syminfo.timezone : pick
+f_2(int v) =>
+    (v < 10 ? "0" : "") + str.tostring(v)
+
+TZ    = f_tz(tzPick, tzCustom)
+LTZ   = lblTzP == "Same as sessions" ? TZ : f_tz(lblTzP, lblTzC)
+TFMS  = timeframe.in_seconds(timeframe.period) * 1000
+PAD   = nz(ta.atr(14), syminfo.mintick * 10) * 0.6
+VISIBLE = tfMax == 0 or timeframe.in_seconds(timeframe.period) <= tfMax * 60
+EXACT   = anchor != "Bar open"
+
+// ---- read "HHMM-HHMM" (with or without a :days suffix) ----------------------
+// Returns the open as minutes-from-midnight and the length in minutes. A window
+// whose two sides are equal, and "0000-2400", both mean a full 24 hours.
+f_parse(string s) =>
+    int sm  = na
+    int dur = na
+    core = array.get(str.split(s, ":"), 0)
+    parts = str.split(core, "-")
+    if array.size(parts) == 2
+        a = array.get(parts, 0)
+        b = array.get(parts, 1)
+        if str.length(a) >= 4 and str.length(b) >= 4
+            ah = str.tonumber(str.substring(a, 0, 2))
+            am = str.tonumber(str.substring(a, 2, 4))
+            bh = str.tonumber(str.substring(b, 0, 2))
+            bm = str.tonumber(str.substring(b, 2, 4))
+            if not na(ah) and not na(am) and not na(bh) and not na(bm)
+                int m1 = int(ah) * 60 + int(am)
+                int m2 = int(bh) * 60 + int(bm)
+                if m1 >= 0 and m1 < 1440 and m2 >= 0 and m2 <= 1440
+                    int d = (m2 - m1 + 1440) % 1440
+                    sm  := m1
+                    dur := d == 0 ? 1440 : d
+    [sm, dur]
+
+// ---- a :days suffix inside the window box overrides the days input ---------
+f_days(string s, string fallback) =>
+    p = str.split(s, ":")
+    array.size(p) == 2 and str.length(array.get(p, 1)) > 0 ? array.get(p, 1) : fallback
+
+// ---- the exact epoch of an open, on the calendar day t falls on (+/- shift) --
+// The shift is applied to a NOON probe and the wall-clock time is then rebuilt
+// on the resulting date, so a 23-hour or 25-hour day can never push the answer
+// onto the wrong date and DST is resolved for the date that is actually used.
+f_openOn(int t, string tz, int sm, int dayShift) =>
+    int probe = timestamp(tz, year(t, tz), month(t, tz), dayofmonth(t, tz), 12, 0, 0) + dayShift * 86400000
+    timestamp(tz, year(probe, tz), month(probe, tz), dayofmonth(probe, tz), int(sm / 60), sm % 60, 0)
+
+// ---- the exact epoch of the close belonging to that open --------------------
+f_closeOf(int openT, string tz, int sm, int dur) =>
+    int em    = (sm + dur) % 1440
+    int shift = sm + dur >= 1440 ? 1 : 0
+    int probe = timestamp(tz, year(openT, tz), month(openT, tz), dayofmonth(openT, tz), 12, 0, 0) + shift * 86400000
+    timestamp(tz, year(probe, tz), month(probe, tz), dayofmonth(probe, tz), int(em / 60), em % 60, 0)
+
+f_dayOk(int openT, string tz, string days) =>
+    str.contains(days, str.tostring(dayofweek(openT, tz)))
+
+// ---- which instance does THIS bar belong to? --------------------------------
+// A bar belongs to an instance when the bar's own span overlaps the session's
+// span: bar_open < session_close and bar_close > session_open. That is what
+// catches a session that opens or closes inside a bar. Today's instance is
+// tested first, yesterday's second — which is what resolves a window that
+// crosses midnight without ever matching two instances at once.
+f_active(int t, int tc, string tz, int sm, int dur, string days) =>
+    int aS = na
+    int aE = na
+    o0 = f_openOn(t, tz, sm, 0)
+    c0 = f_closeOf(o0, tz, sm, dur)
+    if t < c0 and tc > o0 and f_dayOk(o0, tz, days)
+        aS := o0
+        aE := c0
+    if na(aS)
+        o1 = f_openOn(t, tz, sm, -1)
+        c1 = f_closeOf(o1, tz, sm, dur)
+        if t < c1 and tc > o1 and f_dayOk(o1, tz, days)
+            aS := o1
+            aE := c1
+    [aS, aE]
+
+// ---- the next open strictly after a given moment ---------------------------
+f_nextOpen(int fromT, string tz, int sm, string days) =>
+    int nx = na
+    for k = 0 to 8
+        o = f_openOn(fromT, tz, sm, k)
+        if o > fromT and f_dayOk(o, tz, days)
+            nx := o
+            break
+    nx
+
+// ---- presets ----------------------------------------------------------------
+f_preset(string p, int i, bool uOn, string uNm, string uWn) =>
+    bool   o = uOn
+    string n = uNm
+    string w = uWn
+    if p == PR_ICT
+        o := i < 4
+        n := i == 0 ? "Asia" : i == 1 ? "London" : i == 2 ? "NY AM" : i == 3 ? "NY PM" : n
+        w := i == 0 ? "2000-0000" : i == 1 ? "0200-0500" : i == 2 ? "0700-1000" : i == 3 ? "1300-1600" : w
+    else if p == PR_FX
+        o := i < 4
+        n := i == 0 ? "Sydney" : i == 1 ? "Tokyo" : i == 2 ? "London" : i == 3 ? "New York" : n
+        w := i == 0 ? "1700-0200" : i == 1 ? "1900-0400" : i == 2 ? "0300-1130" : i == 3 ? "0800-1700" : w
+    else if p == PR_CRT
+        o := i < 3
+        n := i == 0 ? "CRT 1AM" : i == 1 ? "CRT 9AM" : i == 2 ? "CRT 5PM" : n
+        w := i == 0 ? "0100-0200" : i == 1 ? "0900-1000" : i == 2 ? "1700-1800" : w
+    [o, n, w]
+
+// ---- label text -------------------------------------------------------------
+f_lblTxt(string name, bool isOpen, int t) =>
+    clock = str.format_time(t, lblFmt, LTZ)
+    word  = isOpen ? oWord : cWord
+    lblWhat == "Time" ? clock : lblWhat == "Name" ? name : lblWhat == "Name + time" ? name + "  " + clock : name + " " + word + "  " + clock
+
+f_mkLbl(int x, string txt, color col) =>
+    bg = lblSkin == "Filled" ? col : lblSkin == "Chip" ? chart.bg_color : TRANSP
+    tc = lblSkin == "Filled" ? lblTxtC : col
+    label.new(x, lblPos == "Bottom" ? low : high, txt, xloc = xloc.bar_time, yloc = lblPos == "Bottom" ? yloc.belowbar : yloc.abovebar, style = lblPos == "Bottom" ? label.style_label_up : label.style_label_down, color = bg, textcolor = tc, size = f_sz(lblSz))
+
+f_wipe(Inst it) =>
+    if not na(it)
+        line.delete(it.lnO)
+        line.delete(it.lnC)
+        line.delete(it.lnH)
+        line.delete(it.lnL)
+        line.delete(it.lnM)
+        label.delete(it.lbO)
+        label.delete(it.lbC)
+        box.delete(it.bx)
+
+// ===================== BUILD THE SIX SESSIONS ================================
+var array<Sess> SS = array.new<Sess>()
+
+f_add(array<Sess> arr, int slot, bool on, string nm, string wn, string dy, color cl) =>
+    [o, n, w] = f_preset(preset, slot, on, nm, wn)
+    [sm, dur] = f_parse(w)
+    arr.push(Sess.new(on = o and not na(sm), name = n, win = w, days = f_days(w, dy), col = cl, sm = sm, dur = dur, bad = o and na(sm), insts = array.new<Inst>()))
+
+if barstate.isfirst
+    f_add(SS, 0, s1On, s1Nm, s1Wn, s1Dy, s1Cl)
+    f_add(SS, 1, s2On, s2Nm, s2Wn, s2Dy, s2Cl)
+    f_add(SS, 2, s3On, s3Nm, s3Wn, s3Dy, s3Cl)
+    f_add(SS, 3, s4On, s4Nm, s4Wn, s4Dy, s4Cl)
+    f_add(SS, 4, s5On, s5Nm, s5Wn, s5Dy, s5Cl)
+    f_add(SS, 5, s6On, s6Nm, s6Wn, s6Dy, s6Cl)
+
+// ===================== THE ENGINE ============================================
+// Vertical marks run from this bar's low to its high and are extended both
+// ways, so their endpoints stay inside the price range and no drawing can drag
+// the chart's autoscale.
+f_vline(int x, color col, string sty, int wid) =>
+    line.new(x, low - syminfo.mintick, x, high + syminfo.mintick, xloc = xloc.bar_time, extend = extend.both, color = col, style = f_ls(sty), width = wid)
+
+// TradingView throws away every drawing an unfinished bar made on its previous
+// tick, so both draw routines are idempotent — they delete what they are
+// holding and re-issue it — and both are re-run on every tick of the bar they
+// belong to. Exactly one mark survives per event, live and historical alike.
+f_drawOpen(Sess s) =>
+    if VISIBLE and not na(s.cur)
+        int x = EXACT ? s.curS : time
+        line.delete(s.cur.lnO)
+        label.delete(s.cur.lbO)
+        box.delete(s.cur.bx)
+        s.cur.lnO := na
+        s.cur.lbO := na
+        s.cur.bx  := na
+        if showO
+            s.cur.lnO := f_vline(x, s.col, oStyle, oWidth)
+        if showL and lblOn != "Close only"
+            s.cur.lbO := f_mkLbl(x, f_lblTxt(s.name, true, s.curS), s.col)
+        if showB
+            s.cur.bx := box.new(x, nz(s.hi, high), x, nz(s.lo, low), xloc = xloc.bar_time, border_color = boxBrd ? s.col : TRANSP, border_width = 1, bgcolor = color.new(s.col, boxFade))
+
+f_drawClose(Sess s) =>
+    if VISIBLE and not na(s.mark)
+        int x  = EXACT ? s.mE : time
+        int xr = x + hlExt * TFMS
+        line.delete(s.mark.lnC)
+        label.delete(s.mark.lbC)
+        line.delete(s.mark.lnH)
+        line.delete(s.mark.lnL)
+        line.delete(s.mark.lnM)
+        s.mark.lnC := na
+        s.mark.lbC := na
+        s.mark.lnH := na
+        s.mark.lnL := na
+        s.mark.lnM := na
+        if showC
+            s.mark.lnC := f_vline(x, color.new(s.col, cFade), cStyle, cWidth)
+        if showL and lblOn != "Open only"
+            s.mark.lbC := f_mkLbl(x, f_lblTxt(s.name, false, s.mE), color.new(s.col, cFade))
+        if not na(s.mark.bx)
+            box.set_right(s.mark.bx, x)
+        if showHL and not na(s.mHi) and not na(s.mLo)
+            s.mark.lnH := line.new(s.mS, s.mHi, xr, s.mHi, xloc = xloc.bar_time, color = s.col, style = f_ls(hlStyle), width = 1)
+            s.mark.lnL := line.new(s.mS, s.mLo, xr, s.mLo, xloc = xloc.bar_time, color = s.col, style = f_ls(hlStyle), width = 1)
+        if showMid and not na(s.mHi) and not na(s.mLo)
+            s.mark.lnM := line.new(s.mS, (s.mHi + s.mLo) / 2, xr, (s.mHi + s.mLo) / 2, xloc = xloc.bar_time, color = color.new(s.col, 30), style = f_ls(midStyle), width = 1)
+
+f_openInst(Sess s, int aS, int aE) =>
+    Inst it = Inst.new()
+    s.curS  := aS
+    s.curE  := aE
+    s.hi    := high
+    s.lo    := low
+    s.pendO := true
+    s.pendC := true
+    s.cur   := it
+    s.oBar  := bar_index
+    s.insts.push(it)
+    while s.insts.size() > keepN
+        f_wipe(s.insts.shift())
+    f_drawOpen(s)
+
+f_closeInst(Sess s) =>
+    s.mark := s.cur
+    s.mS   := s.curS
+    s.mE   := s.curE
+    s.mHi  := s.hi
+    s.mLo  := s.lo
+    s.cBar := bar_index
+    f_drawClose(s)
+    s.cur  := na
+    s.curS := na
+    s.curE := na
+    s.hi   := na
+    s.lo   := na
+
+// Returns the alert text produced on this bar (empty when nothing happened).
+f_run(Sess s) =>
+    string msg = ""
+    if s.on
+        [aS, aE] = f_active(time, time_close, TZ, s.sm, s.dur, s.days)
+        // re-issue whatever this still-forming bar drew on an earlier tick
+        if s.oBar == bar_index
+            f_drawOpen(s)
+        if s.cBar == bar_index
+            f_drawClose(s)
+        // The close alert fires the moment the clock passes the close, not when
+        // the next bar happens to open — on a 4H chart those are up to four
+        // hours apart. alert.freq_once_per_bar keeps it to one message.
+        if s.pendC and not na(s.curE) and timenow >= s.curE
+            if alClose
+                msg := s.name + " " + str.upper(cWord) + " " + str.format_time(s.curE, lblFmt, LTZ) + " · " + syminfo.ticker + " " + timeframe.period
+            s.pendC := false
+        if not na(s.curS) and (na(aS) or aS != s.curS)
+            f_closeInst(s)
+        if not na(aS) and (na(s.curS) or aS != s.curS)
+            f_openInst(s, aS, aE)
+        if not na(s.curS)
+            s.hi := math.max(nz(s.hi, high), high)
+            s.lo := math.min(nz(s.lo, low), low)
+            if not na(s.cur)
+                if not na(s.cur.bx)
+                    box.set_top(s.cur.bx, s.hi)
+                    box.set_bottom(s.cur.bx, s.lo)
+                    box.set_right(s.cur.bx, EXACT ? int(math.min(time_close, s.curE)) : time)
+        // the open alert waits for the true minute in the same way, so a mid-bar
+        // open does not fire at the top of the bar that happens to contain it
+        if s.pendO and not na(s.curS) and timenow >= s.curS
+            if alOpen
+                msg := msg + (str.length(msg) > 0 ? "\n" : "") + s.name + " " + str.upper(oWord) + " " + str.format_time(s.curS, lblFmt, LTZ) + " · " + syminfo.ticker + " " + timeframe.period
+            s.pendO := false
+    msg
+
+string alertTxt = ""
+if SS.size() > 0
+    for i = 0 to SS.size() - 1
+        m = f_run(SS.get(i))
+        if str.length(m) > 0
+            alertTxt := alertTxt + (str.length(alertTxt) > 0 ? "\n" : "") + m
+if str.length(alertTxt) > 0
+    alert(alertTxt, alert.freq_once_per_bar)
+
+// ===================== NEXT-SESSION PROJECTION ===============================
+// Only on the last bar, and only when the event is close enough that TradingView
+// can still place a drawing there (its future limit is 500 bars).
+if barstate.islast and SS.size() > 0
+    for i = 0 to SS.size() - 1
+        s = SS.get(i)
+        line.delete(s.proj)
+        label.delete(s.projL)
+        if projOn and VISIBLE and s.on
+            int px = na(s.curS) ? f_nextOpen(time_close, TZ, s.sm, s.days) : s.curE
+            bool isOpenEvt = na(s.curS)
+            if not na(px) and px > time and px - time <= 480 * TFMS
+                s.proj := line.new(px, low - syminfo.mintick, px, high + syminfo.mintick, xloc = xloc.bar_time, extend = extend.both, color = color.new(s.col, 45), style = line.style_dotted, width = 1)
+                if projLbl and showL
+                    bg = lblSkin == "Filled" ? color.new(s.col, 25) : lblSkin == "Chip" ? chart.bg_color : TRANSP
+                    tc = lblSkin == "Filled" ? lblTxtC : color.new(s.col, 20)
+                    s.projL := label.new(px, lblPos == "Bottom" ? low - PAD : high + PAD, f_lblTxt(s.name, isOpenEvt, px), xloc = xloc.bar_time, yloc = yloc.price, style = lblPos == "Bottom" ? label.style_label_up : label.style_label_down, color = bg, textcolor = tc, size = f_sz(lblSz))
+
+// ===================== STATUS TABLE ==========================================
+// The point of this table is that the numbers are checkable: it prints the exact
+// open and close of the instance that is running (or the next one due), in the
+// label clock, plus a live countdown to the next transition.
+f_cd(int ms) =>
+    string outp = "—"
+    if not na(ms) and ms >= 0
+        int t = int(ms / 1000)
+        outp := f_2(int(t / 3600)) + ":" + f_2(int(t % 3600 / 60)) + ":" + f_2(t % 60)
+    outp
+
+var table tb = na
+if tblOn and barstate.islast and SS.size() == 6
+    if na(tb)
+        tb := table.new(f_pos(tblPos), 5, 8, border_width = 1, border_color = color.new(SLATE, 60), frame_width = 1, frame_color = color.new(SLATE, 40))
+    hdr = f_sz(tblSz)
+    table.cell(tb, 0, 0, "Session", text_size = hdr, text_color = color.white, bgcolor = tblHd, text_halign = text.align_left)
+    table.cell(tb, 1, 0, "Now",     text_size = hdr, text_color = color.white, bgcolor = tblHd)
+    table.cell(tb, 2, 0, "Opens",   text_size = hdr, text_color = color.white, bgcolor = tblHd)
+    table.cell(tb, 3, 0, "Closes",  text_size = hdr, text_color = color.white, bgcolor = tblHd)
+    table.cell(tb, 4, 0, "T-minus", text_size = hdr, text_color = color.white, bgcolor = tblHd)
+    for i = 0 to 5
+        s = SS.get(i)
+        int r = i + 1
+        string nm = ""
+        string st = ""
+        string op = ""
+        string cl = ""
+        string cd = ""
+        color  sc = tblTx
+        if s.bad
+            nm := str.tostring(i + 1) + " · unreadable window"
+            st := "check"
+            sc := CORAL
+        else if s.on
+            bool live = not na(s.curS)
+            int nO = live ? s.curS : f_nextOpen(timenow, TZ, s.sm, s.days)
+            int nC = live ? s.curE : f_closeOf(nO, TZ, s.sm, s.dur)
+            nm := s.name
+            st := live ? "OPEN" : "closed"
+            sc := live ? EMERALD : SLATE
+            op := na(nO) ? "—" : str.format_time(nO, "HH:mm", LTZ)
+            cl := na(nC) ? "—" : str.format_time(nC, "HH:mm", LTZ)
+            cd := f_cd(live ? s.curE - timenow : nO - timenow)
+        table.cell(tb, 0, r, nm, text_size = hdr, text_color = (s.on or s.bad) ? s.col : tblTx, bgcolor = tblBg, text_halign = text.align_left)
+        table.cell(tb, 1, r, st, text_size = hdr, text_color = sc,    bgcolor = tblBg)
+        table.cell(tb, 2, r, op, text_size = hdr, text_color = tblTx, bgcolor = tblBg)
+        table.cell(tb, 3, r, cl, text_size = hdr, text_color = tblTx, bgcolor = tblBg)
+        table.cell(tb, 4, r, cd, text_size = hdr, text_color = tblTx, bgcolor = tblBg)
+    ftz = "sessions " + TZ + (LTZ == TZ ? "" : " · clock " + LTZ)
+    fnote = not VISIBLE ? "marks hidden above " + str.tostring(tfMax) + "m" : ftz
+    table.cell(tb, 0, 7, fnote, text_size = hdr, text_color = tblTx, bgcolor = tblBg, text_halign = text.align_left)
+    table.cell(tb, 1, 7, "", text_size = hdr, bgcolor = tblBg)
+    table.cell(tb, 2, 7, "", text_size = hdr, bgcolor = tblBg)
+    table.cell(tb, 3, 7, "now", text_size = hdr, text_color = color.new(tblTx, 40), bgcolor = tblBg)
+    table.cell(tb, 4, 7, str.format_time(timenow, "HH:mm:ss", LTZ), text_size = hdr, text_color = PURPLE, bgcolor = tblBg)
