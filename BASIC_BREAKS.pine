@@ -38,15 +38,17 @@
 //   A turn also needs AT LEAST TWO OPPOSING CANDLES — at a high, a bullish
 //   candle handing over to a bearish one; at a low, a bearish handing over to a
 //   bullish. More than two is fine, two is the minimum, one is never enough.
-//   The level is the body extreme of that pair, and the pair has to top (or
-//   bottom) the bars either side of it.
+//   The level is the body extreme of that pair, and the one bar either side of
+//   the pair has to stay inside it. That is the smallest turn there is, which is
+//   the point: every turning point counts no matter how small, so there is no
+//   setting to raise and nothing to tune away.
 //
 //   The sequence is abandoned if price closes back below the low the rally came
 //   off — that setup is done. The levels still in it were never broken, so they
 //   go BACK into the pool for the next attempt.
 //
-// Non-repainting: a turn is only CONFIRMED once the bars to its right have
-// closed, and a break is judged once, at bar close.
+// Non-repainting: a turn is only CONFIRMED one bar after the pair has closed,
+// and a break is judged once, at bar close.
 //
 // THE ENTRY sits on the Nth break — the 2nd by default. The signal is made the
 // moment that candle CLOSES; the marker is drawn on the NEXT candle, which is
@@ -57,11 +59,10 @@
 // mirror. A zone is RETIRED the moment price closes through the far edge, and
 // only the last N live ones stay on the chart.
 // =============================================================================
-indicator("Basic Breaks", "BREAKS", overlay = true, max_bars_back = 500, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
+indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
 
 // ===================== STRUCTURE =============================================
 gS = "Structure"
-pvLen = input.int(1, "Bars clear either side of a turn", minval = 1, maxval = 10, group = gS, tooltip = "A turn is two opposing candles — a bullish handing over to a bearish at a high, the mirror at a low. This is how many bars either side of that PAIR have to stay inside it for the turn to count.\n\n1 (default) — the minimum, so a two-candle turn counts. Every turning point matters no matter how small; on the worked example the levels at 4431, 4443 and 4459 sit in two- and three-candle turns and anything higher loses them.\n\nRaise it only if it is picking up turns you would not count."
 buyOn = input.bool(true, "Buy side  —  highs of a decline, broken upward", group = gS)
 sellOn = input.bool(false, "Sell side  —  lows of a rally, broken downward", group = gS, tooltip = "OFF by default. This is the mirror image: the lows a rally leaves behind, taken back downward, for sell setups. Reading buy setups off a decline, it is nothing but clutter running down the leg.")
 minGap = input.float(0.8, "Levels closer than (× ATR) are the same level", minval = 0.0, maxval = 5.0, step = 0.1, group = gS, tooltip = "A small corner inside a leg is a genuine lower high, so no structural rule removes it — but it takes a number that belongs to the real level above it, which is what puts a wrong 4th on the chart.\n\nWhen a new high lands within this distance of the one already on top, the NEWER, lower one supersedes it rather than sitting beside it.\n\n0.8 is a narrow window: on the worked example 0.8 drops the stray corner and keeps all six real levels, while 1.0 starts eating the 4th. Set to 0 to keep every corner.")
@@ -188,30 +189,33 @@ var array<bool> zBuy = array.new<bool>()
 float atr14 = ta.atr(14)
 
 // ===================== TURNING POINTS ========================================
-// BODIES, NOT WICKS. The pair sits at offsets [pvLen + 1] (the first candle) and
-// [pvLen] (the second); pvLen bars either side of the pair have to stay inside
-// it. ta.highest / ta.lowest carry those two windows so there is no variable-
-// offset loop: `hiRight` is the highest body top over offsets 0..pvLen-1, and
-// the same series read pvLen+2 bars back is the window on the other side.
+// BODIES, NOT WICKS, and a turn is TWO OPPOSING CANDLES.
+//
+//   offset  3    2    1    0
+//           |    \____/    |
+//         clear   the pair  clear
+//
+// The pair is a bullish candle handing over to a bearish one (the mirror at a
+// low). The level is the higher of their two body tops, and the bar either side
+// has to stay inside it. A longer run still works — the hand-over is then
+// between the last candle of the run and the first of the reply.
+//
+// Every offset here is a CONSTANT. Driving them off an input is what killed the
+// last build: Pine cannot work out the referencing length of a user variable
+// indexed by an input, so it threw at runtime and every drawing came off the
+// chart while the script still looked like it was loaded.
 float bodyHi = math.max(open, close)
 float bodyLo = math.min(open, close)
 bool cUp = close > open
 bool cDn = close < open
 
-float hiRight = ta.highest(bodyHi, pvLen)
-float loRight = ta.lowest(bodyLo, pvLen)
-float hiLeft = hiRight[pvLen + 2]
-float loLeft = loRight[pvLen + 2]
+float pairHi = math.max(bodyHi[2], bodyHi[1])
+float pairLo = math.min(bodyLo[2], bodyLo[1])
+int pairHiB = bodyHi[2] >= bodyHi[1] ? bar_index - 2 : bar_index - 1
+int pairLoB = bodyLo[2] <= bodyLo[1] ? bar_index - 2 : bar_index - 1
 
-// the body extreme of the pair, and the bar of the two that actually holds it
-float pairHi = math.max(bodyHi[pvLen + 1], bodyHi[pvLen])
-float pairLo = math.min(bodyLo[pvLen + 1], bodyLo[pvLen])
-int pairHiB = bodyHi[pvLen + 1] >= bodyHi[pvLen] ? bar_index - pvLen - 1 : bar_index - pvLen
-int pairLoB = bodyLo[pvLen + 1] <= bodyLo[pvLen] ? bar_index - pvLen - 1 : bar_index - pvLen
-
-// bullish handing over to bearish, topping both windows — and the mirror
-bool okHi = cUp[pvLen + 1] and cDn[pvLen] and not na(hiLeft) and not na(hiRight) and pairHi > hiLeft and pairHi > hiRight
-bool okLo = cDn[pvLen + 1] and cUp[pvLen] and not na(loLeft) and not na(loRight) and pairLo < loLeft and pairLo < loRight
+bool okHi = cUp[2] and cDn[1] and pairHi > bodyHi[3] and pairHi > bodyHi[0]
+bool okLo = cDn[2] and cUp[1] and pairLo < bodyLo[3] and pairLo < bodyLo[0]
 
 float rawPh = okHi ? pairHi : na
 float rawPl = okLo ? pairLo : na

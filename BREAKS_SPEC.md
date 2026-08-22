@@ -185,3 +185,21 @@ The entry marker was hung off the break candle's **low**. On a wide break candle
 that is a long way under the price actually being taken, which is why it looked
 "that far". It now sits `entPad × ATR` off the break candle's **close** — the
 entry level itself.
+
+### The blank chart  (v2.2)
+
+v2.1 compiled, loaded, showed its defaults in the status line — and drew nothing
+at all. That is a Pine **runtime** error, not a compile one: the script keeps its
+title and settings and every line, label and box is dropped.
+
+The cause was `hiRight[pvLen + 2]` — a **user-defined** variable indexed by an
+offset derived from an input. Pine cannot determine the referencing length of a
+user variable that way, and `max_bars_back` on `indicator()` only covers built-in
+series, not user variables, so setting it did not help.
+
+Fix: the turn is two candles with one bar clear either side, so every offset is a
+constant — `bodyHi[3] … bodyHi[0]`, pair at `[2]` and `[1]`. The `pvLen` input is
+gone with it (it could only ever have been raised to lose the small turns that
+matter), and so is `max_bars_back`.
+
+Rule of thumb for this file: never index a user-defined variable by an input.
