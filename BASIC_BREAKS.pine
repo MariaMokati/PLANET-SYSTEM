@@ -36,6 +36,8 @@ indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_l
 // ===================== STRUCTURE =============================================
 gSt = "Structure"
 pvLen = input.int(5, "Swing length", minval = 1, group = gSt, tooltip = "Bars either side of a swing. This decides which highs and lows count as the impulse's structure.")
+capOn = input.bool(true, "Stop after the Nth break", group = gSt, tooltip = "On (default): a sequence runs 1st, 2nd, 3rd and then stops. Anything the pullback takes beyond that is not drawn — the sequence is finished. Off: it keeps counting 4th, 5th, …")
+capN = input.int(3, "…the Nth", minval = 1, maxval = 20, group = gSt)
 minLv = input.int(2, "A stack counts once it has N levels", minval = 1, maxval = 10, group = gSt, tooltip = "A single stray pivot is not a sequence. Requiring 2 means an impulse must have made at least two higher lows (or two lower highs) before its breaks are numbered. Set to 1 to number everything.")
 sellOn = input.bool(true, "Track HIGHER LOWS  (up impulse → sell setups)", group = gSt, tooltip = "The HLs an up impulse leaves behind, broken downward by the pullback.")
 buyOn = input.bool(true, "Track LOWER HIGHS  (down impulse → buy setups)", group = gSt, tooltip = "The LHs a down impulse leaves behind, broken upward by the pullback.")
@@ -139,6 +141,13 @@ var bool hlOk = false
 var bool lhOk = false
 var int nHL = 0
 var int nLH = 0
+// a swing is only PENDING until the next swing confirms what it was
+var float pendHP = na
+var int pendHB = na
+var float pendLP = na
+var int pendLB = na
+var float prevPH = na
+var float prevPL = na
 
 var array<line> brkLn = array.new<line>()
 var array<label> brkLb = array.new<label>()
@@ -159,43 +168,55 @@ float rawPl = ta.pivotlow(pvLen, pvLen)
 float rawPh = ta.pivothigh(pvLen, pvLen)
 
 // ---- build the stacks ------------------------------------------------------
-// A HIGHER low continues the up impulse: push it, and the pullback count starts
-// over because the impulse is still going. A LOWER low means that structure is
-// finished — throw the stack away and begin again from this low.
-if not na(rawPl)
+// A pivot high becomes an impulse LOWER HIGH only once the NEXT pivot low comes
+// in BELOW the previous pivot low. A LOWER LOW is what confirms it. A pullback
+// high is followed by a HIGHER low instead, so it is discarded and never enters
+// the stack.
+//
+// That one rule is the difference between marking the impulse's structure and
+// marking every wiggle: without it, a rally's own pullback highs land in the
+// stack and get numbered as breaks the moment the rally continues.
+//
+// Compared against the PREVIOUS PIVOT, not a running all-time extreme — an
+// all-time extreme goes stale in a drifting market and that side stops
+// confirming anything at all.
+if not na(rawPh)
     int b = bar_index - pvLen
-    if array.size(hlP) == 0 or rawPl > array.get(hlP, array.size(hlP) - 1)
-        array.push(hlP, rawPl)
-        array.push(hlB, b)
+    if not na(prevPH) and rawPh > prevPH
+        // higher high: the pending low was a genuine HIGHER LOW of the impulse
+        if not na(pendLP) and (array.size(hlP) == 0 or pendLP > array.get(hlP, array.size(hlP) - 1))
+            array.push(hlP, pendLP)
+            array.push(hlB, pendLB)
+            if array.size(hlP) >= minLv
+                hlOk := true
         nHL := 0
-        if array.size(hlP) >= minLv
-            hlOk := true
     else
-        array.clear(hlP)
-        array.clear(hlB)
-        array.push(hlP, rawPl)
-        array.push(hlB, b)
-        nHL := 0
-        hlOk := minLv <= 1
+        // lower high: whatever low was pending belonged to a pullback
+        pendLP := na
+        pendLB := na
+    pendHP := rawPh
+    pendHB := b
+    prevPH := rawPh
     while array.size(hlP) > stackMax
         array.shift(hlP)
         array.shift(hlB)
 
-if not na(rawPh)
+if not na(rawPl)
     int b = bar_index - pvLen
-    if array.size(lhP) == 0 or rawPh < array.get(lhP, array.size(lhP) - 1)
-        array.push(lhP, rawPh)
-        array.push(lhB, b)
+    if not na(prevPL) and rawPl < prevPL
+        // lower low: the pending high was a genuine LOWER HIGH of the impulse
+        if not na(pendHP) and (array.size(lhP) == 0 or pendHP < array.get(lhP, array.size(lhP) - 1))
+            array.push(lhP, pendHP)
+            array.push(lhB, pendHB)
+            if array.size(lhP) >= minLv
+                lhOk := true
         nLH := 0
-        if array.size(lhP) >= minLv
-            lhOk := true
     else
-        array.clear(lhP)
-        array.clear(lhB)
-        array.push(lhP, rawPh)
-        array.push(lhB, b)
-        nLH := 0
-        lhOk := minLv <= 1
+        pendHP := na
+        pendHB := na
+    pendLP := rawPl
+    pendLB := b
+    prevPL := rawPl
     while array.size(lhP) > stackMax
         array.shift(lhP)
         array.shift(lhB)
@@ -224,6 +245,8 @@ if evalOk and sellOn and hlOk
         float p = array.pop(hlP)
         int b = array.pop(hlB)
         nHL := nHL + 1
+        if capOn and nHL > capN
+            break
         firedAny := true
         lastNo := nHL
         lastLvl := p
@@ -245,6 +268,8 @@ if evalOk and buyOn and lhOk
         float p = array.pop(lhP)
         int b = array.pop(lhB)
         nLH := nLH + 1
+        if capOn and nLH > capN
+            break
         firedAny := true
         lastNo := nLH
         lastLvl := p
