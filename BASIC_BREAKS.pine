@@ -32,7 +32,11 @@
 // Non-repainting: pivots are CONFIRMED (placed `length` bars back) and a break
 // is judged once, at bar close.
 //
-// Breaks only. Entry and the demand zone come next.
+// THE ENTRY sits on the Nth break — the 2nd by default. The signal is made the
+// moment that candle CLOSES; the marker is drawn on the NEXT candle, which is
+// the one actually taken.
+//
+// The demand zone comes next.
 // =============================================================================
 indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500)
 
@@ -56,9 +60,26 @@ lnW = input.int(1, "Line width", minval = 1, maxval = 4, group = gD)
 lblSz = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gD)
 lblFmt = input.string("1st Break", "Label", options = ["1st Break", "1st", "1"], group = gD)
 
+// ===================== ENTRY =================================================
+gE = "Entry"
+entOn = input.bool(true, "Mark the entry", group = gE, tooltip = "The signal is made the moment the candle that makes the Nth break CLOSES. The marker is placed on the NEXT candle — the one actually taken.")
+entAt = input.int(2, "…on which break", minval = 1, maxval = 20, group = gE, tooltip = "2 by default: the entry is on the second break.")
+entShift = input.int(1, "Marker sits N candles after the break candle", minval = 0, maxval = 10, group = gE)
+entTxtBuy = input.string("E: Long", "Buy label", inline = "et", group = gE)
+entTxtSell = input.string("E: Short", "Sell label", inline = "et", group = gE)
+entShape = input.string("Triangle", "Marker", options = ["Triangle", "Circle", "Arrow", "Diamond"], group = gE)
+entSz = input.string("Normal", "Marker size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gE)
+entTxtSz = input.string("Normal", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gE)
+entBuyC = input.color(#00BF71, "Buy", inline = "ec", group = gE)
+entSellC = input.color(#FF4F87, "Sell", inline = "ec", group = gE)
+entPad = input.float(0.35, "Gap from the candle (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gE)
+
 // ===================== HELPERS ===============================================
 f_size(string s) =>
-    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : size.large
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : s == "Huge" ? size.huge : size.large
+
+f_eshape(string sh, bool up) =>
+    sh == "Circle" ? label.style_circle : sh == "Diamond" ? label.style_diamond : sh == "Arrow" ? (up ? label.style_arrowup : label.style_arrowdown) : (up ? label.style_triangleup : label.style_triangledown)
 
 f_ord(int n) =>
     int r100 = n % 100
@@ -119,6 +140,9 @@ var float rHigh = na
 
 var array<line> dLn = array.new<line>()
 var array<label> dLb = array.new<label>()
+var array<label> eLb = array.new<label>()
+
+float atr14 = ta.atr(14)
 
 float rawPh = ta.pivothigh(pvLen, pvLen)
 float rawPl = ta.pivotlow(pvLen, pvLen)
@@ -136,6 +160,19 @@ f_mark(int n, float p, int b, bool up) =>
         while array.size(dLb) > 480
             label.delete(array.shift(dLb))
     array.size(dLn)
+
+// The break candle has CLOSED — that is the signal. The marker goes on the next
+// candle, the one taken. Two labels so the text is plain coloured type rather
+// than a filled block.
+f_entry(bool isBuy) =>
+    float pad = atr14 * entPad
+    color col = isBuy ? entBuyC : entSellC
+    int x = bar_index + entShift
+    array.push(eLb, label.new(x, isBuy ? low - pad : high + pad, "", xloc = xloc.bar_index, yloc = yloc.price, style = f_eshape(entShape, isBuy), color = col, textcolor = col, size = f_size(entSz)))
+    array.push(eLb, label.new(x, isBuy ? low - pad * 2.4 : high + pad * 2.4, isBuy ? entTxtBuy : entTxtSell, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = col, size = f_size(entTxtSz)))
+    while array.size(eLb) > 200
+        label.delete(array.shift(eLb))
+    array.size(eLb)
 
 // ===================== BUILD THE LIVE POOLS ==================================
 if not na(rawPh)
@@ -157,6 +194,8 @@ bool fired = false
 int lastNo = 0
 float lastLvl = na
 bool lastUp = false
+bool entBuy = false
+bool entSell = false
 
 // ===================== BUY SIDE ==============================================
 if barstate.isconfirmed and buyOn
@@ -207,6 +246,10 @@ if barstate.isconfirmed and buyOn
             lastLvl := p
             lastUp := true
             f_mark(nUp, p, b, true)
+            if nUp == entAt
+                entBuy := true
+                if entOn
+                    f_entry(true)
             k := f_newest(upP, true)
         if array.size(upP) == 0
             upOn := false
@@ -255,6 +298,10 @@ if barstate.isconfirmed and sellOn
             lastLvl := p
             lastUp := false
             f_mark(nDn, p, b, false)
+            if nDn == entAt
+                entSell := true
+                if entOn
+                    f_entry(false)
             k := f_newest(dnP, false)
         if array.size(dnP) == 0
             dnOn := false
@@ -266,8 +313,14 @@ if barstate.islast and histBars > 0
         line.delete(array.shift(dLn))
     while array.size(dLb) > 0 and label.get_x(array.get(dLb, 0)) < bar_index - histBars
         label.delete(array.shift(dLb))
+    while array.size(eLb) > 0 and label.get_x(array.get(eLb, 0)) < bar_index - histBars
+        label.delete(array.shift(eLb))
 
 // ===================== ALERTS ================================================
 alertcondition(fired, "Any break", "Basic Breaks — a level was broken")
+alertcondition(entBuy, "BUY entry", "Basic Breaks — BUY: the break candle has closed, enter on the next candle")
+alertcondition(entSell, "SELL entry", "Basic Breaks — SELL: the break candle has closed, enter on the next candle")
 if fired
     alert(f_ord(lastNo) + " Break — " + (lastUp ? "high" : "low") + " @ " + str.tostring(math.round_to_mintick(lastLvl)), alert.freq_once_per_bar_close)
+if entBuy or entSell
+    alert((entBuy ? "BUY" : "SELL") + " — " + f_ord(entAt) + " break has closed, enter on the next candle", alert.freq_once_per_bar_close)
