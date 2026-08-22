@@ -31,7 +31,7 @@ indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_l
 
 // ===================== STRUCTURE =============================================
 gSt = "Structure"
-pvLen = input.int(5, "Swing length", minval = 1, group = gSt, tooltip = "Bars either side of a turning point. This is the only dial over what counts as a turning point at all.")
+pvLen = input.int(1, "Swing length  —  1 = EVERY turning point, no matter how small", minval = 1, group = gSt, tooltip = "Bars that must be clear either side of a turning point.\n\n1 (default) — every turning point counts, however small. A two-bar bounce inside a decline is a level.\n\nAnything higher THROWS SMALL TURNING POINTS AWAY. At 5, a bounce needs five bars clear on each side to exist at all, so small ones are never levels and never get numbered — which is why they were missing from the chart entirely.")
 allTurns = input.bool(true, "Mark EVERY turning point", group = gSt, tooltip = "On (default): every confirmed pivot becomes a level, so nothing price can break is missing from the sequence.\n\nOff: only pivots that extend the structure (a higher low, a lower high) become levels. That is what left gaps — a turning point price later broke was never a level, so every number after it shifted down one.")
 minLv = input.int(2, "A stack counts once it has N levels", minval = 1, maxval = 10, group = gSt, tooltip = "A single stray pivot is not a sequence. Requiring 2 means at least two levels must exist before breaks are numbered. Set to 1 to number everything.")
 sellOn = input.bool(true, "Track LOWS  (broken downward → sell setups)", group = gSt)
@@ -48,7 +48,7 @@ stackShow = input.bool(true, "Show the levels still standing", group = gLs, tool
 stackHLC = input.color(color.new(#089981, 40), "Lows", inline = "sc", group = gLs)
 stackLHC = input.color(color.new(#F23645, 40), "Highs", inline = "sc", group = gLs)
 stackTag = input.bool(true, "Number them from the top", group = gLs, tooltip = "Labels the standing levels 1 · 2 · 3 from the top down, so you can see in advance which will be the 1st, 2nd and 3rd break.")
-stackMax = input.int(12, "Track at most N levels per stack", minval = 2, maxval = 50, group = gLs)
+stackMax = input.int(50, "Track at most N levels per stack", minval = 2, maxval = 300, group = gLs, tooltip = "When the stack is full the OLDEST level is dropped — and in a decline the oldest is the HIGHEST, the one furthest from price. Set this too low and the level a big move eventually reaches has already been thrown away. 50 by default; raise it if a deep move stops being numbered part-way.")
 
 // ===================== VISUALS ===============================================
 gVs = "Visuals"
@@ -67,7 +67,7 @@ lblFmt = input.string("1st Break", "Label text", options = ["1st Break", "1st", 
 lblPos = input.string("Centre", "Label sits", options = ["Left", "Centre", "Right"], group = gVs)
 lblOff = input.float(0.25, "Label offset (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gVs)
 lblSzIn = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gVs)
-keepN = input.int(24, "Keep last N break marks", minval = 1, maxval = 200, group = gVs)
+keepN = input.int(80, "Keep last N break marks", minval = 1, maxval = 500, group = gVs, tooltip = "With every turning point counting there are far more marks than before. Use \"Hide breaks past the Nth\" and the last-N-bars window above to control clutter rather than lowering this, or marks will vanish off the chart.")
 
 // ===================== ENTRY =================================================
 gEn = "Entry"
