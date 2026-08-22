@@ -18,8 +18,15 @@
 //   stack, so every number after it shifted down one and a genuine 2nd printed
 //   as a 3rd.
 //
-//   A sequence is finished when it has eaten the whole stack, or when the move
-//   turns and the other side breaks. Then the count starts again at 1st.
+//   A SEQUENCE numbers the turning points of the leg IMMEDIATELY BEFORE the
+//   move — a rally numbers what the decline left behind. Because levels are
+//   eaten newest-first, that has an exact form: every level in a sequence must
+//   be OLDER than the one before it. The moment a break takes a level NEWER
+//   than the last one numbered, the move is taking out structure it built
+//   itself, which is a different leg, so the count restarts at 1st.
+//
+//   The count is uncapped: 4th, 5th, 8th are all legitimate if the leg really
+//   left that many levels behind.
 //
 // Non-repainting: pivots are CONFIRMED (placed `length` bars back) and a break
 // is judged once at bar close. A wick through that closes back inside is a
@@ -67,7 +74,6 @@ lblFmt = input.string("1st Break", "Label text", options = ["1st Break", "1st", 
 lblPos = input.string("Centre", "Label sits", options = ["Left", "Centre", "Right"], group = gVs)
 lblOff = input.float(0.25, "Label offset (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gVs)
 lblSzIn = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gVs)
-keepN = input.int(500, "Keep last N break marks  (hard ceiling — leave at 500)", minval = 1, maxval = 500, group = gVs, tooltip = "NOT the clutter control. This is a hard ceiling that DELETES the oldest marks once it is exceeded, and TradingView cannot draw more than 500 lines anyway, so leave it at 500.\n\nSetting this low is what makes marks that were drawn correctly vanish from the chart later: at 10, only the ten most recent breaks survive and everything before them is gone. Use \"Only show breaks from the last N bars\" above instead.")
 
 // ===================== ENTRY =================================================
 gEn = "Entry"
@@ -153,6 +159,12 @@ f_brkUp(float lvl) =>
 f_xc(int x) =>
     na(x) ? bar_index : math.max(x, bar_index - 4000)
 
+// Hard ceiling on drawings, not a setting. TradingView itself cannot draw more
+// than 500 lines or labels, so there is no useful choice here — and when this
+// WAS a setting, a low value silently deleted marks that had been drawn
+// correctly, which read as the indicator failing to mark them at all.
+int keepN = 500
+
 atr14 = ta.atr(14)
 
 // ===================== THE TWO STACKS ========================================
@@ -166,6 +178,12 @@ var bool hlOk = false
 var bool lhOk = false
 var int nHL = 0
 var int nLH = 0
+// Creation bar of the last level numbered in the running sequence. A sequence
+// eats levels newest-first, so each one must be OLDER than the last. The moment
+// a break takes a level NEWER than that, the move has started on structure it
+// built itself — a different leg — and the count restarts at 1st.
+var int lastBhl = -1
+var int lastBlh = -1
 
 var array<line> brkLn = array.new<line>()
 var array<label> brkLb = array.new<label>()
@@ -298,8 +316,10 @@ if evalOk and sellOn and hlOk
         int b = array.get(hlB, gi)
         array.remove(hlP, gi)
         array.remove(hlB, gi)
+        if nHL > 0 and b >= lastBhl
+            nHL := 0
         nHL := nHL + 1
-        nLH := 0
+        lastBhl := b
         firedAny := true
         lastNo := nHL
         lastLvl := p
@@ -318,8 +338,10 @@ if evalOk and buyOn and lhOk
         int b = array.get(lhB, gj)
         array.remove(lhP, gj)
         array.remove(lhB, gj)
+        if nLH > 0 and b >= lastBlh
+            nLH := 0
         nLH := nLH + 1
-        nHL := 0
+        lastBlh := b
         firedAny := true
         lastNo := nLH
         lastLvl := p
