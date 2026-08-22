@@ -35,7 +35,11 @@ indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_l
 
 // ===================== STRUCTURE =============================================
 gSt = "Structure"
-pvLen = input.int(5, "Swing length", minval = 1, group = gSt, tooltip = "Bars either side of a swing. This decides which highs and lows count as the impulse's structure.")
+pvLen = input.int(10, "Swing length", minval = 1, group = gSt, tooltip = "Bars either side of a swing. THIS IS THE DIAL. It decides which highs and lows count as structure, and therefore which levels get numbered. Turn on the structure zigzag below, compare it to the structure you would draw by hand, and change this number until the two match.")
+zzOn = input.bool(true, "Show the structure it is using", group = gSt, tooltip = "Draws the exact swing sequence the numbering is built from, as a zigzag. If this line does not trace the same swings you would draw by hand, the swing length is wrong and nothing downstream can be right. This is the fastest way to tune it.")
+zzCol = input.color(color.new(#2962FF, 0), "Zigzag", inline = "zz", group = gSt)
+zzW = input.int(2, "width", minval = 1, maxval = 4, inline = "zz", group = gSt)
+zzLbl = input.bool(true, "Label HH / HL / LH / LL", group = gSt)
 capOn = input.bool(true, "Stop after the Nth break", group = gSt, tooltip = "On (default): a sequence runs 1st, 2nd, 3rd and then stops. Anything the pullback takes beyond that is not drawn — the sequence is finished. Off: it keeps counting 4th, 5th, …")
 capN = input.int(3, "…the Nth", minval = 1, maxval = 20, group = gSt)
 minLv = input.int(2, "A stack counts once it has N levels", minval = 1, maxval = 10, group = gSt, tooltip = "A single stray pivot is not a sequence. Requiring 2 means an impulse must have made at least two higher lows (or two lower highs) before its breaks are numbered. Set to 1 to number everything.")
@@ -148,6 +152,12 @@ var float pendLP = na
 var int pendLB = na
 var float prevPH = na
 var float prevPL = na
+// the confirmed swing sequence, kept only so it can be drawn
+var array<float> zzP = array.new<float>()
+var array<int> zzB = array.new<int>()
+var array<string> zzT = array.new<string>()
+var array<line> zzLn = array.new<line>()
+var array<label> zzLb = array.new<label>()
 
 var array<line> brkLn = array.new<line>()
 var array<label> brkLb = array.new<label>()
@@ -194,6 +204,9 @@ if not na(rawPh)
         // lower high: whatever low was pending belonged to a pullback
         pendLP := na
         pendLB := na
+    array.push(zzP, rawPh)
+    array.push(zzB, b)
+    array.push(zzT, na(prevPH) ? "H" : rawPh > prevPH ? "HH" : "LH")
     pendHP := rawPh
     pendHB := b
     prevPH := rawPh
@@ -214,12 +227,20 @@ if not na(rawPl)
     else
         pendHP := na
         pendHB := na
+    array.push(zzP, rawPl)
+    array.push(zzB, b)
+    array.push(zzT, na(prevPL) ? "L" : rawPl < prevPL ? "LL" : "HL")
     pendLP := rawPl
     pendLB := b
     prevPL := rawPl
     while array.size(lhP) > stackMax
         array.shift(lhP)
         array.shift(lhB)
+
+while array.size(zzP) > 60
+    array.shift(zzP)
+    array.shift(zzB)
+    array.shift(zzT)
 
 // ---- the pullback eats the stack from the top ------------------------------
 bool evalOk = not waitClose or barstate.isconfirmed
@@ -285,6 +306,24 @@ if evalOk and buyOn and lhOk
             array.push(enLb, label.new(bar_index, close, entTxt, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_label_up, color = color.new(#089981, 15), textcolor = color.white, size = f_size(lblSzIn)))
             while array.size(enLb) > keepN
                 label.delete(array.shift(enLb))
+
+// ===================== THE STRUCTURE IT IS USING =============================
+// The swing sequence the numbering is built from, drawn so it can be compared
+// against the structure drawn by hand. If these two do not trace the same
+// swings, the swing length is wrong and nothing downstream can be right.
+if barstate.islast
+    while array.size(zzLn) > 0
+        line.delete(array.shift(zzLn))
+    while array.size(zzLb) > 0
+        label.delete(array.shift(zzLb))
+    if zzOn and array.size(zzP) > 1
+        for i = 1 to array.size(zzP) - 1
+            array.push(zzLn, line.new(f_xc(array.get(zzB, i - 1)), array.get(zzP, i - 1), f_xc(array.get(zzB, i)), array.get(zzP, i), xloc = xloc.bar_index, color = zzCol, width = zzW))
+        if zzLbl
+            for i = 0 to array.size(zzP) - 1
+                string t = array.get(zzT, i)
+                bool isHi = t == "HH" or t == "LH" or t == "H"
+                array.push(zzLb, label.new(f_xc(array.get(zzB, i)), array.get(zzP, i), t, xloc = xloc.bar_index, yloc = yloc.price, style = isHi ? label.style_label_down : label.style_label_up, color = color.new(zzCol, 80), textcolor = zzCol, size = size.tiny))
 
 // ===================== WHAT IS STILL STANDING ================================
 // Redrawn on the last bar only. The TOP of each stack is what breaks first, so
