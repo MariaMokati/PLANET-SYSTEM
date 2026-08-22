@@ -26,7 +26,8 @@
 //   is a fake-out and breaks nothing.
 //
 //   The sequence is abandoned if price closes back below the low the rally came
-//   off — that setup is done.
+//   off — that setup is done. The levels still in it were never broken, so they
+//   go BACK into the pool for the next attempt.
 //
 // Non-repainting: pivots are CONFIRMED (placed `length` bars back) and a break
 // is judged once, at bar close.
@@ -39,7 +40,7 @@ indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_l
 gS = "Structure"
 pvLen = input.int(1, "Swing length", minval = 1, group = gS, tooltip = "Bars that must be clear either side of a high or low for it to count as a level.\n\n1 (default) — every turn counts, including one- and two-bar ones. On the worked example the levels at 4431, 4443 and 4459 sit in 1-2 bar zigzags: at swing length 2 they are not pivots at all, never enter the pool, and never get numbered. Only 4420 survives, which is exactly the failure that produced this default.\n\nRaise it only if it is picking up turns you would not count.")
 buyOn = input.bool(true, "Buy side  —  highs of a decline, broken upward", group = gS)
-sellOn = input.bool(true, "Sell side  —  lows of a rally, broken downward", group = gS)
+sellOn = input.bool(false, "Sell side  —  lows of a rally, broken downward", group = gS, tooltip = "OFF by default. This is the mirror image: the lows a rally leaves behind, taken back downward, for sell setups. Reading buy setups off a decline, it is nothing but clutter running down the leg.")
 poolMax = input.int(60, "Track at most N levels per side", minval = 3, maxval = 300, group = gS, tooltip = "Bounds the level pool. The OLDEST is dropped when full, and in a decline the oldest is the highest — so if a deep move stops being numbered part-way, raise this.")
 
 // ===================== WHAT GETS DRAWN =======================================
@@ -159,13 +160,23 @@ bool lastUp = false
 
 // ===================== BUY SIDE ==============================================
 if barstate.isconfirmed and buyOn
-    // the setup is done if price closes back under the low the rally came off
+    // The setup is done if price closes back under the low the rally came off.
+    // The levels that were left in it were NEVER BROKEN, so they go back into
+    // the pool, oldest first, ahead of anything newer. Destroying them here is
+    // what made the 3rd, 4th, 5th and 6th disappear: a premature sequence
+    // earlier in the leg had frozen them, and abandoning it deleted them.
     if upOn and not na(upFloor) and close < upFloor
         upOn := false
         nUp := 0
         while array.size(upP) > 0
+            int lastI = array.size(upP) - 1
+            array.insert(hiP, 0, array.get(upP, lastI))
+            array.insert(hiB, 0, array.get(upB, lastI))
             array.pop(upP)
             array.pop(upB)
+        while array.size(hiP) > poolMax
+            array.shift(hiP)
+            array.shift(hiB)
 
     // the 1st Break freezes the set as it stands
     if not upOn and f_newest(hiP, true) >= 0
@@ -207,8 +218,14 @@ if barstate.isconfirmed and sellOn
         dnOn := false
         nDn := 0
         while array.size(dnP) > 0
+            int lastI = array.size(dnP) - 1
+            array.insert(loP, 0, array.get(dnP, lastI))
+            array.insert(loB, 0, array.get(dnB, lastI))
             array.pop(dnP)
             array.pop(dnB)
+        while array.size(loP) > poolMax
+            array.shift(loP)
+            array.shift(loB)
 
     if not dnOn and f_newest(loP, false) >= 0
         while array.size(dnP) > 0
