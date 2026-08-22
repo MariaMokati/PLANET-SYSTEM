@@ -145,17 +145,16 @@ var bool hlOk = false
 var bool lhOk = false
 var int nHL = 0
 var int nLH = 0
-// a swing is only PENDING until the next swing confirms what it was
-var float pendHP = na
-var int pendHB = na
-var float pendLP = na
-var int pendLB = na
-var float prevPH = na
-var float prevPL = na
-// the confirmed swing sequence, kept only so it can be drawn
-var array<float> zzP = array.new<float>()
-var array<int> zzB = array.new<int>()
-var array<string> zzT = array.new<string>()
+// THE SWING SERIES — strictly alternating high, low, high, low.
+// ta.pivothigh and ta.pivotlow are INDEPENDENT: they do not alternate, and a
+// strong leg happily produces two highs in a row with no low between. Pushing
+// raw pivots into one list in confirmation order gives a series with same-side
+// neighbours in it, which draws as a scribble and, worse, breaks every rule
+// below that assumes a high is followed by a low. Two highs in a row collapse
+// to the higher; two lows to the lower.
+var array<float> swP = array.new<float>()
+var array<int> swB = array.new<int>()
+var array<bool> swH = array.new<bool>()
 var array<line> zzLn = array.new<line>()
 var array<label> zzLb = array.new<label>()
 
@@ -177,70 +176,77 @@ f_prune(array<line> la, array<label> lb, int k) =>
 float rawPl = ta.pivotlow(pvLen, pvLen)
 float rawPh = ta.pivothigh(pvLen, pvLen)
 
-// ---- build the stacks ------------------------------------------------------
-// A pivot high becomes an impulse LOWER HIGH only once the NEXT pivot low comes
-// in BELOW the previous pivot low. A LOWER LOW is what confirms it. A pullback
-// high is followed by a HIGHER low instead, so it is discarded and never enters
-// the stack.
-//
-// That one rule is the difference between marking the impulse's structure and
-// marking every wiggle: without it, a rally's own pullback highs land in the
-// stack and get numbered as breaks the moment the rally continues.
-//
-// Compared against the PREVIOUS PIVOT, not a running all-time extreme — an
-// all-time extreme goes stale in a drifting market and that side stops
-// confirming anything at all.
+// ---- one clean swing series, then everything is driven off it --------------
+// Append a swing, or extend the last one if it is the same side. Returns true
+// only when a genuinely NEW swing was appended.
+f_addSwing(float p, int bx, bool isHigh) =>
+    int n = array.size(swP)
+    bool appended = false
+    if n == 0
+        array.push(swP, p)
+        array.push(swB, bx)
+        array.push(swH, isHigh)
+        appended := true
+    else
+        if array.get(swH, n - 1) == isHigh
+            float lastP = array.get(swP, n - 1)
+            if (isHigh and p > lastP) or (not isHigh and p < lastP)
+                array.set(swP, n - 1, p)
+                array.set(swB, n - 1, bx)
+        else
+            array.push(swP, p)
+            array.push(swB, bx)
+            array.push(swH, isHigh)
+            appended := true
+    appended
+
+// A new swing tells us what the PREVIOUS one was. A higher high means the low
+// before it was a HIGHER LOW of the impulse — that is the level. A lower low
+// means the high before it was a LOWER HIGH. Because the series alternates,
+// the previous same-side swing is always exactly two back.
+f_classify() =>
+    int n = array.size(swP)
+    if n >= 3
+        bool isHigh = array.get(swH, n - 1)
+        float cur = array.get(swP, n - 1)
+        float prevSame = array.get(swP, n - 3)
+        if isHigh and cur > prevSame
+            float lo = array.get(swP, n - 2)
+            int lob = array.get(swB, n - 2)
+            if array.size(hlP) == 0 or lo > array.get(hlP, array.size(hlP) - 1)
+                array.push(hlP, lo)
+                array.push(hlB, lob)
+                if array.size(hlP) >= minLv
+                    hlOk := true
+            nHL := 0
+        if not isHigh and cur < prevSame
+            float hi = array.get(swP, n - 2)
+            int hib = array.get(swB, n - 2)
+            if array.size(lhP) == 0 or hi < array.get(lhP, array.size(lhP) - 1)
+                array.push(lhP, hi)
+                array.push(lhB, hib)
+                if array.size(lhP) >= minLv
+                    lhOk := true
+            nLH := 0
+    array.size(swP)
+
 if not na(rawPh)
-    int b = bar_index - pvLen
-    if not na(prevPH) and rawPh > prevPH
-        // higher high: the pending low was a genuine HIGHER LOW of the impulse
-        if not na(pendLP) and (array.size(hlP) == 0 or pendLP > array.get(hlP, array.size(hlP) - 1))
-            array.push(hlP, pendLP)
-            array.push(hlB, pendLB)
-            if array.size(hlP) >= minLv
-                hlOk := true
-        nHL := 0
-    else
-        // lower high: whatever low was pending belonged to a pullback
-        pendLP := na
-        pendLB := na
-    array.push(zzP, rawPh)
-    array.push(zzB, b)
-    array.push(zzT, na(prevPH) ? "H" : rawPh > prevPH ? "HH" : "LH")
-    pendHP := rawPh
-    pendHB := b
-    prevPH := rawPh
-    while array.size(hlP) > stackMax
-        array.shift(hlP)
-        array.shift(hlB)
-
+    if f_addSwing(rawPh, bar_index - pvLen, true)
+        f_classify()
 if not na(rawPl)
-    int b = bar_index - pvLen
-    if not na(prevPL) and rawPl < prevPL
-        // lower low: the pending high was a genuine LOWER HIGH of the impulse
-        if not na(pendHP) and (array.size(lhP) == 0 or pendHP < array.get(lhP, array.size(lhP) - 1))
-            array.push(lhP, pendHP)
-            array.push(lhB, pendHB)
-            if array.size(lhP) >= minLv
-                lhOk := true
-        nLH := 0
-    else
-        pendHP := na
-        pendHB := na
-    array.push(zzP, rawPl)
-    array.push(zzB, b)
-    array.push(zzT, na(prevPL) ? "L" : rawPl < prevPL ? "LL" : "HL")
-    pendLP := rawPl
-    pendLB := b
-    prevPL := rawPl
-    while array.size(lhP) > stackMax
-        array.shift(lhP)
-        array.shift(lhB)
+    if f_addSwing(rawPl, bar_index - pvLen, false)
+        f_classify()
 
-while array.size(zzP) > 60
-    array.shift(zzP)
-    array.shift(zzB)
-    array.shift(zzT)
+while array.size(swP) > 60
+    array.shift(swP)
+    array.shift(swB)
+    array.shift(swH)
+while array.size(hlP) > stackMax
+    array.shift(hlP)
+    array.shift(hlB)
+while array.size(lhP) > stackMax
+    array.shift(lhP)
+    array.shift(lhB)
 
 // ---- the pullback eats the stack from the top ------------------------------
 bool evalOk = not waitClose or barstate.isconfirmed
@@ -308,22 +314,23 @@ if evalOk and buyOn and lhOk
                 label.delete(array.shift(enLb))
 
 // ===================== THE STRUCTURE IT IS USING =============================
-// The swing sequence the numbering is built from, drawn so it can be compared
-// against the structure drawn by hand. If these two do not trace the same
+// The alternating swing series the numbering is built from. Compare it against
+// the structure you would draw by hand: if the two do not trace the same
 // swings, the swing length is wrong and nothing downstream can be right.
 if barstate.islast
     while array.size(zzLn) > 0
         line.delete(array.shift(zzLn))
     while array.size(zzLb) > 0
         label.delete(array.shift(zzLb))
-    if zzOn and array.size(zzP) > 1
-        for i = 1 to array.size(zzP) - 1
-            array.push(zzLn, line.new(f_xc(array.get(zzB, i - 1)), array.get(zzP, i - 1), f_xc(array.get(zzB, i)), array.get(zzP, i), xloc = xloc.bar_index, color = zzCol, width = zzW))
+    if zzOn and array.size(swP) > 1
+        for i = 1 to array.size(swP) - 1
+            array.push(zzLn, line.new(f_xc(array.get(swB, i - 1)), array.get(swP, i - 1), f_xc(array.get(swB, i)), array.get(swP, i), xloc = xloc.bar_index, color = zzCol, width = zzW))
         if zzLbl
-            for i = 0 to array.size(zzP) - 1
-                string t = array.get(zzT, i)
-                bool isHi = t == "HH" or t == "LH" or t == "H"
-                array.push(zzLb, label.new(f_xc(array.get(zzB, i)), array.get(zzP, i), t, xloc = xloc.bar_index, yloc = yloc.price, style = isHi ? label.style_label_down : label.style_label_up, color = color.new(zzCol, 80), textcolor = zzCol, size = size.tiny))
+            for i = 0 to array.size(swP) - 1
+                bool isHi = array.get(swH, i)
+                float p = array.get(swP, i)
+                string t = i < 2 ? (isHi ? "H" : "L") : isHi ? (p > array.get(swP, i - 2) ? "HH" : "LH") : (p < array.get(swP, i - 2) ? "LL" : "HL")
+                array.push(zzLb, label.new(f_xc(array.get(swB, i)), p, t, xloc = xloc.bar_index, yloc = yloc.price, style = isHi ? label.style_label_down : label.style_label_up, color = color.new(zzCol, 80), textcolor = zzCol, size = size.tiny))
 
 // ===================== WHAT IS STILL STANDING ================================
 // Redrawn on the last bar only. The TOP of each stack is what breaks first, so

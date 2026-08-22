@@ -26,31 +26,58 @@ happens to be nearest, and not one number per direction of travel.
 A pullback commonly stops after the 1st or 2nd. That is not a miss — it is the
 market failing to break the 3rd, and it is information worth seeing.
 
-## 2. What counts as impulse structure
+## 2. One alternating swing series first
 
-This is the rule everything else depends on, and getting it wrong is what
-produced a chart covered in spurious marks.
+`ta.pivothigh` and `ta.pivotlow` are **independent**. They do not alternate. A
+strong leg happily prints two pivot highs with no pivot low between them, and
+they confirm `length` bars late, so they do not even arrive in the order they
+formed.
 
-> A pivot high becomes an impulse **lower high** only once the **next pivot low
-> comes in below the previous pivot low**. A lower low is what confirms it.
+Pushing raw pivots into one list in confirmation order and connecting
+consecutive entries is therefore wrong twice over: the zigzag draws as a
+scribble (HH followed by HH, near-vertical segments), and every rule downstream
+that assumes *a high is followed by a low* is reading garbage. Measured on a
+synthetic 3,000-bar series: **10 same-side neighbours out of 79 swings.**
 
-A pullback high is followed by a **higher** low instead, so it is discarded and
-never enters the stack. Mirror for higher lows.
+So the first thing built is one strictly alternating series — high, low, high,
+low — with **same-side collapse**:
 
-Without that rule, a rally's own pullback highs land in the stack and get
-numbered the moment the rally continues. On the reproduction, a down impulse
-leaving LHs at 4453 / 4479 / 4499 followed by a wiggly rally produced **six**
-events — 4441, 4453, **4467**, 4479, **4491**, 4499 — where three of them are
-the rally's own pullbacks. With the rule: exactly three, at the right levels.
+> two highs in a row collapse to the **higher**; two lows to the **lower**.
 
-The comparison is against the **previous pivot**, not a running all-time
-extreme. An all-time extreme goes stale in a drifting market and that side stops
-confirming anything at all (3,000 bars produced three buy-side events while the
-sell side ran to eleven unbroken).
+Same measurement after the fix: **0 faults out of 69 swings.**
 
-A stack also has to be a real **sequence** before it counts — 2 levels by
-default. A single stray pivot otherwise sits in the stack and every move the
-other way prints a spurious "1st Break".
+Everything else — the zigzag drawing and both stacks — is driven off that one
+series. Because it alternates, the previous same-side swing is always exactly
+**two back**, which is what makes the structure rule a one-line comparison.
+
+## 2a. What counts as impulse structure
+
+A new swing tells you what the **previous** one was:
+
+> a **higher high** means the low before it was a **higher low** of the impulse
+> — that is a sell-side level.
+> a **lower low** means the high before it was a **lower high** — a buy-side
+> level.
+
+A pullback high is *not* followed by a lower low, so it never enters the stack.
+That is the rule that stopped a chart covered in spurious marks: on the
+reproduction, a down impulse leaving LHs at 4453 / 4479 / 4499 followed by a
+wiggly rally produced **six** events — 4441, 4453, **4467**, 4479, **4491**,
+4499 — where three are the rally's own pullbacks. With the rule: exactly three,
+at the right levels.
+
+The comparison is against the **previous same-side swing**, not a running
+all-time extreme. An all-time extreme goes stale in a drifting market and that
+side stops confirming anything at all (3,000 bars produced three buy-side events
+while the sell side ran to eleven unbroken).
+
+A level also only enters the stack if it is genuinely higher (or lower) than the
+one already on top — the stack has to be monotonic or the "eat from the top"
+order is meaningless.
+
+A stack has to be a real **sequence** before it counts — 2 levels by default. A
+single stray pivot otherwise sits in the stack and every move the other way
+prints a spurious "1st Break".
 
 ## 3. What breaks a level
 
@@ -110,7 +137,8 @@ Kept deliberately. Each was a real failure on a real chart.
 | **`778th Break`** | the reset required reclaiming a 50-bar extreme, which never happens in a trend, so nothing ever reset | bound the sequence |
 | **`RE10026`** coordinate too far from the current bar | an unmitigated zone extended ~20,000 bars; its 50% label sits at the box midpoint, leaving the ~10,000-bar legal range at half the rate the box did | draw zones once at fixed width; clamp every bar index reaching a drawing to 4,000 back |
 | Levels marked were not the hand-marked ones | only the most recent pivot per side was tracked | *(superseded)* |
-| A chart covered in small `1st Break` marks; real levels **"not even marked"**; a genuine 1st labelled 2nd | every pivot high entered the stack, so a rally's own pullback highs were numbered as breaks | §2 — a swing only counts once the next swing confirms it |
+| A chart covered in small `1st Break` marks; real levels **"not even marked"**; a genuine 1st labelled 2nd | every pivot high entered the stack, so a rally's own pullback highs were numbered as breaks | §2a — a swing only counts once the next swing confirms it |
+| **The zigzag drawn as a scribble** — HH straight into HH with no low between, near-vertical HH/HL segments, points apparently out of order | `ta.pivothigh` / `ta.pivotlow` are independent and confirm `length` bars late; raw pivots were pushed into one list in confirmation order and consecutive entries connected. 10 same-side neighbours per 79 swings | §2 — build one strictly alternating series with same-side collapse, then drive the zigzag *and* both stacks off it. 0 faults per 69 swings |
 
 ## 9. What is and is not verified
 
@@ -126,6 +154,10 @@ Confirmed for the current model:
 Two candidate fixes were tried and **rejected by the simulation** before the
 right one was found: clearing the stack on a contrary pivot changed nothing at
 all, and re-anchoring on a new pivot re-admitted the pullback highs.
+
+The alternating series is measured the same way — `zz.py` counts same-side
+neighbours and backwards-in-time segments over the whole series, which is how
+the scribble was quantified (10 / 79) and how the fix was confirmed (0 / 69).
 
 **Not verified:** this environment cannot compile or run Pine. Every change is
 checked by hand and by the Python port; the port covers the structure rule, the
