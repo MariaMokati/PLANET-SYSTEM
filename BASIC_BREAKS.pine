@@ -71,7 +71,7 @@ rstZone = input.bool(false, "Reset when price returns through the anchor", group
 // 1st break makes the count restart on every shallow pullback — which is why the
 // leg extreme is the default.
 gAn = "Sequence anchor"
-anchMode = input.string("Extreme of the last N bars", "The anchor is", options = ["Extreme of the last N bars", "The swing at the 1st break"], group = gAn, tooltip = "Extreme of the last N bars (default) — the highest high (or lowest low) of the leg the break came out of. A shallow pullback inside the leg no longer resets the count, so a sell-off numbers 1st, 2nd, 3rd straight down.\nThe swing at the 1st break — the minor pivot standing at the moment of the break. Tighter zones, and the count restarts far more often.")
+anchMode = input.string("The swing at the 1st break", "The anchor is", options = ["Extreme of the last N bars", "The swing at the 1st break"], group = gAn, tooltip = "Extreme of the last N bars (default) — the highest high (or lowest low) of the leg the break came out of. A shallow pullback inside the leg no longer resets the count, so a sell-off numbers 1st, 2nd, 3rd straight down.\nThe swing at the 1st break — the minor pivot standing at the moment of the break. Tighter zones, and the count restarts far more often.")
 anchLook = input.int(50, "Anchor lookback (bars)", minval = 5, maxval = 500, group = gAn, tooltip = "How far back to look for the leg extreme. Bigger = a more distant anchor, a longer-lived sequence and a taller zone.")
 
 // ===================== NUMBERING =============================================
@@ -91,8 +91,8 @@ zSupC = input.color(color.new(#F23645, 0), "Supply", inline = "z1", group = gZ)
 zDemC = input.color(color.new(#2962FF, 0), "Demand", inline = "z1", group = gZ)
 zFade = input.int(88, "Zone fill transparency", minval = 0, maxval = 100, group = gZ)
 zoneStop = input.string("Freeze at mitigation", "When price closes back through it", options = ["Freeze at mitigation", "Delete at mitigation", "Never stop"], group = gZ, tooltip = "Freeze (default) — the box stops extending but stays on the chart as history. Delete — it disappears once used. Never stop — it keeps extending right forever.")
-zKeep = input.int(6, "Keep last N zones per layer", minval = 1, maxval = 50, group = gZ)
-zMaxBars = input.int(500, "Stop extending a zone after N bars", minval = 20, maxval = 5000, group = gZ, tooltip = "A zone that is never traded back into would otherwise extend forever. Once it is this old it freezes where it is. TradingView also refuses to move a drawing more than ~10,000 bars behind the current bar, so this is a hard requirement, not just tidiness.")
+zKeep = input.int(3, "Keep last N zones per layer", minval = 1, maxval = 50, group = gZ)
+zMaxBars = input.int(60, "Stop extending a zone after N bars", minval = 5, maxval = 5000, group = gZ, tooltip = "A zone that is never traded back into would otherwise extend forever. Once it is this old it freezes where it is. TradingView also refuses to move a drawing more than ~10,000 bars behind the current bar, so this is a hard requirement, not just tidiness.")
 
 // ===================== LEVEL SOURCE 1 — SWING ================================
 gL1 = "Levels 1 — SWING  (confirmed pivots)"
