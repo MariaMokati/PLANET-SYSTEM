@@ -1,196 +1,124 @@
 # Break ranking — spec
 
 `BASIC_BREAKS.pine`. Numbers structural breaks in sequence — **1st Break**,
-**2nd Break**, **3rd Break** — the way they get annotated by hand on a chart.
-
-Nothing below is hard-coded. Every rule is a switch, so the layer, the
-confirmation, the reset and the numbering can each be set independently.
+**2nd Break**, **3rd Break** — the way they get annotated by hand on a chart,
+leaves a supply/demand zone behind the 1st, and marks the entry on the 2nd.
 
 ---
 
-## 1. What counts as a break
+## 1. The model: a pool of live levels
 
-A level is *taken out* when the candle clears it by the chosen rule:
+Every confirmed swing becomes a **live level** and stays live until a candle
+closes through it.
 
-| Confirmation | Bearish (a low) | Bullish (a high) |
+There is **one** sequence, not one per direction. Whichever live level is taken
+out next is the next number — a high or a low, whichever comes first.
+
+This is the part that took three rewrites to get right. Earlier versions tracked
+only the *most recent* pivot on each side. That cannot mark a low made yesterday
+which nothing has touched since: by the time price finally reaches it, newer
+swings have replaced it as "the current level", so it gets no number at all.
+That is why the marked levels did not match the ones marked by hand, and why a
+break that was never part of the sequence got numbered.
+
+A pool fixes it directly. On synthetic bars the pool takes out levels up to
+**436 bars old** (median 16) — exactly the behaviour a hand annotation shows when
+a plunge finally clears a level that had been standing for a day.
+
+### One candle, several levels
+
+A single candle can close through more than one standing level. They are
+numbered in the order **price reached them** — nearest the candle's open first —
+so a drop through two old lows prints *2nd* and *3rd* on the same bar.
+
+### What feeds the pool
+
+Three switchable pivot sources, each with its own length:
+
+| Source | Default | Character |
 |---|---|---|
-| Wick beyond | `low < level` | `high > level` |
-| Close beyond | `close < level` | `close > level` |
-| **Full body beyond** *(default)* | `close < level` **and** `open < level` | `close > level` **and** `open > level` |
+| **Swings** | on, length 5 | the main source |
+| Fractals | off, length 2 | many more levels, many more breaks |
+| Major swings | off, length 15 | only the big turning points |
 
-*Full body* is the strictest: a candle whose body still straddles the level
-gets no mark at all. *Close beyond* is the definition already used by the break
-layer in `BASIC_CRT.pine` — there, a wick-only poke is a **sweep**, not a break.
+The pool holds at most N levels (default 60); the oldest drops out when full.
+Raising it keeps older levels eligible for longer. *Show the live levels* draws
+a faint dotted line for everything still standing, so the next possible break is
+visible before it happens.
 
-Each level fires **once**. Once it has been taken out it is retired, and the
-next break in the sequence needs a *new* level to form first. That is what
-produces the 1 → 2 → 3 cascade rather than one level being counted repeatedly.
+## 2. What takes a level out
 
-## 2. Which level gets broken — four independent layers
-
-Each layer has its own on/off switch, its own pivot length, its own colours,
-its own keep-N, and **its own pair of counters**. Run one or run all four.
-
-| Layer | Level | Character |
+| Confirmation | Break of a high | Break of a low |
 |---|---|---|
-| **SWING** *(on by default)* | confirmed `ta.pivothigh/low(len,len)`, default len 5 | the main structural layer; confirms `len` bars late |
-| **FRACTAL** | the same, on a 2-bar pivot | responsive, many more marks |
-| **CANDLE** | the previous candle's high / low | no lag at all, noisiest; long runs of consecutive numbers |
-| **PROTECTED** | the last pivot low standing when a new pivot high confirms (and the mirror) | one break per structural leg — fewest, cleanest |
+| Wick beyond | `high > level` | `low < level` |
+| Close beyond | `close > level` | `close < level` |
+| **Full body beyond** *(default)* | `close >` and `open >` | `close <` and `open <` |
 
-**Stale levels.** A pivot only confirms `len` bars after it printed, so price is
-sometimes already past it by the time it exists. With *Ignore levels already
-broken when they confirm* on (default) such a level is retired silently instead
-of firing an instant break. This check runs **only on the bar the level is first
-assigned** — running it every bar would retire every level the moment price
-reached it and nothing would ever be marked. CANDLE levels are never stale by
-definition and are exempt.
+A wick through that closes back inside **is a fake-out** — it takes nothing out,
+so it neither gets a number nor triggers an entry. That rule is not bolted on;
+it falls out of the confirmation test.
 
-## 3. Direction
+Each level is taken out **once** and then leaves the pool.
 
-Breaks of **lows** and breaks of **highs** run on two **separate** counters,
-each independently switchable. A bullish 2nd break has nothing to do with the
-bearish count. Turn *Count breaks of HIGHS* off to reproduce a pure sell-off
-annotation.
+## 3. The sequence
 
-## 3a. The sequence anchor
+The count runs 1st, 2nd, … up to **Restart at 1st after the** (default 3), then
+starts again at 1st. Optional extras, both off by default because the restart
+rule already bounds the count: restart after N quiet bars, and restart on a new
+day / week / session.
 
-The anchor is the level the sequence started from. It decides two things: whether
-a counter-break is big enough to reset the count, and how far the zone on the 1st
-break reaches.
+## 4. Entry
 
-| Anchor mode | Meaning |
-|---|---|
-| **Extreme of the last N bars** *(default, N=50)* | the highest high (bearish) or lowest low (bullish) of the leg the break came out of |
-| The swing at the 1st break | the minor pivot standing at the moment of the break |
+**Entry is the Nth break** (default the 2nd), taken at **that candle's close** —
+the close of the candle that takes out the second level. Marked with a label at
+the close plus a dotted price line running N bars right.
 
-This matters more than it looks, in both directions. With the anchor set to the
-minor swing, a shallow pullback inside a sell-off clears it and the next break is
-numbered "1st" again — which produced two consecutive *1st Break* labels on a 5m
-gold chart.
+Long when the level taken out was a high, short when it was a low.
 
-But making the leg extreme the anchor **and** tying the reset to it was worse: in a
-trending market that level is essentially never reclaimed, so nothing ever reset
-and the count ran for the entire chart — a live 5m gold chart printed
-**"778th Break"**. The anchor is still the leg extreme, because that is the right
-span for the zone, but the *reset* no longer depends on reclaiming it by default.
-Three bounds now apply instead:
+## 5. The zone left by the 1st break
 
-1. **Direction flip** — any opposite break ends the sequence (default).
-2. **Quiet leg** — 30 bars with no break in that direction ends it. This is the
-   bound that matches reading a chart by eye: a sell-off that pauses has ended,
-   whether or not price broke back the other way. It is also the only one of the
-   three that fires in a clean one-way trend.
-3. **Hard ceiling** — 10, a backstop so that no combination of the other settings
-   can ever run away again.
+The 1st break leaves the range price just vacated: from the level that was taken
+out across to the **nearest level still standing on the other side**. Drawn as a
+box with a dashed 50% line and a label — *Supply Zone 50%* when a low was taken
+out, *Demand Zone 50%* when a high was.
 
-Measured over 8,000 synthetic bars per regime, highest number reached:
+The zone is drawn **once**, at a fixed width, and never repositioned. That is
+deliberate: repositioning a drawing every bar is what produced `RE10026` (see §7).
 
-| series | anchor-reset (the 778 bug) | flip + quiet leg + ceiling |
+## 6. Repainting
+
+Pivots are **confirmed** — placed `length` bars back — and with *Only judge
+closed bars* on (default) a break is decided once, at bar close, and never
+redrawn. The cost is the usual one: a confirmed pivot is only known `length`
+bars after it printed. Shorter pivot sources exist for that reason.
+
+## 7. Bugs this has already hit, and what fixed them
+
+Worth keeping, because each one was a real failure on a real chart.
+
+| Symptom | Cause | Fix |
 |---|---|---|
-| choppy with drift | 106 | 9 |
-| random walk | 134 | 8 |
-| strong one-way trend | 283 | 10 |
+| Nothing marked at all | the stale-level guard ran every bar, retiring each level the moment price reached it | run it only on the bar a level is first assigned |
+| `1st Break` twice in a row | the anchor was the minor pivot at the break, so a shallow pullback reset the count | *(superseded — the anchor no longer drives the reset)* |
+| **`778th Break`** | the reset required reclaiming a 50-bar extreme, which never happens in a trend, so nothing ever reset | bound the sequence: restart after N |
+| **`RE10026`** — coordinate too far from the current bar | an unmitigated zone extended for ~20,000 bars; its 50% label sat at the box's midpoint, leaving the ~10,000-bar legal range at half the rate the box did | draw zones once at fixed width; clamp every bar index that reaches a drawing to 4,000 bars back |
+| Levels marked were not the ones marked by hand | only the most recent pivot per side was tracked, so an old standing level was never a candidate | the level pool (§1) |
 
-In all three the fixed distribution is dominated by 1st / 2nd / 3rd, which is the
-shape of a hand annotation.
+## 8. What is and is not verified
 
-## 4. Resets — when the count goes back to 1st
+The engine is prototyped in Python and run against synthetic bar series before
+each commit. Confirmed there for the current pool model: levels up to 436 bars
+old get taken out (median 16); the shared counter cycles across both sides; and
+a candle that clears two levels numbers them consecutively.
 
-All four are switchable and all four stack.
-
-| Rule | Default | Behaviour |
-|---|---|---|
-| Direction flip | **on** | a break of a HIGH clears the bearish count, and vice versa. *Any opposite break* (default) · *After N opposite breaks* (one counter-break is noise) · *Only past the sequence anchor* (survives until the origin is reclaimed — **runs long in a trend**) |
-| Quiet leg | **on, 30 bars** | a direction that has not broken anything for N bars has ended; the next break is a 1st again |
-| Hard ceiling | **on, 10** | a sequence can never exceed N — a backstop, not a feature |
-| Restart after the Nth | off | count 1…N then start again at 1st; takes precedence over the numbering cap |
-| New period | off | both counters clear at each new day / week / session |
-| Return through the anchor | off | the anchor is the opposite level standing when the 1st break fired — the high the sell-off started from; closing back beyond it ends the sequence |
-
-## 5. Numbering
-
-Counting continues past the 3rd by default (4th, 5th, 6th…, with correct
-ordinals through 11th/12th/13th). Switch *Stop numbering after N breaks* on and
-everything past N either draws **without a number** (the line still appears, the
-chart stays as clean as a hand annotation) or **stops drawing** entirely.
-
-## 5a. The zone left by the 1st break
-
-A bearish 1st break leaves a **supply zone** above it; a bullish 1st break leaves a
-**demand zone** below it. Each is a box with a dashed 50% line and a label.
-
-| Zone spans | Top / bottom |
-|---|---|
-| **Anchor to the break level** *(default)* | the sequence anchor across to the level that was broken — a leg-sized zone |
-| Breaking candle | the high and low of the candle that made the break |
-| Broken swing candle | the high and low of the swing candle itself |
-
-The box extends right as price moves. When price closes back through it, it either
-**freezes** (default — it stays as history but stops extending), is **deleted**, or
-keeps extending. Each layer keeps its own last N zones.
-
-A zone that is never traded back into also stops extending once it is
-`Stop extending a zone after N bars` old (default 500). This is a hard
-requirement, not tidiness: TradingView rejects any drawing coordinate more than
-~10,000 bars behind the current bar, and the 50% label sits at the *midpoint* of
-the box, so it leaves the legal range at half the rate the box does. Without the
-age-out this threw `RE10026: Bar index value of the x argument … is too far from
-the current bar index` on a full gold history. Every bar index that reaches a
-drawing is additionally clamped to 4,000 bars back — a level can stand unbroken
-for longer than the limit allows, and only the drawing is clamped; the tracked
-level keeps its true bar.
-
-## 6. Visuals
-
-The mark is a horizontal line at the broken level running from the swing that
-was broken across to the candle that broke it, with a text-only label
-(`style_none`, matching the rest of the repo — no bubbles, no boxes).
-
-Colouring is by **break number** (1st / 2nd / 3rd / 4th+ each their own colour),
-by **direction**, or by **level source**. Line end, line style, label text,
-label position, label side, ATR offset and size are all inputs. A dashboard
-shows the live count per layer for both directions.
-
-## 7. Alerts
-
-`alert()` fires one combined message naming every layer that broke on that bar
-and at what price. Five `alertcondition` entries are also exposed: bearish
-break, bullish break, 3rd-or-later bearish, 3rd-or-later bullish, any break.
-
-## 8. Repainting
-
-Pivots are **confirmed** — placed `len` bars back — and with *Only evaluate
-closed bars* on (default) a break is judged once, at bar close, and never
-redrawn. The cost is the usual one: a confirmed pivot is only known `len` bars
-after it printed, so the SWING mark arrives late. That lag is exactly why the
-FRACTAL and CANDLE layers exist. Turning *Only evaluate closed bars* off flags
-breaks mid-bar, and those marks can disappear again before the bar closes.
-
-## 9. What was and was not verified
-
-The counting rules were ported to Python and run against synthetic bar series
-before each commit. Confirmed there:
-
-- a staircase down-move produces exactly 1st → 2nd → 3rd on successive lower lows;
-- the three confirmation modes fire in the expected order (wick earliest, then
-  close, then full body);
-- the bullish and bearish counters advance independently on a down-then-up move;
-- **the anchor mode changes the outcome as claimed.** On a leg carrying a genuine
-  mid-leg bullish break, the swing anchor gives `bear 1 · bull 1 · bear 1 · bear 2`
-  — the count restarting — while the leg-extreme anchor gives
-  `bear 1 · bull 1 · bear 2 · bear 3`. The first version of this change used the
-  swing anchor and did **not** fix the restarting count; the simulation is what
-  caught that.
-
-Verified on the chart: the script compiles in TradingView and runs. The first
-build of the zone layer threw `RE10026` on a full gold history — an unmitigated
-zone extended for ~20,000 bars until its 50% label was ~10,000 bars behind the
-current bar. Fixed by ageing zones out and clamping every drawing coordinate.
-
-Not verified: this environment cannot compile or run Pine, so each change is
+**Not verified:** this environment cannot compile or run Pine, so every change is
 checked by hand and by the Python port before it goes out. The port covers the
-counting and the anchor, not the drawing objects — box placement, mitigation and
-freezing are inspection-only. This is an annotation
-tool; it makes no claim that an Nth break is more or less likely to continue. If
-TradingView reports a compile error, paste it back and it gets fixed.
+counting, the pool and the ordering — **not** the drawing objects. Box
+placement, the entry marker and the label geometry are inspection-only, which is
+exactly how `RE10026` reached the chart. The pool rewrite has **not yet been
+confirmed against the reference chart annotations** — that is the next thing to
+check.
+
+This is an annotation tool. It marks what happened. It makes no claim that an
+Nth break is more or less likely to continue, and nothing here has been
+Strategy-Tester validated.
