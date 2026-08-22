@@ -4,8 +4,10 @@
 // -----------------------------------------------------------------------------
 // THE BUY SIDE (mirror it for sells)
 //
-//   Price declines. On the way down it leaves a run of highs behind it. Those
-//   are the levels. Price then rallies and takes them back, NEWEST-MADE FIRST:
+//   Price declines. On the way down it leaves a run of LOWER HIGHS behind it.
+//   Those are the levels — a strictly descending run. A high that a later,
+//   higher high supersedes leaves the pool; it was never a lower high in that
+//   run. Price then rallies and takes them back, NEWEST-MADE FIRST:
 //
 //       the LAST high made        →  1st Break
 //       the one before it         →  2nd Break
@@ -48,6 +50,7 @@ gS = "Structure"
 pvLen = input.int(1, "Swing length", minval = 1, group = gS, tooltip = "Bars that must be clear either side of a high or low for it to count as a level.\n\n1 (default) — every turn counts, including one- and two-bar ones. On the worked example the levels at 4431, 4443 and 4459 sit in 1-2 bar zigzags: at swing length 2 they are not pivots at all, never enter the pool, and never get numbered. Only 4420 survives, which is exactly the failure that produced this default.\n\nRaise it only if it is picking up turns you would not count.")
 buyOn = input.bool(true, "Buy side  —  highs of a decline, broken upward", group = gS)
 sellOn = input.bool(false, "Sell side  —  lows of a rally, broken downward", group = gS, tooltip = "OFF by default. This is the mirror image: the lows a rally leaves behind, taken back downward, for sell setups. Reading buy setups off a decline, it is nothing but clutter running down the leg.")
+minGap = input.float(0.8, "Levels closer than (× ATR) are the same level", minval = 0.0, maxval = 5.0, step = 0.1, group = gS, tooltip = "A small corner inside a leg is a genuine lower high, so no structural rule removes it — but it takes a number that belongs to the real level above it, which is what puts a wrong 4th on the chart.\n\nWhen a new high lands within this distance of the one already on top, the NEWER, lower one supersedes it rather than sitting beside it.\n\n0.8 is a narrow window: on the worked example 0.8 drops the stray corner and keeps all six real levels, while 1.0 starts eating the 4th. Set to 0 to keep every corner.")
 poolMax = input.int(60, "Track at most N levels per side", minval = 3, maxval = 300, group = gS, tooltip = "Bounds the level pool. The OLDEST is dropped when full, and in a decline the oldest is the highest — so if a deep move stops being numbered part-way, raise this.")
 
 // ===================== WHAT GETS DRAWN =======================================
@@ -61,7 +64,7 @@ c3 = input.color(#1B7F4E, "3rd", inline = "c", group = gD)
 cX = input.color(#7A8290, "4th+", inline = "c", group = gD)
 lnW = input.int(1, "Line width", minval = 1, maxval = 4, group = gD)
 lblSz = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gD)
-lblFmt = input.string("1st Break", "Label", options = ["1st Break", "1st", "1"], group = gD)
+lblFmt = input.string("1st Break", "Label", options = ["1st Break", "1st Break + price", "1st", "1"], group = gD, tooltip = "\"1st Break + price\" puts the level's price in the label. Useful when a number looks wrong — it says exactly which level took that slot.")
 
 // ===================== ENTRY =================================================
 gE = "Entry"
@@ -103,8 +106,8 @@ f_ord(int n) =>
     string sfx = r100 >= 11 and r100 <= 13 ? "th" : r10 == 1 ? "st" : r10 == 2 ? "nd" : r10 == 3 ? "rd" : "th"
     str.tostring(n) + sfx
 
-f_txt(int n) =>
-    lblFmt == "1st Break" ? f_ord(n) + " Break" : lblFmt == "1st" ? f_ord(n) : str.tostring(n)
+f_txt(int n, float px) =>
+    lblFmt == "1st Break" ? f_ord(n) + " Break" : lblFmt == "1st Break + price" ? f_ord(n) + " Break  " + str.tostring(math.round_to_mintick(px)) : lblFmt == "1st" ? f_ord(n) : str.tostring(n)
 
 f_col(int n) =>
     n == 1 ? c1 : n == 2 ? c2 : n == 3 ? c3 : cX
@@ -184,7 +187,7 @@ f_mark(int n, float p, int b, bool up) =>
     if showAll or n <= showN
         color col = f_col(n)
         array.push(dLn, line.new(f_xc(b), p, bar_index, p, xloc = xloc.bar_index, color = col, width = lnW))
-        array.push(dLb, label.new(int(math.avg(f_xc(b), bar_index)), p, f_txt(n), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = col, size = f_size(lblSz)))
+        array.push(dLb, label.new(int(math.avg(f_xc(b), bar_index)), p, f_txt(n, p), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = col, size = f_size(lblSz)))
         while array.size(dLn) > 480
             line.delete(array.shift(dLn))
         while array.size(dLb) > 480
@@ -229,17 +232,38 @@ f_zone(float lvl, float ext, int fromB, bool isBuy) =>
     array.size(zBx)
 
 // ===================== BUILD THE LIVE POOLS ==================================
+// LOWER HIGHS. The pool is a strictly DESCENDING run: a high that a later,
+// higher high supersedes was never a lower high in that run, so it leaves.
+// Collecting every pivot high regardless is what let a superseded level sit in
+// the middle of the sequence and take a number that belongs to the one above it.
 if not na(rawPh)
-    array.push(hiP, rawPh)
-    array.push(hiB, bar_index - pvLen)
+    while array.size(hiP) > 0 and array.get(hiP, array.size(hiP) - 1) <= rawPh
+        array.pop(hiP)
+        array.pop(hiB)
+    int topI = array.size(hiP) - 1
+    if topI >= 0 and minGap > 0 and (array.get(hiP, topI) - rawPh) < minGap * atr14
+        array.set(hiP, topI, rawPh)
+        array.set(hiB, topI, bar_index - pvLen)
+    else
+        array.push(hiP, rawPh)
+        array.push(hiB, bar_index - pvLen)
     rLow := low
     rLowB := bar_index
     while array.size(hiP) > poolMax
         array.shift(hiP)
         array.shift(hiB)
+// HIGHER LOWS — the mirror.
 if not na(rawPl)
-    array.push(loP, rawPl)
-    array.push(loB, bar_index - pvLen)
+    while array.size(loP) > 0 and array.get(loP, array.size(loP) - 1) >= rawPl
+        array.pop(loP)
+        array.pop(loB)
+    int topJ = array.size(loP) - 1
+    if topJ >= 0 and minGap > 0 and (rawPl - array.get(loP, topJ)) < minGap * atr14
+        array.set(loP, topJ, rawPl)
+        array.set(loB, topJ, bar_index - pvLen)
+    else
+        array.push(loP, rawPl)
+        array.push(loB, bar_index - pvLen)
     rHigh := high
     rHighB := bar_index
     while array.size(loP) > poolMax
