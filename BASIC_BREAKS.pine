@@ -54,7 +54,7 @@ stackMax = input.int(50, "Track at most N levels per stack", minval = 2, maxval 
 gVs = "Visuals"
 hidePast = input.bool(false, "Hide breaks past the Nth", group = gVs, tooltip = "The count always keeps running — this only stops the later ones being DRAWN. Turn on to keep the chart to 1st / 2nd / 3rd and drop the 4th, 5th, 6th.")
 hidePastN = input.int(3, "…the Nth", minval = 1, maxval = 20, group = gVs)
-histBars = input.int(0, "Only show breaks from the last N bars  (0 = all history)", minval = 0, maxval = 5000, group = gVs, tooltip = "Clears old marks off the chart so only the price action you are actually looking at is annotated. 0 keeps everything.")
+histBars = input.int(300, "Only show breaks from the last N bars  (0 = all history)", minval = 0, maxval = 5000, group = gVs, tooltip = "THIS is the control for clutter. Everything inside the window is numbered and drawn; everything older is cleared off the chart.\n\n300 by default. Raise it to annotate further back, lower it to keep the chart to what you are actually looking at. 0 keeps the whole history, which at swing length 1 will hit TradingView's 500-drawing ceiling and start losing the oldest marks.")
 cN1 = input.color(color.new(#5B9CF6, 0), "1st", inline = "cn", group = gVs)
 cN2 = input.color(color.new(#2962FF, 0), "2nd", inline = "cn", group = gVs)
 cN3 = input.color(color.new(#089981, 0), "3rd", inline = "cn", group = gVs)
@@ -67,7 +67,7 @@ lblFmt = input.string("1st Break", "Label text", options = ["1st Break", "1st", 
 lblPos = input.string("Centre", "Label sits", options = ["Left", "Centre", "Right"], group = gVs)
 lblOff = input.float(0.25, "Label offset (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gVs)
 lblSzIn = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gVs)
-keepN = input.int(80, "Keep last N break marks", minval = 1, maxval = 500, group = gVs, tooltip = "With every turning point counting there are far more marks than before. Use \"Hide breaks past the Nth\" and the last-N-bars window above to control clutter rather than lowering this, or marks will vanish off the chart.")
+keepN = input.int(500, "Keep last N break marks  (hard ceiling — leave at 500)", minval = 1, maxval = 500, group = gVs, tooltip = "NOT the clutter control. This is a hard ceiling that DELETES the oldest marks once it is exceeded, and TradingView cannot draw more than 500 lines anyway, so leave it at 500.\n\nSetting this low is what makes marks that were drawn correctly vanish from the chart later: at 10, only the ten most recent breaks survive and everything before them is gone. Use \"Only show breaks from the last N bars\" above instead.")
 
 // ===================== ENTRY =================================================
 gEn = "Entry"
