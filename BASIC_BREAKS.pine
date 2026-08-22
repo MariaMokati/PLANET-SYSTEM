@@ -71,10 +71,13 @@ keepN = input.int(80, "Keep last N break marks", minval = 1, maxval = 500, group
 
 // ===================== ENTRY =================================================
 gEn = "Entry"
-entOn = input.bool(false, "Mark an entry on the Nth break", group = gEn, tooltip = "A small arrow, nothing else. Fires the moment the candle that makes the Nth break CLOSES.")
+entOn = input.bool(false, "Mark an entry on the Nth break", group = gEn, tooltip = "An arrow on the candle you enter plus an \"E: Long\" / \"E: Short\" label. Fires the moment the candle that makes the Nth break CLOSES.")
 entAt = input.int(2, "…on which break", minval = 1, maxval = 20, group = gEn, tooltip = "2 by default: the entry is on the second break.")
 entShift = input.int(1, "Arrow sits N candles after the break candle", minval = 0, maxval = 10, group = gEn, tooltip = "The signal is generated when the break candle closes; the entry is the candle after it. 1 by default, so the arrow points at the candle you actually enter on.")
-entSzIn = input.string("Small", "Arrow size", options = ["Tiny", "Small", "Normal", "Large"], group = gEn)
+entTxtBuy = input.string("E: Long", "Buy label", inline = "et", group = gEn)
+entTxtSell = input.string("E: Short", "Sell label", inline = "et", group = gEn)
+entSzIn = input.string("Large", "Arrow size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gEn)
+entTxtSz = input.string("Normal", "Label text size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gEn)
 entBuyC = input.color(#00BF71, "Buy", inline = "ec", group = gEn)
 entSellC = input.color(#FF4F87, "Sell", inline = "ec", group = gEn)
 entPad = input.float(0.35, "Arrow gap from the candle (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gEn)
@@ -87,7 +90,7 @@ dbSzIn = input.string("Tiny", "Text size", options = ["Tiny", "Small", "Normal"]
 
 // ===================== HELPERS ===============================================
 f_size(string s) =>
-    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : size.large
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : s == "Huge" ? size.huge : size.large
 
 f_lstyle(string s) =>
     s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
@@ -236,13 +239,17 @@ f_mark(int n, float p, int b, bool isHL) =>
         f_prune(brkLn, brkLb, keepN)
     array.size(brkLn)
 
-// A small arrow on the candle you enter, and nothing else. The signal is made
-// when the BREAK candle closes; the arrow sits `entShift` candles later, which
-// is the candle you actually take.
+// An arrow on the candle you enter, plus its own text. Two separate labels so
+// the text is plain coloured type rather than a chunky filled box. The signal
+// is made when the BREAK candle closes; both sit `entShift` candles later,
+// which is the candle you actually take.
 f_entry(bool isBuy) =>
     float pad = atr14 * entPad
-    array.push(enLb, label.new(bar_index + entShift, isBuy ? low - pad : high + pad, "", xloc = xloc.bar_index, yloc = yloc.price, style = isBuy ? label.style_arrowup : label.style_arrowdown, color = isBuy ? entBuyC : entSellC, textcolor = isBuy ? entBuyC : entSellC, size = f_size(entSzIn)))
-    while array.size(enLb) > keepN
+    color c = isBuy ? entBuyC : entSellC
+    int x = bar_index + entShift
+    array.push(enLb, label.new(x, isBuy ? low - pad : high + pad, "", xloc = xloc.bar_index, yloc = yloc.price, style = isBuy ? label.style_arrowup : label.style_arrowdown, color = c, textcolor = c, size = f_size(entSzIn)))
+    array.push(enLb, label.new(x, isBuy ? low - pad * 2.4 : high + pad * 2.4, isBuy ? entTxtBuy : entTxtSell, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(entTxtSz)))
+    while array.size(enLb) > keepN * 2
         label.delete(array.shift(enLb))
     array.size(enLb)
 
