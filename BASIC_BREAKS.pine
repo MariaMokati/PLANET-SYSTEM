@@ -38,7 +38,8 @@
 //
 // THE ZONE is drawn at the 1st Break. Demand runs from that level down to the
 // low the rally came off, with the 50% marked through the middle. Supply is the
-// mirror.
+// mirror. A zone is RETIRED the moment price closes through the far edge, and
+// only the last N live ones stay on the chart.
 // =============================================================================
 indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
 
@@ -86,7 +87,8 @@ zoneExt = input.int(120, "Extend N bars forward", minval = 5, maxval = 400, grou
 zoneBuyC = input.color(#3E7BD6, "Demand", inline = "zc", group = gZ)
 zoneSellC = input.color(#D6553E, "Supply", inline = "zc", group = gZ)
 zoneFade = input.int(90, "Fill transparency", minval = 0, maxval = 100, group = gZ)
-zoneKeep = input.int(6, "Keep the last N zones", minval = 1, maxval = 40, group = gZ)
+zoneKeep = input.int(2, "Show at most N ACTIVE zones", minval = 1, maxval = 20, group = gZ, tooltip = "Only live zones are on the chart, newest kept. 2 by default.")
+zoneKill = input.bool(true, "Remove a zone once it is invalidated", group = gZ, tooltip = "A demand zone dies the moment price CLOSES below its bottom edge — the same level the sequence is abandoned under. Supply dies on a close above its top. Dead zones come straight off the chart instead of stacking up behind price.")
 
 // ===================== HELPERS ===============================================
 f_size(string s) =>
@@ -162,6 +164,9 @@ var array<label> eLb = array.new<label>()
 var array<box> zBx = array.new<box>()
 var array<line> zLn = array.new<line>()
 var array<label> zLb = array.new<label>()
+// the price that kills each zone, and which way it has to be crossed
+var array<float> zKill = array.new<float>()
+var array<bool> zBuy = array.new<bool>()
 
 float atr14 = ta.atr(14)
 
@@ -209,17 +214,18 @@ f_zone(float lvl, float ext, int fromB, bool isBuy) =>
             color col = isBuy ? zoneBuyC : zoneSellC
             int x1 = f_xc(fromB)
             int x2 = bar_index + zoneExt
+            float mid = math.avg(top, bot)
             array.push(zBx, box.new(x1, top, x2, bot, xloc = xloc.bar_index, border_color = color.new(col, 40), bgcolor = color.new(col, zoneFade)))
-            if zone50
-                float mid = math.avg(top, bot)
-                array.push(zLn, line.new(x1, mid, x2, mid, xloc = xloc.bar_index, color = color.new(col, 20), style = line.style_dashed))
-                array.push(zLb, label.new(int(math.avg(x1, x2)), mid, isBuy ? zoneTxtB : zoneTxtS, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = color.new(col, 0), size = size.small))
+            array.push(zLn, zone50 ? line.new(x1, mid, x2, mid, xloc = xloc.bar_index, color = color.new(col, 20), style = line.style_dashed) : line.new(x1, mid, x1, mid, xloc = xloc.bar_index, color = color.new(col, 100)))
+            array.push(zLb, label.new(int(math.avg(x1, x2)), mid, zone50 ? (isBuy ? zoneTxtB : zoneTxtS) : "", xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = color.new(col, 0), size = size.small))
+            array.push(zKill, isBuy ? bot : top)
+            array.push(zBuy, isBuy)
             while array.size(zBx) > zoneKeep
                 box.delete(array.shift(zBx))
-            while array.size(zLn) > zoneKeep
                 line.delete(array.shift(zLn))
-            while array.size(zLb) > zoneKeep
                 label.delete(array.shift(zLb))
+                array.shift(zKill)
+                array.shift(zBuy)
     array.size(zBx)
 
 // ===================== BUILD THE LIVE POOLS ==================================
@@ -362,6 +368,25 @@ if barstate.isconfirmed and sellOn
         if array.size(dnP) == 0
             dnOn := false
             nDn := 0
+
+// ===================== RETIRE DEAD ZONES =====================================
+// A demand zone is finished the moment price CLOSES below its bottom edge, and
+// supply the moment price closes above its top. Walk backwards so removing an
+// entry does not shift the ones still to be checked.
+if barstate.isconfirmed and zoneKill and array.size(zBx) > 0
+    for j = 0 to array.size(zBx) - 1
+        int i = array.size(zBx) - 1 - j
+        if i < array.size(zBx)
+            bool dead = array.get(zBuy, i) ? close < array.get(zKill, i) : close > array.get(zKill, i)
+            if dead
+                box.delete(array.get(zBx, i))
+                line.delete(array.get(zLn, i))
+                label.delete(array.get(zLb, i))
+                array.remove(zBx, i)
+                array.remove(zLn, i)
+                array.remove(zLb, i)
+                array.remove(zKill, i)
+                array.remove(zBuy, i)
 
 // ===================== KEEP THE CHART TO WHAT IS BEING LOOKED AT =============
 if barstate.islast and histBars > 0
