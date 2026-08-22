@@ -37,7 +37,7 @@ indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_l
 
 // ===================== STRUCTURE =============================================
 gS = "Structure"
-pvLen = input.int(2, "Swing length", minval = 1, group = gS, tooltip = "Bars that must be clear either side of a high or low for it to count as a level. This is the dial: lower picks up smaller turns, higher keeps only the bigger ones.")
+pvLen = input.int(1, "Swing length", minval = 1, group = gS, tooltip = "Bars that must be clear either side of a high or low for it to count as a level.\n\n1 (default) — every turn counts, including one- and two-bar ones. On the worked example the levels at 4431, 4443 and 4459 sit in 1-2 bar zigzags: at swing length 2 they are not pivots at all, never enter the pool, and never get numbered. Only 4420 survives, which is exactly the failure that produced this default.\n\nRaise it only if it is picking up turns you would not count.")
 buyOn = input.bool(true, "Buy side  —  highs of a decline, broken upward", group = gS)
 sellOn = input.bool(true, "Sell side  —  lows of a rally, broken downward", group = gS)
 poolMax = input.int(60, "Track at most N levels per side", minval = 3, maxval = 300, group = gS, tooltip = "Bounds the level pool. The OLDEST is dropped when full, and in a decline the oldest is the highest — so if a deep move stops being numbered part-way, raise this.")
@@ -108,11 +108,22 @@ var int nDn = 0
 var float upFloor = na
 var float dnCeil = na
 
+// The low the rally is coming off, and the high the decline is coming off.
+// Reset on each new pivot in the same direction, so at the moment a sequence
+// freezes these hold the extreme of the leg that just ended. Reading these from
+// the pivot pools instead was the bug: the opposite side empties those pools as
+// it eats them, so the value was often na and the sequence never got abandoned.
+var float rLow = na
+var float rHigh = na
+
 var array<line> dLn = array.new<line>()
 var array<label> dLb = array.new<label>()
 
 float rawPh = ta.pivothigh(pvLen, pvLen)
 float rawPl = ta.pivotlow(pvLen, pvLen)
+
+rLow := na(rLow) ? low : math.min(rLow, low)
+rHigh := na(rHigh) ? high : math.max(rHigh, high)
 
 f_mark(int n, float p, int b, bool up) =>
     if showAll or n <= showN
@@ -129,12 +140,14 @@ f_mark(int n, float p, int b, bool up) =>
 if not na(rawPh)
     array.push(hiP, rawPh)
     array.push(hiB, bar_index - pvLen)
+    rLow := low
     while array.size(hiP) > poolMax
         array.shift(hiP)
         array.shift(hiB)
 if not na(rawPl)
     array.push(loP, rawPl)
     array.push(loB, bar_index - pvLen)
+    rHigh := high
     while array.size(loP) > poolMax
         array.shift(loP)
         array.shift(loB)
@@ -166,7 +179,7 @@ if barstate.isconfirmed and buyOn
         while array.size(hiP) > 0
             array.shift(hiP)
             array.shift(hiB)
-        upFloor := array.size(loP) > 0 ? array.get(loP, array.size(loP) - 1) : na
+        upFloor := rLow
         upOn := true
         nUp := 0
 
@@ -208,7 +221,7 @@ if barstate.isconfirmed and sellOn
         while array.size(loP) > 0
             array.shift(loP)
             array.shift(loB)
-        dnCeil := array.size(hiP) > 0 ? array.get(hiP, array.size(hiP) - 1) : na
+        dnCeil := rHigh
         dnOn := true
         nDn := 0
 
