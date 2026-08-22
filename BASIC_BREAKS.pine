@@ -160,8 +160,13 @@ float rawPh = ta.pivothigh(pvLen, pvLen)
 
 // ---- build the stacks ------------------------------------------------------
 // A HIGHER low continues the up impulse: push it, and the pullback count starts
-// over because the impulse is still going. A LOWER low means that structure is
-// finished — throw the stack away and begin again from this low.
+// over because the impulse is still going.
+//
+// A pivot that is NOT higher is simply IGNORED. It used to wipe the stack and
+// start again from that pivot, which is why the dashboard read "LH (buys) 1"
+// and the buy side could only ever print a 1st Break — every level still
+// standing was deleted the moment a higher pivot high came in. A level now
+// leaves the stack for exactly one reason: price broke it.
 if not na(rawPl)
     int b = bar_index - pvLen
     if array.size(hlP) == 0 or rawPl > array.get(hlP, array.size(hlP) - 1)
@@ -170,13 +175,6 @@ if not na(rawPl)
         nHL := 0
         if array.size(hlP) >= minLv
             hlOk := true
-    else
-        array.clear(hlP)
-        array.clear(hlB)
-        array.push(hlP, rawPl)
-        array.push(hlB, b)
-        nHL := 0
-        hlOk := minLv <= 1
     while array.size(hlP) > stackMax
         array.shift(hlP)
         array.shift(hlB)
@@ -189,13 +187,6 @@ if not na(rawPh)
         nLH := 0
         if array.size(lhP) >= minLv
             lhOk := true
-    else
-        array.clear(lhP)
-        array.clear(lhB)
-        array.push(lhP, rawPh)
-        array.push(lhB, b)
-        nLH := 0
-        lhOk := minLv <= 1
     while array.size(lhP) > stackMax
         array.shift(lhP)
         array.shift(lhB)
