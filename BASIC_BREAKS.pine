@@ -87,6 +87,7 @@ zDemC = input.color(color.new(#2962FF, 0), "Demand", inline = "z1", group = gZ)
 zFade = input.int(88, "Zone fill transparency", minval = 0, maxval = 100, group = gZ)
 zoneStop = input.string("Freeze at mitigation", "When price closes back through it", options = ["Freeze at mitigation", "Delete at mitigation", "Never stop"], group = gZ, tooltip = "Freeze (default) — the box stops extending but stays on the chart as history. Delete — it disappears once used. Never stop — it keeps extending right forever.")
 zKeep = input.int(6, "Keep last N zones per layer", minval = 1, maxval = 50, group = gZ)
+zMaxBars = input.int(500, "Stop extending a zone after N bars", minval = 20, maxval = 5000, group = gZ, tooltip = "A zone that is never traded back into would otherwise extend forever. Once it is this old it freezes where it is. TradingView also refuses to move a drawing more than ~10,000 bars behind the current bar, so this is a hard requirement, not just tidiness.")
 
 // ===================== LEVEL SOURCE 1 — SWING ================================
 gL1 = "Levels 1 — SWING  (confirmed pivots)"
@@ -206,6 +207,13 @@ f_prunez(array<box> ba, array<line> la, array<label> lb, int keepN) =>
         label.delete(array.shift(lb))
     array.size(ba)
 
+// TradingView refuses any drawing coordinate more than ~10,000 bars behind the
+// current bar. A level can stand unbroken for far longer than that, so every
+// bar index that reaches a drawing goes through here first. Only the DRAWING
+// is clamped — the tracked level keeps its true bar.
+f_xc(int x) =>
+    na(x) ? bar_index : math.max(x, bar_index - 4000)
+
 atr14 = ta.atr(14)
 
 // leg extremes, read once and shared by every layer
@@ -254,11 +262,13 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
     var line liveSupMid = na
     var label liveSupLbl = na
     var float liveSupTop = na
+    var int liveSupLeft = na
     var bool liveSupOn = false
     var box liveDemBox = na
     var line liveDemMid = na
     var label liveDemLbl = na
     var float liveDemBot = na
+    var int liveDemLeft = na
     var bool liveDemOn = false
     var int nBull = 0
     var int nBear = 0
@@ -359,30 +369,41 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
             anchBull := na
 
     // ---- keep the live zones extending, and retire them on mitigation ------
+    // A zone that is never traded back into must still stop extending: every
+    // bar index handed to a drawing has to stay within ~10,000 bars of the
+    // current bar, and the 50% label sits at the MIDPOINT of the box, so it
+    // drifts out of range at half the rate the box does. Age it out, and clamp
+    // the midpoint as a second line of defence.
     if liveSupOn and not na(liveSupBox)
-        box.set_right(liveSupBox, bar_index)
-        if not na(liveSupMid)
-            line.set_x2(liveSupMid, bar_index)
-            if not na(liveSupLbl)
-                label.set_x(liveSupLbl, int(math.avg(box.get_left(liveSupBox), bar_index)))
-        if zoneStop != "Never stop" and close > liveSupTop
-            if zoneStop == "Delete at mitigation"
-                box.delete(liveSupBox)
-                line.delete(liveSupMid)
-                label.delete(liveSupLbl)
+        if na(liveSupLeft) or bar_index - liveSupLeft > zMaxBars
             liveSupOn := false
+        else
+            box.set_right(liveSupBox, bar_index)
+            if not na(liveSupMid)
+                line.set_x2(liveSupMid, bar_index)
+            if not na(liveSupLbl)
+                label.set_x(liveSupLbl, math.max(int(math.avg(liveSupLeft, bar_index)), bar_index - zMaxBars))
+            if zoneStop != "Never stop" and close > liveSupTop
+                if zoneStop == "Delete at mitigation"
+                    box.delete(liveSupBox)
+                    line.delete(liveSupMid)
+                    label.delete(liveSupLbl)
+                liveSupOn := false
     if liveDemOn and not na(liveDemBox)
-        box.set_right(liveDemBox, bar_index)
-        if not na(liveDemMid)
-            line.set_x2(liveDemMid, bar_index)
-            if not na(liveDemLbl)
-                label.set_x(liveDemLbl, int(math.avg(box.get_left(liveDemBox), bar_index)))
-        if zoneStop != "Never stop" and close < liveDemBot
-            if zoneStop == "Delete at mitigation"
-                box.delete(liveDemBox)
-                line.delete(liveDemMid)
-                label.delete(liveDemLbl)
+        if na(liveDemLeft) or bar_index - liveDemLeft > zMaxBars
             liveDemOn := false
+        else
+            box.set_right(liveDemBox, bar_index)
+            if not na(liveDemMid)
+                line.set_x2(liveDemMid, bar_index)
+            if not na(liveDemLbl)
+                label.set_x(liveDemLbl, math.max(int(math.avg(liveDemLeft, bar_index)), bar_index - zMaxBars))
+            if zoneStop != "Never stop" and close < liveDemBot
+                if zoneStop == "Delete at mitigation"
+                    box.delete(liveDemBox)
+                    line.delete(liveDemMid)
+                    label.delete(liveDemLbl)
+                liveDemOn := false
 
     bool evalOk = on and (not waitClose or barstate.isconfirmed)
 
@@ -409,11 +430,12 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
                 else if zoneSrc == "Broken swing candle"
                     zTop := actLoCH
                     zBot := actLoCL
-                    zLeft := actLoBar
+                    zLeft := f_xc(actLoBar)
                 else
                     zTop := anchBear
                     zBot := actLo
-                    zLeft := anchMode == "The swing at the 1st break" ? (na(actHiBar) ? actLoBar : int(math.min(actLoBar, actHiBar))) : int(math.min(actLoBar, anchHiNBar))
+                    zLeft := anchMode == "The swing at the 1st break" ? (na(actHiBar) ? actLoBar : int(math.min(actLoBar, actHiBar))) : (na(anchHiNBar) ? actLoBar : int(math.min(actLoBar, anchHiNBar)))
+                zLeft := na(zLeft) ? bar_index : math.max(zLeft, bar_index - zMaxBars)
                 if not na(zTop) and not na(zBot) and zTop > zBot
                     box zb = box.new(zLeft, zTop, bar_index, zBot, xloc = xloc.bar_index, border_color = color.new(zSupC, 45), border_width = 1, bgcolor = color.new(zSupC, zFade))
                     array.push(zbx, zb)
@@ -429,19 +451,21 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
                     liveSupMid := zm
                     liveSupLbl := zl
                     liveSupTop := zTop
+                    liveSupLeft := zLeft
                     liveSupOn := true
                     f_prunez(zbx, zmd, zlb, zKeep)
         bool numbered = (not numCapOn) or (cand <= numCapN)
         if numbered or capMode == "Draw without a number"
             color c = f_col(cand, false, tBull, tBear)
             int xEnd = lineEnd == "Fixed bars" ? bar_index + extBars : bar_index
+            int xStart = f_xc(actLoBar)
             string extMode = lineEnd == "Extend right" ? extend.right : extend.none
             if lineOn
-                array.push(lns, line.new(actLoBar, actLo, xEnd, actLo, xloc = xloc.bar_index, extend = extMode, color = c, style = f_lstyle(lineStyleIn), width = lineW))
+                array.push(lns, line.new(xStart, actLo, xEnd, actLo, xloc = xloc.bar_index, extend = extMode, color = c, style = f_lstyle(lineStyleIn), width = lineW))
             if lblOn
                 float off = atr14 * lblOff
                 float yL = lblSide == "On the line" ? actLo : lblSide == "Above the line" ? actLo + off : actLo - off
-                int xL = lblPos == "Left" ? actLoBar : lblPos == "Right" ? xEnd : int(math.avg(actLoBar, xEnd))
+                int xL = lblPos == "Left" ? xStart : lblPos == "Right" ? xEnd : int(math.avg(xStart, xEnd))
                 array.push(lbs, label.new(xL, yL, f_txt(cand, actLo, numbered, nm), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(lblSzIn)))
             f_prune(lns, lbs, keepN)
 
@@ -468,11 +492,12 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
                 else if zoneSrc == "Broken swing candle"
                     zTop := actHiCH
                     zBot := actHiCL
-                    zLeft := actHiBar
+                    zLeft := f_xc(actHiBar)
                 else
                     zTop := actHi
                     zBot := anchBull
-                    zLeft := anchMode == "The swing at the 1st break" ? (na(actLoBar) ? actHiBar : int(math.min(actHiBar, actLoBar))) : int(math.min(actHiBar, anchLoNBar))
+                    zLeft := anchMode == "The swing at the 1st break" ? (na(actLoBar) ? actHiBar : int(math.min(actHiBar, actLoBar))) : (na(anchLoNBar) ? actHiBar : int(math.min(actHiBar, anchLoNBar)))
+                zLeft := na(zLeft) ? bar_index : math.max(zLeft, bar_index - zMaxBars)
                 if not na(zTop) and not na(zBot) and zTop > zBot
                     box zb = box.new(zLeft, zTop, bar_index, zBot, xloc = xloc.bar_index, border_color = color.new(zDemC, 45), border_width = 1, bgcolor = color.new(zDemC, zFade))
                     array.push(zbx, zb)
@@ -488,19 +513,21 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
                     liveDemMid := zm
                     liveDemLbl := zl
                     liveDemBot := zBot
+                    liveDemLeft := zLeft
                     liveDemOn := true
                     f_prunez(zbx, zmd, zlb, zKeep)
         bool numbered = (not numCapOn) or (cand <= numCapN)
         if numbered or capMode == "Draw without a number"
             color c = f_col(cand, true, tBull, tBear)
             int xEnd = lineEnd == "Fixed bars" ? bar_index + extBars : bar_index
+            int xStart = f_xc(actHiBar)
             string extMode = lineEnd == "Extend right" ? extend.right : extend.none
             if lineOn
-                array.push(lns, line.new(actHiBar, actHi, xEnd, actHi, xloc = xloc.bar_index, extend = extMode, color = c, style = f_lstyle(lineStyleIn), width = lineW))
+                array.push(lns, line.new(xStart, actHi, xEnd, actHi, xloc = xloc.bar_index, extend = extMode, color = c, style = f_lstyle(lineStyleIn), width = lineW))
             if lblOn
                 float off = atr14 * lblOff
                 float yL = lblSide == "On the line" ? actHi : actHi + off
-                int xL = lblPos == "Left" ? actHiBar : lblPos == "Right" ? xEnd : int(math.avg(actHiBar, xEnd))
+                int xL = lblPos == "Left" ? xStart : lblPos == "Right" ? xEnd : int(math.avg(xStart, xEnd))
                 array.push(lbs, label.new(xL, yL, f_txt(cand, actHi, numbered, nm), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(lblSzIn)))
             f_prune(lns, lbs, keepN)
 

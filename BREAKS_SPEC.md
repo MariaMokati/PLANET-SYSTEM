@@ -103,6 +103,17 @@ The box extends right as price moves. When price closes back through it, it eith
 **freezes** (default — it stays as history but stops extending), is **deleted**, or
 keeps extending. Each layer keeps its own last N zones.
 
+A zone that is never traded back into also stops extending once it is
+`Stop extending a zone after N bars` old (default 500). This is a hard
+requirement, not tidiness: TradingView rejects any drawing coordinate more than
+~10,000 bars behind the current bar, and the 50% label sits at the *midpoint* of
+the box, so it leaves the legal range at half the rate the box does. Without the
+age-out this threw `RE10026: Bar index value of the x argument … is too far from
+the current bar index` on a full gold history. Every bar index that reaches a
+drawing is additionally clamped to 4,000 bars back — a level can stand unbroken
+for longer than the limit allows, and only the drawing is clamped; the tracked
+level keeps its true bar.
+
 ## 6. Visuals
 
 The mark is a horizontal line at the broken level running from the swing that
@@ -145,9 +156,14 @@ before each commit. Confirmed there:
   swing anchor and did **not** fix the restarting count; the simulation is what
   caught that.
 
-Not verified: the script has **not been compiled in TradingView from this
-environment** and has not been run against real market data here. The zone
-drawing, mitigation and freezing behaviour is inspection-only — the Python port
-covers the counting and the anchor, not the box objects. This is an annotation
+Verified on the chart: the script compiles in TradingView and runs. The first
+build of the zone layer threw `RE10026` on a full gold history — an unmitigated
+zone extended for ~20,000 bars until its 50% label was ~10,000 bars behind the
+current bar. Fixed by ageing zones out and clamping every drawing coordinate.
+
+Not verified: this environment cannot compile or run Pine, so each change is
+checked by hand and by the Python port before it goes out. The port covers the
+counting and the anchor, not the drawing objects — box placement, mitigation and
+freezing are inspection-only. This is an annotation
 tool; it makes no claim that an Nth break is more or less likely to continue. If
 TradingView reports a compile error, paste it back and it gets fixed.
