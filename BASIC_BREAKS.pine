@@ -1,0 +1,735 @@
+//@version=6
+// =============================================================================
+// BASIC BREAKS  —  numbered off ACCURATE HH / HL / LH / LL structure
+// -----------------------------------------------------------------------------
+// WHAT CHANGED, AND WHY
+//
+//   The old build read ta.pivothigh and ta.pivotlow as two INDEPENDENT series.
+//   They do not alternate. Inside one leg you can get three pivot highs in a row
+//   with no pivot low between them, and all three went on the stack as separate
+//   levels. Three levels where structure has ONE. That is what made a genuine
+//   2nd print as a 3rd, and what put a level in a place nothing turned.
+//
+//   This build makes the structure alternate, the way it is read by hand:
+//
+//     · a swing HIGH must be followed by a swing LOW before another high counts
+//     · while the leg is still running, the more extreme point REPLACES the one
+//       standing — a higher high inside an up leg is the same swing, moved
+//     · so every swing is one turning point, and they run high · low · high · low
+//
+//   Each swing is then classified against the previous swing ON ITS OWN SIDE:
+//
+//     HH  swing high ABOVE the last swing high        LH  below it
+//     HL  swing low  ABOVE the last swing low         LL  below it
+//
+//   A decline leaves LH · LL · LH · LL behind it. A rally leaves HH · HL.
+//
+// THE BREAKS
+//   Unchanged in spirit — the move takes the structure back NEWEST FIRST:
+//
+//       the LAST swing high made     →  1st Break        (buy setups)
+//       the one before it            →  2nd Break
+//       the one before that          →  3rd Break        … and so on.
+//
+//   Lows are the mirror, for sell setups. A level leaves for one reason only:
+//   price broke it. The count restarts at 1st the moment a break takes a swing
+//   NEWER than the last one numbered — that is the move eating structure it
+//   built itself, which is a different leg.
+//
+//   Restricting the buy side to LH only (and the sell side to HL only) is
+//   optional and OFF by default: an HH is still a level price has to take, and
+//   it is usually the swing that topped the decline — the last number in the
+//   sequence, not something to drop.
+//
+// Non-repainting: swings are CONFIRMED pivots (placed `length` bars back) and a
+// break is judged once at bar close. A wick through that closes back inside is
+// a fake-out and breaks nothing.
+//
+// The HH / HL / LH / LL labels and the zigzag are OFF. Nothing is drawn on the
+// chart that was not asked for; turn them on in "Structure labels" to check the
+// reading, turn them off again and the numbering is untouched.
+// =============================================================================
+indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
+
+// ===================== STRUCTURE =============================================
+gSt = "Structure"
+pvLen = input.int(1, "Swing length  —  1 = EVERY turning point, no matter how small", minval = 1, group = gSt, tooltip = "Bars that must be clear either side of a turning point.\n\n1 (default) — every turning point counts, however small. A two-bar bounce inside a decline is a swing.\n\nAnything higher THROWS SMALL TURNING POINTS AWAY. At 5, a bounce needs five bars clear on each side to exist at all, so small ones are never swings and never get numbered.")
+lhOnly = input.bool(false, "Buys: only break LOWER highs  ·  Sells: only HIGHER lows", group = gSt, tooltip = "OFF by default.\n\nOff — every swing high is a level for the buy side, whether it is an LH or the HH that topped the decline. The HH is normally the LAST number in the sequence, so dropping it loses the far end of the leg.\n\nOn — only swings classified LH are levels for buys, only HL for sells. Strict structure reading. Turn it on to see the difference; it is the whole point of this build being switchable.")
+minLv = input.int(2, "A side counts once it has N levels", minval = 1, maxval = 10, group = gSt, tooltip = "A single stray swing is not a sequence. Requiring 2 means at least two levels must exist before breaks are numbered. Set to 1 to number everything.")
+sellOn = input.bool(true, "Track LOWS  (broken downward → sell setups)", group = gSt)
+buyOn = input.bool(true, "Track HIGHS  (broken upward → buy setups)", group = gSt)
+swMax = input.int(60, "Track at most N swings", minval = 4, maxval = 400, group = gSt, tooltip = "Bounds the structure. When it is full the OLDEST swing is dropped — and in a decline the oldest is the highest, the one furthest from price. If a deep move stops being numbered part-way, raise this.")
+
+// ===================== BREAK CONFIRMATION ====================================
+gCf = "Break confirmation"
+confMode = input.string("Close beyond", "What breaks a level", options = ["Wick beyond", "Close beyond", "Full body beyond"], group = gCf, tooltip = "Close beyond (default) — the candle must FINISH past the level. A wick through that closes back inside is a fake-out and breaks nothing.\nFull body beyond — open AND close both clear. Stricter.\nWick beyond — any touch counts, fake-outs included.")
+waitClose = input.bool(true, "Only judge closed bars", group = gCf, tooltip = "On (default): a break is decided at the close of the candle and never redrawn. This is what makes the entry signal fire in real time on that close.")
+
+// ===================== IS THIS ACTUALLY A SETUP? =============================
+// Structure is still read at every turning point, however small — that has not
+// changed and it is not going to. What HAS changed is that not every sequence
+// is a trade. A two-bar wiggle taken back by another two-bar wiggle is a break;
+// it is not a setup, and 786 of them at 37.8% is what that costs.
+//
+// A sequence qualifies at its 1st Break, on the size of the leg it is taking
+// back — the distance from that level down to the low the move came off (up to
+// the high, for sells). Everything below the bar is still counted in structure,
+// it just does not get drawn, does not get an entry, and does not go into the
+// results.
+gQ = "Is this actually a setup?"
+qOn = input.bool(true, "Only trade a sequence if the leg is worth trading", group = gQ, tooltip = "ON by default. Turn it off to go back to numbering and trading every sequence, which is what produced hundreds of trades at a losing profit factor.")
+minLegAtr = input.float(2.5, "…the leg must be at least (× ATR)", minval = 0.0, maxval = 20.0, step = 0.1, group = gQ, tooltip = "THIS IS THE DIAL. Measured at the 1st Break: the distance from the level being broken down to the low the move came off, in ATRs.\n\nRaise it for fewer, bigger, cleaner setups. Lower it for more. Watch the dashboard — trades, win %, profit factor — and stop where the profit factor is best, not where the trade count is highest.")
+qTrend = input.bool(false, "…and structure must already have turned", group = gQ, tooltip = "OFF by default. On, a buy sequence only counts once the last swing low is an HL (the decline has stopped making lower lows) and a sell sequence once the last swing high is an LH.\n\nIt cuts the count hard and takes the entry later. Try it second, after the leg size is set.")
+drawSkipped = input.bool(false, "Draw the sequences that did not qualify", group = gQ, tooltip = "OFF by default — this is what takes the mess off the chart. The skipped sequences are still counted in the structure, they are just not drawn.")
+
+// ===================== STRUCTURE LABELS ======================================
+gZz = "Structure labels  (HH / HL / LH / LL)"
+zzLbl = input.bool(false, "Label every swing HH / HL / LH / LL", group = gZz, tooltip = "OFF by default. Turn it on to read the structure the numbering is built from, then turn it off again — it changes nothing except what is drawn.")
+zzLine = input.bool(false, "Join the swings with a zigzag", group = gZz)
+zzN = input.int(20, "…only the last N swings", minval = 2, maxval = 200, group = gZz)
+zzUpC = input.color(color.new(#089981, 0), "HH / HL", inline = "zc", group = gZz)
+zzDnC = input.color(color.new(#F23645, 0), "LH / LL", inline = "zc", group = gZz)
+zzLnC = input.color(color.new(#787B86, 45), "Zigzag", inline = "zc", group = gZz)
+
+// ===================== THE LIVE LEVELS =======================================
+gLs = "The levels still standing"
+stackShow = input.bool(false, "Show the levels nothing has broken yet", group = gLs, tooltip = "OFF by default. A dotted line for every swing still unbroken, numbered outward from price — 1 is the next one that breaks, and it is the one that will be labelled 1st Break.\n\nIt is a preview of the numbering, not part of it: turning it off changes nothing about the break marks or the dashboard.")
+stackHLC = input.color(color.new(#089981, 40), "Lows", inline = "sc", group = gLs)
+stackLHC = input.color(color.new(#F23645, 40), "Highs", inline = "sc", group = gLs)
+stackTag = input.bool(false, "Number them from the top", group = gLs)
+
+// ===================== VISUALS ===============================================
+gVs = "Visuals"
+hidePast = input.bool(true, "Only draw the first N breaks", group = gVs, tooltip = "ON by default: only the 1st, 2nd and 3rd are drawn.\n\nThe count always keeps running underneath — a 4th, 5th or 6th break still happens, still fires the alert and still shows in the dashboard. This only stops them being DRAWN.\n\nTurn it off to put every break in the sequence on the chart.")
+hidePastN = input.int(3, "…how many", minval = 1, maxval = 20, group = gVs)
+histBars = input.int(300, "Only show breaks from the last N bars  (0 = all history)", minval = 0, maxval = 5000, group = gVs, tooltip = "THIS is the control for clutter. Everything inside the window is numbered and drawn; everything older is cleared off the chart.")
+cN1 = input.color(color.new(#5B9CF6, 0), "1st", inline = "cn", group = gVs)
+cN2 = input.color(color.new(#2962FF, 0), "2nd", inline = "cn", group = gVs)
+cN3 = input.color(color.new(#089981, 0), "3rd", inline = "cn", group = gVs)
+cNx = input.color(color.new(#787B86, 0), "4th+", inline = "cn", group = gVs)
+lineOn = input.bool(true, "Draw the broken level as a line", group = gVs)
+lineW = input.int(1, "Line width", minval = 1, maxval = 4, group = gVs)
+lineStyleIn = input.string("Solid", "Line style", options = ["Solid", "Dashed", "Dotted"], group = gVs)
+lblOn = input.bool(true, "Label the break", group = gVs)
+lblFmt = input.string("1st Break", "Label text", options = ["1st Break", "1st", "1st Break + price", "1st Break + kind", "1"], group = gVs, tooltip = "\"1st Break + kind\" puts the structure label on it — \"2nd Break LH\" — so you can see exactly which swing took that number.")
+lblPos = input.string("Centre", "Label sits", options = ["Left", "Centre", "Right"], group = gVs)
+lblOff = input.float(0.25, "Label offset (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gVs)
+lblSzIn = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gVs)
+
+// ===================== ENTRY =================================================
+gEn = "Entry"
+entOn = input.bool(false, "Mark an entry on the Nth break", group = gEn, tooltip = "A marker on the candle you enter plus an \"E: Long\" / \"E: Short\" label. Fires the moment the candle that makes the Nth break CLOSES.")
+entAt = input.int(2, "…on which break", minval = 1, maxval = 20, group = gEn)
+entShift = input.int(1, "Marker sits N candles after the break candle", minval = 0, maxval = 10, group = gEn)
+entTxtBuy = input.string("E: Long", "Buy label", inline = "et", group = gEn)
+entTxtSell = input.string("E: Short", "Sell label", inline = "et", group = gEn)
+entShape = input.string("Triangle", "Marker", options = ["Triangle", "Circle", "Arrow", "Diamond"], group = gEn)
+entSzIn = input.string("Normal", "Marker size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gEn)
+entTxtSz = input.string("Normal", "Label text size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gEn)
+entBuyC = input.color(#00BF71, "Buy", inline = "ec", group = gEn)
+entSellC = input.color(#FF4F87, "Sell", inline = "ec", group = gEn)
+entPad = input.float(0.35, "Marker gap from the candle (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gEn)
+
+// ===================== RESULTS ===============================================
+// Not a Strategy. Indicator-side numbers: no spread, no slippage, no commission,
+// no partial fills, one position at a time. They tell you how the SIGNAL behaved
+// on this timeframe's bars, nothing more.
+gRs = "Results  (dashboard stats)"
+resOn = input.bool(true, "Track wins / losses on this timeframe", group = gRs, tooltip = "Follows the same signal the entry arrows use — the Nth break — whether or not the arrows are switched on. Switching timeframe recalculates from that timeframe's bars.")
+stopMode = input.string("Structure (the swing behind it)", "Stop", options = ["Structure (the swing behind it)", "Fixed × ATR"], group = gRs, tooltip = "Structure: the newest unbroken swing behind the entry — the low the move came off for a long, the high for a short. That is where the idea is wrong.\nFixed: a flat multiple of ATR.")
+stopAtr = input.float(1.0, "…ATR multiple (also the fallback)", minval = 0.1, maxval = 10.0, step = 0.1, group = gRs)
+tgtMode = input.string("Nearest opposite level", "Target", options = ["Nearest opposite level", "Opposite extreme (draw on liquidity)", "R multiple"], group = gRs, tooltip = "NEAREST (default) — the first unbroken swing the other side of entry. It is the level price actually has to get through next, and it is reachable.\n\nOpposite extreme — the FURTHEST unbroken swing, the full draw on liquidity. It is the right idea on a big leg and the wrong one on a small one: aiming at it on every sequence is most of why the win rate was 37.8%. A target three times further away than the stop cannot win half the time.\n\nR multiple — a flat multiple of the risk.\n\nAll three fall back to the R multiple when there is nothing standing the other side.")
+tgtR = input.float(2.0, "…R multiple (also the fallback)", minval = 0.1, maxval = 20.0, step = 0.1, group = gRs)
+
+// ===================== DASHBOARD =============================================
+gDb = "Dashboard"
+dbOn = input.bool(true, "Show dashboard", group = gDb)
+dbPos = input.string("Top right", "Position", options = ["Top right", "Top left", "Bottom right", "Bottom left", "Middle right"], group = gDb)
+dbSzIn = input.string("Tiny", "Text size", options = ["Tiny", "Small", "Normal"], group = gDb)
+
+// ===================== HELPERS ===============================================
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : s == "Huge" ? size.huge : size.large
+
+f_lstyle(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+f_tpos(string s) =>
+    switch s
+        "Top left" => position.top_left
+        "Bottom right" => position.bottom_right
+        "Bottom left" => position.bottom_left
+        "Middle right" => position.middle_right
+        => position.top_right
+
+f_ord(int n) =>
+    int r100 = n % 100
+    int r10 = n % 10
+    string sfx = r100 >= 11 and r100 <= 13 ? "th" : r10 == 1 ? "st" : r10 == 2 ? "nd" : r10 == 3 ? "rd" : "th"
+    str.tostring(n) + sfx
+
+// 1 HH · 2 HL · 3 LH · 4 LL · 0 the first swing on its side, nothing to compare
+f_kind(int k) =>
+    k == 1 ? "HH" : k == 2 ? "HL" : k == 3 ? "LH" : k == 4 ? "LL" : "—"
+
+f_txt(int n, float px, int k) =>
+    switch lblFmt
+        "1st Break" => f_ord(n) + " Break"
+        "1st" => f_ord(n)
+        "1st Break + price" => f_ord(n) + " Break " + str.tostring(math.round_to_mintick(px))
+        "1st Break + kind" => f_ord(n) + " Break " + f_kind(k)
+        => str.tostring(n)
+
+f_eshape(string sh, bool up) =>
+    sh == "Circle" ? label.style_circle : sh == "Diamond" ? label.style_diamond : sh == "Arrow" ? (up ? label.style_arrowup : label.style_arrowdown) : (up ? label.style_triangleup : label.style_triangledown)
+
+f_tf() =>
+    timeframe.isseconds ? timeframe.period + "s" : timeframe.isminutes ? timeframe.period + "m" : timeframe.period
+
+f_r(float v) =>
+    (v >= 0 ? "+" : "") + str.tostring(v, "#.##")
+
+f_col(int n) =>
+    n == 1 ? cN1 : n == 2 ? cN2 : n == 3 ? cN3 : cNx
+
+f_brkDn(float lvl) =>
+    na(lvl) ? false : confMode == "Wick beyond" ? low < lvl : confMode == "Close beyond" ? close < lvl : close < lvl and open < lvl
+
+f_brkUp(float lvl) =>
+    na(lvl) ? false : confMode == "Wick beyond" ? high > lvl : confMode == "Close beyond" ? close > lvl : close > lvl and open > lvl
+
+// A level can stand longer than TradingView allows a drawing coordinate to sit
+// behind the current bar (~10,000). Only the DRAWING is clamped.
+f_xc(int x) =>
+    na(x) ? bar_index : math.max(x, bar_index - 4000)
+
+// Hard ceiling on drawings, not a setting. TradingView itself cannot draw more
+// than 500 lines or labels, so there is no useful choice here.
+int keepN = 500
+
+atr14 = ta.atr(14)
+
+// ===================== THE STRUCTURE =========================================
+// One entry per SWING, alternating high · low · high · low. swU marks a swing
+// price has already broken — a level leaves for that reason and no other.
+var array<float> swP = array.new<float>()
+var array<int> swB = array.new<int>()
+var array<bool> swH = array.new<bool>()
+var array<int> swK = array.new<int>()
+var array<bool> swU = array.new<bool>()
+
+var int nHL = 0
+var int nLH = 0
+// Bar of the last swing numbered in the running sequence. A sequence eats
+// structure newest-first, so each one must be OLDER than the last. The moment a
+// break takes one NEWER than that, the move has started on structure it built
+// itself — a different leg — and the count restarts at 1st.
+var int lastBhl = -1
+var int lastBlh = -1
+// Judged once, at the 1st Break, and it holds for the whole sequence. A
+// sequence that does not qualify still eats its levels — they were broken, and
+// pretending otherwise would leave them standing forever — it just is not drawn,
+// entered, or counted.
+var bool upQual = true
+var bool dnQual = true
+var int qSkipUp = 0
+var int qSkipDn = 0
+
+var array<line> brkLn = array.new<line>()
+var array<label> brkLb = array.new<label>()
+var array<line> stkLn = array.new<line>()
+var array<label> stkLb = array.new<label>()
+var array<label> enLb = array.new<label>()
+var array<line> zzLn = array.new<line>()
+var array<label> zzLb = array.new<label>()
+
+// ---- results state ---------------------------------------------------------
+var int trTot = 0
+var int trWin = 0
+var int trLoss = 0
+var float rSum = 0.0
+var float rWin = 0.0
+var float rLoss = 0.0
+var bool inTrade = false
+var bool trLong = false
+var float trEntry = na
+var float trStop = na
+var float trTgt = na
+var float trR = na
+
+f_prune(array<line> la, array<label> lb, int k) =>
+    while array.size(la) > k
+        line.delete(array.shift(la))
+    while array.size(lb) > k
+        label.delete(array.shift(lb))
+    array.size(la)
+
+// Is swing i a level for this side? Every unbroken swing on that side, unless
+// the strict reading is on, in which case buys take LH only and sells HL only.
+f_isLvl(int i, bool wantHigh) =>
+    bool ok = array.get(swH, i) == wantHigh and not array.get(swU, i)
+    if ok and lhOnly
+        int k = array.get(swK, i)
+        ok := wantHigh ? k == 3 : k == 2
+    ok
+
+// newest unbroken level on a side, or -1
+f_newestLvl(bool wantHigh) =>
+    int k = -1
+    int n = array.size(swP)
+    if n > 0
+        for j = 0 to n - 1
+            int i = n - 1 - j
+            if k == -1 and f_isLvl(i, wantHigh)
+                k := i
+    k
+
+f_countLvl(bool wantHigh) =>
+    int c = 0
+    int n = array.size(swP)
+    if n > 0
+        for i = 0 to n - 1
+            if f_isLvl(i, wantHigh)
+                c := c + 1
+    c
+
+// newest unbroken swing on a side, whatever it is classified as. The structural
+// stop sits behind the move, and it sits there whether that swing is an HL or an
+// LL — the strict reading filters what gets NUMBERED, not where the idea is wrong.
+f_newestSw(bool wantHigh) =>
+    int k = -1
+    int n = array.size(swP)
+    if n > 0
+        for j = 0 to n - 1
+            int i = n - 1 - j
+            if k == -1 and array.get(swH, i) == wantHigh and not array.get(swU, i)
+                k := i
+    k
+
+// NEAREST unbroken level the other side of `ref` — the next thing in the way
+f_nearLvl(bool wantHigh, float ref) =>
+    float v = na
+    int n = array.size(swP)
+    if n > 0
+        for i = 0 to n - 1
+            if f_isLvl(i, wantHigh)
+                float p = array.get(swP, i)
+                bool beyond = wantHigh ? p > ref : p < ref
+                if beyond
+                    v := na(v) ? p : (wantHigh ? math.min(v, p) : math.max(v, p))
+    v
+
+// furthest unbroken level on a side — the draw on liquidity
+f_farLvl(bool wantHigh) =>
+    float v = na
+    int n = array.size(swP)
+    if n > 0
+        for i = 0 to n - 1
+            if f_isLvl(i, wantHigh)
+                float p = array.get(swP, i)
+                v := na(v) ? p : (wantHigh ? math.max(v, p) : math.min(v, p))
+    v
+
+// the level this bar takes, newest first, or -1
+f_nextUp() =>
+    int k = -1
+    int n = array.size(swP)
+    if n > 0
+        for j = 0 to n - 1
+            int i = n - 1 - j
+            if k == -1 and f_isLvl(i, true) and f_brkUp(array.get(swP, i))
+                k := i
+    k
+
+f_nextDn() =>
+    int k = -1
+    int n = array.size(swP)
+    if n > 0
+        for j = 0 to n - 1
+            int i = n - 1 - j
+            if k == -1 and f_isLvl(i, false) and f_brkDn(array.get(swP, i))
+                k := i
+    k
+
+// pivots read unconditionally so their history stays consistent
+float rawPl = ta.pivotlow(pvLen, pvLen)
+float rawPh = ta.pivothigh(pvLen, pvLen)
+
+// ---- build the alternating structure ---------------------------------------
+// A swing high only follows a swing LOW. A higher high arriving while the up leg
+// is still running is the SAME swing, moved — not a second level. That is the
+// whole difference from reading the two pivot series independently.
+bool addedSw = false
+
+if not na(rawPh)
+    int b = bar_index - pvLen
+    int n = array.size(swP)
+    bool sameLeg = false
+    if n > 0
+        if array.get(swH, n - 1)
+            if not array.get(swU, n - 1)
+                sameLeg := true
+    if sameLeg
+        if rawPh > array.get(swP, n - 1)
+            array.set(swP, n - 1, rawPh)
+            array.set(swB, n - 1, b)
+            addedSw := true
+    else
+        array.push(swP, rawPh)
+        array.push(swB, b)
+        array.push(swH, true)
+        array.push(swK, 0)
+        array.push(swU, false)
+        addedSw := true
+
+if not na(rawPl)
+    int b = bar_index - pvLen
+    int n = array.size(swP)
+    bool sameLeg = false
+    if n > 0
+        if not array.get(swH, n - 1)
+            if not array.get(swU, n - 1)
+                sameLeg := true
+    if sameLeg
+        if rawPl < array.get(swP, n - 1)
+            array.set(swP, n - 1, rawPl)
+            array.set(swB, n - 1, b)
+            addedSw := true
+    else
+        array.push(swP, rawPl)
+        array.push(swB, b)
+        array.push(swH, false)
+        array.push(swK, 0)
+        array.push(swU, false)
+        addedSw := true
+
+// ---- classify the newest swing against the previous one on ITS OWN side -----
+if addedSw
+    int m = array.size(swP)
+    if m > 1
+        bool isH = array.get(swH, m - 1)
+        float p = array.get(swP, m - 1)
+        int prevI = -1
+        for j = 0 to m - 2
+            int i = m - 2 - j
+            if prevI == -1 and array.get(swH, i) == isH
+                prevI := i
+        int kk = 0
+        if prevI >= 0
+            float q = array.get(swP, prevI)
+            kk := isH ? (p > q ? 1 : 3) : (p > q ? 2 : 4)
+        array.set(swK, m - 1, kk)
+    while array.size(swP) > swMax
+        array.shift(swP)
+        array.shift(swB)
+        array.shift(swH)
+        array.shift(swK)
+        array.shift(swU)
+
+// A sequence that ate everything on its side is finished. Checked at the START
+// of the bar, so the bar that empties it keeps its own numbering intact.
+if f_countLvl(false) == 0
+    nHL := 0
+if f_countLvl(true) == 0
+    nLH := 0
+
+bool evalOk = not waitClose or barstate.isconfirmed
+bool sellReady = f_countLvl(false) >= minLv
+bool buyReady = f_countLvl(true) >= minLv
+bool firedAny = false
+int lastNo = 0
+float lastLvl = na
+bool lastWasHL = false
+bool entBuy = false
+bool entSell = false
+
+f_mark(int n, float p, int b, int k, bool isHL) =>
+    if not hidePast or n <= hidePastN
+        color c = f_col(n)
+        int xStart = f_xc(b)
+        if lineOn
+            array.push(brkLn, line.new(xStart, p, bar_index, p, xloc = xloc.bar_index, color = c, style = f_lstyle(lineStyleIn), width = lineW))
+        if lblOn
+            float off = atr14 * lblOff
+            float yL = isHL ? p - off : p + off
+            int xL = lblPos == "Left" ? xStart : lblPos == "Right" ? bar_index : int(math.avg(xStart, bar_index))
+            array.push(brkLb, label.new(xL, yL, f_txt(n, p, k), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(lblSzIn)))
+        f_prune(brkLn, brkLb, keepN)
+    array.size(brkLn)
+
+// A marker on the candle you enter, plus its own text. Two separate labels so
+// the text is plain coloured type rather than a chunky filled box. The signal is
+// made when the BREAK candle closes; both sit `entShift` candles later, which is
+// the candle you actually take.
+f_entry(bool isBuy) =>
+    float pad = atr14 * entPad
+    color c = isBuy ? entBuyC : entSellC
+    int x = bar_index + entShift
+    array.push(enLb, label.new(x, isBuy ? low - pad : high + pad, "", xloc = xloc.bar_index, yloc = yloc.price, style = f_eshape(entShape, isBuy), color = c, textcolor = c, size = f_size(entSzIn)))
+    array.push(enLb, label.new(x, isBuy ? low - pad * 2.4 : high + pad * 2.4, isBuy ? entTxtBuy : entTxtSell, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(entTxtSz)))
+    while array.size(enLb) > keepN * 2
+        label.delete(array.shift(enLb))
+    array.size(enLb)
+
+// ---- the move takes the structure back, newest first -----------------------
+if evalOk and sellOn and sellReady
+    int gi = f_nextDn()
+    while gi >= 0
+        float p = array.get(swP, gi)
+        int b = array.get(swB, gi)
+        int k = array.get(swK, gi)
+        array.set(swU, gi, true)
+        if nHL > 0 and b >= lastBhl
+            nHL := 0
+        nHL := nHL + 1
+        lastBhl := b
+        // the 1st Break is where the sequence is judged
+        if nHL == 1
+            bool okLeg = not qOn
+            if qOn
+                int hi = f_newestSw(true)
+                if hi >= 0
+                    okLeg := (array.get(swP, hi) - p) >= minLegAtr * atr14
+                    if okLeg and qTrend
+                        okLeg := array.get(swK, hi) == 3
+            dnQual := okLeg
+            if not okLeg
+                qSkipDn := qSkipDn + 1
+        if dnQual
+            firedAny := true
+            lastNo := nHL
+            lastLvl := p
+            lastWasHL := true
+        if dnQual or drawSkipped
+            f_mark(nHL, p, b, k, true)
+        if nHL == entAt and dnQual
+            entSell := true
+            if entOn
+                f_entry(false)
+        gi := f_nextDn()
+
+if evalOk and buyOn and buyReady
+    int gj = f_nextUp()
+    while gj >= 0
+        float p = array.get(swP, gj)
+        int b = array.get(swB, gj)
+        int k = array.get(swK, gj)
+        array.set(swU, gj, true)
+        if nLH > 0 and b >= lastBlh
+            nLH := 0
+        nLH := nLH + 1
+        lastBlh := b
+        // the 1st Break is where the sequence is judged
+        if nLH == 1
+            bool okLeg = not qOn
+            if qOn
+                int li = f_newestSw(false)
+                if li >= 0
+                    okLeg := (p - array.get(swP, li)) >= minLegAtr * atr14
+                    if okLeg and qTrend
+                        okLeg := array.get(swK, li) == 2
+            upQual := okLeg
+            if not okLeg
+                qSkipUp := qSkipUp + 1
+        if upQual
+            firedAny := true
+            lastNo := nLH
+            lastLvl := p
+            lastWasHL := false
+        if upQual or drawSkipped
+            f_mark(nLH, p, b, k, false)
+        if nLH == entAt and upQual
+            entBuy := true
+            if entOn
+                f_entry(true)
+        gj := f_nextUp()
+
+// ===================== RESULTS TRACKER =======================================
+// Resolve the OPEN trade first, so the entry bar itself is never used to close
+// the trade it just opened. One position at a time; a signal that arrives while
+// a trade is open is ignored rather than stacked.
+if resOn and evalOk
+    if inTrade
+        bool hitStop = trLong ? low <= trStop : high >= trStop
+        bool hitTgt = trLong ? high >= trTgt : low <= trTgt
+        if hitStop
+            trTot := trTot + 1
+            trLoss := trLoss + 1
+            rSum := rSum - 1.0
+            rLoss := rLoss + 1.0
+            inTrade := false
+        else if hitTgt
+            trTot := trTot + 1
+            trWin := trWin + 1
+            rSum := rSum + trR
+            rWin := rWin + trR
+            inTrade := false
+
+    if not inTrade and (entBuy or entSell)
+        bool isLong = entBuy
+        float e = close
+        int si = f_newestSw(not isLong)
+        float structSt = si >= 0 ? array.get(swP, si) : na
+        float st = stopMode == "Fixed × ATR" or na(structSt) ? (isLong ? e - atr14 * stopAtr : e + atr14 * stopAtr) : structSt
+        // a stop on the wrong side of entry is no stop at all
+        if isLong and st >= e
+            st := e - atr14 * stopAtr
+        if not isLong and st <= e
+            st := e + atr14 * stopAtr
+        float risk = math.abs(e - st)
+        float tg = na
+        if tgtMode == "Nearest opposite level"
+            tg := f_nearLvl(isLong, e)
+        if tgtMode == "Opposite extreme (draw on liquidity)"
+            tg := f_farLvl(isLong)
+        if na(tg) or (isLong and tg <= e) or (not isLong and tg >= e)
+            tg := isLong ? e + risk * tgtR : e - risk * tgtR
+        if risk > 0
+            inTrade := true
+            trLong := isLong
+            trEntry := e
+            trStop := st
+            trTgt := tg
+            trR := math.abs(tg - e) / risk
+
+// ---- keep the chart to the price action being looked at --------------------
+if barstate.islast and histBars > 0
+    while array.size(brkLn) > 0 and line.get_x2(array.get(brkLn, 0)) < bar_index - histBars
+        line.delete(array.shift(brkLn))
+    while array.size(brkLb) > 0 and label.get_x(array.get(brkLb, 0)) < bar_index - histBars
+        label.delete(array.shift(brkLb))
+    while array.size(enLb) > 0 and label.get_x(array.get(enLb, 0)) < bar_index - histBars
+        label.delete(array.shift(enLb))
+
+// ===================== STRUCTURE + WHAT IS STILL STANDING ====================
+// Both redrawn on the last bar only, so nothing accumulates.
+if barstate.islast
+    while array.size(stkLn) > 0
+        line.delete(array.shift(stkLn))
+    while array.size(stkLb) > 0
+        label.delete(array.shift(stkLb))
+    while array.size(zzLn) > 0
+        line.delete(array.shift(zzLn))
+    while array.size(zzLb) > 0
+        label.delete(array.shift(zzLb))
+
+    int n = array.size(swP)
+    if (zzLbl or zzLine) and n > 0
+        int from = math.max(0, n - zzN)
+        for i = from to n - 1
+            float p = array.get(swP, i)
+            int b = array.get(swB, i)
+            int k = array.get(swK, i)
+            bool isH = array.get(swH, i)
+            color c = k == 1 or k == 2 ? zzUpC : k == 3 or k == 4 ? zzDnC : color.new(color.gray, 20)
+            if zzLine and i > from
+                array.push(zzLn, line.new(f_xc(array.get(swB, i - 1)), array.get(swP, i - 1), f_xc(b), p, xloc = xloc.bar_index, color = zzLnC, width = 1))
+            if zzLbl
+                float off = atr14 * 0.3
+                array.push(zzLb, label.new(f_xc(b), isH ? p + off : p - off, f_kind(k), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = size.tiny))
+
+    if stackShow and n > 0
+        int rankHi = 0
+        int rankLo = 0
+        for j = 0 to n - 1
+            int i = n - 1 - j
+            float p = array.get(swP, i)
+            bool isH = array.get(swH, i)
+            if (isH and buyOn and f_isLvl(i, true)) or (not isH and sellOn and f_isLvl(i, false))
+                int rank = isH ? rankHi + 1 : rankLo + 1
+                if isH
+                    rankHi := rank
+                else
+                    rankLo := rank
+                color c = isH ? stackLHC : stackHLC
+                array.push(stkLn, line.new(f_xc(array.get(swB, i)), p, bar_index + 4, p, xloc = xloc.bar_index, color = c, style = line.style_dotted, width = 1))
+                if stackTag
+                    array.push(stkLb, label.new(bar_index + 5, p, str.tostring(rank), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = size.tiny))
+
+// ===================== ALERTS ================================================
+alertcondition(firedAny, "Any break", "Basic Breaks — a level was broken")
+alertcondition(entBuy, "BUY entry", "Basic Breaks — BUY: the break candle has closed, enter on the next candle")
+alertcondition(entSell, "SELL entry", "Basic Breaks — SELL: the break candle has closed, enter on the next candle")
+if firedAny
+    alert(f_ord(lastNo) + " Break — " + (lastWasHL ? "low" : "high") + " @ " + str.tostring(math.round_to_mintick(lastLvl)), alert.freq_once_per_bar_close)
+if entBuy or entSell
+    alert((entBuy ? "BUY" : "SELL") + " — " + f_ord(entAt) + " break has closed, enter on the next candle", alert.freq_once_per_bar_close)
+
+// ===================== DASHBOARD =============================================
+var table db = table.new(f_tpos(dbPos), 3, 13, border_width = 1)
+f_cell(int col, int row, string txt, color c) =>
+    table.cell(db, col, row, txt, text_color = c, text_size = f_size(dbSzIn), bgcolor = color.new(color.black, 85))
+
+if dbOn and barstate.islast
+    table.clear(db, 0, 0, 2, 12)
+    color gry = color.new(color.gray, 0)
+
+    // the current structure read: the newest swing on each side, whatever it is
+    int iH = -1
+    int iL = -1
+    int n = array.size(swP)
+    if n > 0
+        for j = 0 to n - 1
+            int i = n - 1 - j
+            if iH == -1 and array.get(swH, i)
+                iH := i
+            if iL == -1 and not array.get(swH, i)
+                iL := i
+
+    f_cell(0, 0, "BREAKS  " + f_tf(), color.new(color.white, 0))
+    f_cell(1, 0, "standing", gry)
+    f_cell(2, 0, "broken", gry)
+    f_cell(0, 1, "lows  (sells)", color.new(stackHLC, 0))
+    f_cell(1, 1, sellOn ? str.tostring(f_countLvl(false)) + (sellReady ? "" : "!") : "—", color.new(stackHLC, sellOn ? 0 : 60))
+    f_cell(2, 1, sellOn and nHL > 0 ? f_ord(nHL) : "·", f_col(nHL == 0 ? 4 : nHL))
+    f_cell(0, 2, "highs  (buys)", color.new(stackLHC, 0))
+    f_cell(1, 2, buyOn ? str.tostring(f_countLvl(true)) + (buyReady ? "" : "!") : "—", color.new(stackLHC, buyOn ? 0 : 60))
+    f_cell(2, 2, buyOn and nLH > 0 ? f_ord(nLH) : "·", f_col(nLH == 0 ? 4 : nLH))
+    string txtH = "—"
+    string txtL = "—"
+    color colH = gry
+    color colL = gry
+    if iH >= 0
+        int kH = array.get(swK, iH)
+        txtH := f_kind(kH) + "  " + str.tostring(math.round_to_mintick(array.get(swP, iH)))
+        colH := kH == 1 ? zzUpC : kH == 3 ? zzDnC : gry
+    if iL >= 0
+        int kL = array.get(swK, iL)
+        txtL := f_kind(kL) + "  " + str.tostring(math.round_to_mintick(array.get(swP, iL)))
+        colL := kL == 2 ? zzUpC : kL == 4 ? zzDnC : gry
+    f_cell(0, 3, "structure  " + (lhOnly ? "(LH / HL only)" : "(all swings)"), color.new(color.white, 0))
+    f_cell(1, 3, txtH, colH)
+    f_cell(2, 3, txtL, colL)
+    f_cell(0, 4, qOn ? "sequences skipped  (leg < " + str.tostring(minLegAtr, "#.#") + "× ATR)" : "sequences skipped  (filter off)", gry)
+    f_cell(1, 4, str.tostring(qSkipUp) + " buy", gry)
+    f_cell(2, 4, str.tostring(qSkipDn) + " sell", gry)
+
+    if resOn
+        float wr = trTot > 0 ? 100.0 * trWin / trTot : na
+        float avgR = trTot > 0 ? rSum / trTot : na
+        float pf = rLoss > 0 ? rWin / rLoss : na
+        color pnlC = rSum > 0 ? entBuyC : rSum < 0 ? entSellC : gry
+        f_cell(0, 5, f_ord(entAt) + "-break results  ·  " + f_tf(), color.new(color.white, 0))
+        f_cell(1, 5, "", gry)
+        f_cell(2, 5, "", gry)
+        f_cell(0, 6, "trades", gry)
+        f_cell(1, 6, str.tostring(trTot), color.new(color.white, 0))
+        f_cell(2, 6, inTrade ? (trLong ? "1 open L" : "1 open S") : "", inTrade ? (trLong ? entBuyC : entSellC) : gry)
+        f_cell(0, 7, "wins", gry)
+        f_cell(1, 7, str.tostring(trWin), entBuyC)
+        f_cell(2, 7, na(wr) ? "—" : str.tostring(wr, "#.#") + "%", entBuyC)
+        f_cell(0, 8, "losses", gry)
+        f_cell(1, 8, str.tostring(trLoss), entSellC)
+        f_cell(2, 8, na(wr) ? "—" : str.tostring(100.0 - wr, "#.#") + "%", entSellC)
+        f_cell(0, 9, "avg R / trade", gry)
+        f_cell(1, 9, na(avgR) ? "—" : f_r(avgR), na(avgR) ? gry : avgR >= 0 ? entBuyC : entSellC)
+        f_cell(2, 9, "", gry)
+        f_cell(0, 10, "total R", gry)
+        f_cell(1, 10, f_r(rSum), pnlC)
+        f_cell(2, 10, "", gry)
+        f_cell(0, 11, "profit factor", gry)
+        f_cell(1, 11, na(pf) ? "—" : str.tostring(pf, "#.##"), na(pf) ? gry : pf >= 1 ? entBuyC : entSellC)
+        f_cell(2, 11, "", gry)
+        f_cell(0, 12, "R:R on the open trade", gry)
+        f_cell(1, 12, inTrade and not na(trR) ? "1 : " + str.tostring(trR, "#.##") : "—", inTrade ? (trLong ? entBuyC : entSellC) : gry)
+        f_cell(2, 12, inTrade ? str.tostring(math.round_to_mintick(trStop)) + " → " + str.tostring(math.round_to_mintick(trTgt)) : "", gry)
