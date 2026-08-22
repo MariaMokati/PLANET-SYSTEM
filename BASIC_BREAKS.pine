@@ -36,9 +36,11 @@
 // moment that candle CLOSES; the marker is drawn on the NEXT candle, which is
 // the one actually taken.
 //
-// The demand zone comes next.
+// THE ZONE is drawn at the 1st Break. Demand runs from that level down to the
+// low the rally came off, with the 50% marked through the middle. Supply is the
+// mirror.
 // =============================================================================
-indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500)
+indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
 
 // ===================== STRUCTURE =============================================
 gS = "Structure"
@@ -73,6 +75,18 @@ entTxtSz = input.string("Normal", "Label size", options = ["Tiny", "Small", "Nor
 entBuyC = input.color(#00BF71, "Buy", inline = "ec", group = gE)
 entSellC = input.color(#FF4F87, "Sell", inline = "ec", group = gE)
 entPad = input.float(0.35, "Gap from the candle (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gE)
+
+// ===================== ZONE ==================================================
+gZ = "Demand / supply zone"
+zoneOn = input.bool(true, "Draw the zone on the 1st break", group = gZ, tooltip = "Drawn at the 1st Break, which is the moment both edges are known.\n\nDEMAND (buy side): top is the 1st Break level, bottom is the low the rally came off.\nSUPPLY (sell side): the mirror — bottom is the 1st Break level, top is the high the decline came off.")
+zone50 = input.bool(true, "Mark the 50%", group = gZ)
+zoneTxtB = input.string("Demand Zone 50%", "Demand label", group = gZ)
+zoneTxtS = input.string("Supply Zone 50%", "Supply label", group = gZ)
+zoneExt = input.int(120, "Extend N bars forward", minval = 5, maxval = 400, group = gZ, tooltip = "A fixed width. Boxes that run on indefinitely eventually put a coordinate outside what TradingView will draw.")
+zoneBuyC = input.color(#3E7BD6, "Demand", inline = "zc", group = gZ)
+zoneSellC = input.color(#D6553E, "Supply", inline = "zc", group = gZ)
+zoneFade = input.int(90, "Fill transparency", minval = 0, maxval = 100, group = gZ)
+zoneKeep = input.int(6, "Keep the last N zones", minval = 1, maxval = 40, group = gZ)
 
 // ===================== HELPERS ===============================================
 f_size(string s) =>
@@ -129,6 +143,8 @@ var int nUp = 0
 var int nDn = 0
 var float upFloor = na
 var float dnCeil = na
+var int upFloorB = na
+var int dnCeilB = na
 
 // The low the rally is coming off, and the high the decline is coming off.
 // Reset on each new pivot in the same direction, so at the moment a sequence
@@ -137,18 +153,27 @@ var float dnCeil = na
 // it eats them, so the value was often na and the sequence never got abandoned.
 var float rLow = na
 var float rHigh = na
+var int rLowB = na
+var int rHighB = na
 
 var array<line> dLn = array.new<line>()
 var array<label> dLb = array.new<label>()
 var array<label> eLb = array.new<label>()
+var array<box> zBx = array.new<box>()
+var array<line> zLn = array.new<line>()
+var array<label> zLb = array.new<label>()
 
 float atr14 = ta.atr(14)
 
 float rawPh = ta.pivothigh(pvLen, pvLen)
 float rawPl = ta.pivotlow(pvLen, pvLen)
 
-rLow := na(rLow) ? low : math.min(rLow, low)
-rHigh := na(rHigh) ? high : math.max(rHigh, high)
+if na(rLow) or low < rLow
+    rLow := low
+    rLowB := bar_index
+if na(rHigh) or high > rHigh
+    rHigh := high
+    rHighB := bar_index
 
 f_mark(int n, float p, int b, bool up) =>
     if showAll or n <= showN
@@ -174,11 +199,35 @@ f_entry(bool isBuy) =>
         label.delete(array.shift(eLb))
     array.size(eLb)
 
+// Drawn at the 1st Break: the far edge is that level, the near edge is the
+// extreme the move came off. `lvl` is the 1st Break level, `ext` the extreme.
+f_zone(float lvl, float ext, int fromB, bool isBuy) =>
+    if zoneOn and not na(ext) and not na(fromB)
+        float top = isBuy ? lvl : ext
+        float bot = isBuy ? ext : lvl
+        if top > bot
+            color col = isBuy ? zoneBuyC : zoneSellC
+            int x1 = f_xc(fromB)
+            int x2 = bar_index + zoneExt
+            array.push(zBx, box.new(x1, top, x2, bot, xloc = xloc.bar_index, border_color = color.new(col, 40), bgcolor = color.new(col, zoneFade)))
+            if zone50
+                float mid = math.avg(top, bot)
+                array.push(zLn, line.new(x1, mid, x2, mid, xloc = xloc.bar_index, color = color.new(col, 20), style = line.style_dashed))
+                array.push(zLb, label.new(int(math.avg(x1, x2)), mid, isBuy ? zoneTxtB : zoneTxtS, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = color.new(col, 0), size = size.small))
+            while array.size(zBx) > zoneKeep
+                box.delete(array.shift(zBx))
+            while array.size(zLn) > zoneKeep
+                line.delete(array.shift(zLn))
+            while array.size(zLb) > zoneKeep
+                label.delete(array.shift(zLb))
+    array.size(zBx)
+
 // ===================== BUILD THE LIVE POOLS ==================================
 if not na(rawPh)
     array.push(hiP, rawPh)
     array.push(hiB, bar_index - pvLen)
     rLow := low
+    rLowB := bar_index
     while array.size(hiP) > poolMax
         array.shift(hiP)
         array.shift(hiB)
@@ -186,6 +235,7 @@ if not na(rawPl)
     array.push(loP, rawPl)
     array.push(loB, bar_index - pvLen)
     rHigh := high
+    rHighB := bar_index
     while array.size(loP) > poolMax
         array.shift(loP)
         array.shift(loB)
@@ -230,6 +280,7 @@ if barstate.isconfirmed and buyOn
             array.shift(hiP)
             array.shift(hiB)
         upFloor := rLow
+        upFloorB := rLowB
         upOn := true
         nUp := 0
 
@@ -246,6 +297,8 @@ if barstate.isconfirmed and buyOn
             lastLvl := p
             lastUp := true
             f_mark(nUp, p, b, true)
+            if nUp == 1
+                f_zone(p, upFloor, upFloorB, true)
             if nUp == entAt
                 entBuy := true
                 if entOn
@@ -282,6 +335,7 @@ if barstate.isconfirmed and sellOn
             array.shift(loP)
             array.shift(loB)
         dnCeil := rHigh
+        dnCeilB := rHighB
         dnOn := true
         nDn := 0
 
@@ -298,6 +352,8 @@ if barstate.isconfirmed and sellOn
             lastLvl := p
             lastUp := false
             f_mark(nDn, p, b, false)
+            if nDn == 1
+                f_zone(p, dnCeil, dnCeilB, false)
             if nDn == entAt
                 entSell := true
                 if entOn
