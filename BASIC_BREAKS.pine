@@ -44,10 +44,10 @@ waitClose = input.bool(true, "Only judge closed bars", group = gCf, tooltip = "O
 
 // ===================== THE LIVE STACK ========================================
 gLs = "The live stack"
-stackShow = input.bool(true, "Show the levels still standing", group = gLs, tooltip = "Dotted lines for every turning point nothing has broken yet. The TOP one is what breaks first.")
+stackShow = input.bool(false, "Show the levels still standing", group = gLs, tooltip = "OFF by default. Draws a dotted line for every turning point nothing has broken yet, numbered outward from price — 1 is the next one that breaks, and it is the one that will be labelled 1st Break.\n\nAt swing length 1 there can be fifty of these standing at once, which is unreadable. It is a preview of the numbering, not part of it: turning it off changes nothing about the break marks or the dashboard.")
 stackHLC = input.color(color.new(#089981, 40), "Lows", inline = "sc", group = gLs)
 stackLHC = input.color(color.new(#F23645, 40), "Highs", inline = "sc", group = gLs)
-stackTag = input.bool(true, "Number them from the top", group = gLs, tooltip = "Labels the standing levels 1 · 2 · 3 from the top down, so you can see in advance which will be the 1st, 2nd and 3rd break.")
+stackTag = input.bool(false, "Number them from the top", group = gLs, tooltip = "Labels the standing levels 1 · 2 · 3 from the top down, so you can see in advance which will be the 1st, 2nd and 3rd break.")
 stackMax = input.int(50, "Track at most N levels per stack", minval = 2, maxval = 300, group = gLs, tooltip = "When the stack is full the OLDEST level is dropped — and in a decline the oldest is the HIGHEST, the one furthest from price. Set this too low and the level a big move eventually reaches has already been thrown away. 50 by default; raise it if a deep move stops being numbered part-way.")
 
 // ===================== VISUALS ===============================================
