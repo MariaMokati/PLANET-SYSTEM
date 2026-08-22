@@ -95,11 +95,9 @@ entPad = input.float(0.35, "Marker gap from the candle (× ATR)", minval = 0.0, 
 // SIGNAL behaved on this timeframe's bars, nothing more.
 gRs = "Results  (dashboard stats)"
 resOn = input.bool(true, "Track wins / losses on this timeframe", group = gRs, tooltip = "Follows the same signal the entry arrows use — the Nth break — whether or not the arrows are switched on. Switching timeframe recalculates from that timeframe's bars.")
-stopMode = input.string("Structure (the turning point behind it)", "Stop", options = ["Structure (the turning point behind it)", "Fixed × ATR"], group = gRs, tooltip = "Structure: the newest turning point still standing behind the entry — the low the move came off for a long, the high for a short. That is where the idea is wrong.
-Fixed: a flat multiple of ATR.")
+stopMode = input.string("Structure (the turning point behind it)", "Stop", options = ["Structure (the turning point behind it)", "Fixed × ATR"], group = gRs, tooltip = "Structure: the newest turning point still standing behind the entry — the low the move came off for a long, the high for a short. That is where the idea is wrong.\nFixed: a flat multiple of ATR.")
 stopAtr = input.float(1.0, "…ATR multiple (also the fallback)", minval = 0.1, maxval = 10.0, step = 0.1, group = gRs)
-tgtMode = input.string("Opposite extreme (draw on liquidity)", "Target", options = ["Opposite extreme (draw on liquidity)", "R multiple"], group = gRs, tooltip = "Opposite extreme: the furthest level still standing the other side — the draw on liquidity. Falls back to the R multiple when there is nothing standing there.
-R multiple: a fixed multiple of the risk.")
+tgtMode = input.string("Opposite extreme (draw on liquidity)", "Target", options = ["Opposite extreme (draw on liquidity)", "R multiple"], group = gRs, tooltip = "Opposite extreme: the furthest level still standing the other side — the draw on liquidity. Falls back to the R multiple when there is nothing standing there.\nR multiple: a fixed multiple of the risk.")
 tgtR = input.float(2.0, "…R multiple (also the fallback)", minval = 0.1, maxval = 20.0, step = 0.1, group = gRs)
 
 // ===================== DASHBOARD =============================================
