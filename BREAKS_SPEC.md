@@ -5,79 +5,67 @@ Break**, **2nd Break**, **3rd Break** — the way they get annotated by hand.
 
 ---
 
-## 1. The model
+## 1. The model — fractals, nothing else
 
-An impulse **up** makes higher highs and **higher lows**. Those HLs are the
-levels. When the pullback comes it breaks them in **reverse order of creation**:
+Every confirmed fractal **high** is a level. Every confirmed fractal **low** is
+a level. No classification, no HH/HL/LH/LL, no deciding which corners are
+"allowed" to count.
 
-| what the pullback breaks | number |
-|---|---|
-| the **last** HL made | 1st Break |
-| the **second-last** HL made | 2nd Break |
-| the **third-last** HL made | 3rd Break |
+When price closes **above** the nearest standing fractal high, that is the
+**1st Break**. The next one up is the **2nd**. The one above that is the
+**3rd**. Mirror downward through the fractal lows.
 
-Mirror for an impulse **down**: it leaves **lower highs**, and the pullback up
-takes them newest-first. Those are the buy setups — which is why "for buys look
-at this side" boxes the *down* leg.
+**Nearest-first**, not newest-first. Price rising physically reaches the
+lowest standing high above it first. On a descending run of highs the two
+orderings agree, but nearest-first is the one that is always right.
 
-So the levels are a **stack, eaten from the top**. Not a list of whatever
-happens to be nearest, and not one number per direction of travel.
+**Swing length is the only dial.** It decides which corners are fractals, and
+therefore which levels get numbered. Nothing else filters.
+
+### The two reference setups
+
+From the annotated GC1! 30m chart, both reproduced exactly by the Python port:
+
+| setup | levels | what happens |
+|---|---|---|
+| impulse up leaves lows 4404 / 4432 / 4443 | pullback down | **1st @ 4443**, **2nd @ 4432**, *"failed to break the 3rd"* at 4404 |
+| down leg leaves highs 4430 / 4466 / 4494 | one big candle up | **1st @ 4430**, **2nd @ 4466**, **3rd @ 4494** — all three on that one bar |
 
 A pullback commonly stops after the 1st or 2nd. That is not a miss — it is the
-market failing to break the 3rd, and it is information worth seeing.
+market failing to reach the 3rd, and it is information worth seeing.
 
-## 2. One alternating swing series first
+## 2. The two things that stop it numbering noise
 
-`ta.pivothigh` and `ta.pivotlow` are **independent**. They do not alternate. A
-strong leg happily prints two pivot highs with no pivot low between them, and
-they confirm `length` bars late, so they do not even arrive in the order they
-formed.
+Neither is a classification. Both fall out of the level list itself.
 
-Pushing raw pivots into one list in confirmation order and connecting
-consecutive entries is therefore wrong twice over: the zigzag draws as a
-scribble (HH followed by HH, near-vertical segments), and every rule downstream
-that assumes *a high is followed by a low* is reading garbage. Measured on a
-synthetic 3,000-bar series: **10 same-side neighbours out of 79 swings.**
+### 2a. Fractals within a few ticks are ONE level
 
-So the first thing built is one strictly alternating series — high, low, high,
-low — with **same-side collapse**:
+A flat consolidation prints several fractals a few ticks apart. Without
+merging they each eat a number, so the 1st and the 2nd land on what is
+visually the same level and the real 3rd never gets counted. On the left
+reference setup that produced `1st @ 4442, 2nd @ 4442, 3rd @ 4431` — the 4404
+level never reached.
 
-> two highs in a row collapse to the **higher**; two lows to the **lower**.
+*Treat levels closer than (× ATR) as one*, default 0.25. The cluster keeps its
+extreme price and the bar where it first formed. Set to 0 to number every
+fractal separately.
 
-Same measurement after the fix: **0 faults out of 69 swings.**
+### 2b. A sequence only STARTS where structure is stacked beyond it
 
-Everything else — the zigzag drawing and both stacks — is driven off that one
-series. Because it alternates, the previous same-side swing is always exactly
-**two back**, which is what makes the structure rule a one-line comparison.
+In the annotated chart the impulse from 4365 → 4490 carries **no** break
+labels — only "History hl for sell set ups". But the big candle on the right
+*is* numbered 1st / 2nd / 3rd. The difference is not HH/HL:
 
-## 2a. What counts as impulse structure
+> when the impulse breaks its own last minor high there is **clear air above
+> it**; when the pullback breaks 4430 there are still 4466 and 4494 standing
+> above.
 
-A new swing tells you what the **previous** one was:
+So: *a sequence only starts where N levels stand beyond the one being taken*
+(default 1). Once a sequence has started this no longer applies — the 3rd
+still counts even when it is the last level there is.
 
-> a **higher high** means the low before it was a **higher low** of the impulse
-> — that is a sell-side level.
-> a **lower low** means the high before it was a **lower high** — a buy-side
-> level.
-
-A pullback high is *not* followed by a lower low, so it never enters the stack.
-That is the rule that stopped a chart covered in spurious marks: on the
-reproduction, a down impulse leaving LHs at 4453 / 4479 / 4499 followed by a
-wiggly rally produced **six** events — 4441, 4453, **4467**, 4479, **4491**,
-4499 — where three are the rally's own pullbacks. With the rule: exactly three,
-at the right levels.
-
-The comparison is against the **previous same-side swing**, not a running
-all-time extreme. An all-time extreme goes stale in a drifting market and that
-side stops confirming anything at all (3,000 bars produced three buy-side events
-while the sell side ran to eleven unbroken).
-
-A level also only enters the stack if it is genuinely higher (or lower) than the
-one already on top — the stack has to be monotonic or the "eat from the top"
-order is meaningless.
-
-A stack has to be a real **sequence** before it counts — 2 levels by default. A
-single stray pivot otherwise sits in the stack and every move the other way
-prints a spurious "1st Break".
+Without this, the left setup produced three spurious upward "1st Break" marks
+up the impulse itself. With it: none.
 
 ## 3. What breaks a level
 
@@ -138,7 +126,9 @@ Kept deliberately. Each was a real failure on a real chart.
 | **`RE10026`** coordinate too far from the current bar | an unmitigated zone extended ~20,000 bars; its 50% label sits at the box midpoint, leaving the ~10,000-bar legal range at half the rate the box did | draw zones once at fixed width; clamp every bar index reaching a drawing to 4,000 back |
 | Levels marked were not the hand-marked ones | only the most recent pivot per side was tracked | *(superseded)* |
 | A chart covered in small `1st Break` marks; real levels **"not even marked"**; a genuine 1st labelled 2nd | every pivot high entered the stack, so a rally's own pullback highs were numbered as breaks | §2a — a swing only counts once the next swing confirms it |
-| **The zigzag drawn as a scribble** — HH straight into HH with no low between, near-vertical HH/HL segments, points apparently out of order | `ta.pivothigh` / `ta.pivotlow` are independent and confirm `length` bars late; raw pivots were pushed into one list in confirmation order and consecutive entries connected. 10 same-side neighbours per 79 swings | §2 — build one strictly alternating series with same-side collapse, then drive the zigzag *and* both stacks off it. 0 faults per 69 swings |
+| **The zigzag drawn as a scribble** — HH straight into HH with no low between, near-vertical HH/HL segments | `ta.pivothigh` / `ta.pivotlow` are independent and confirm `length` bars late; raw pivots were pushed into one list in confirmation order and consecutive entries connected | *(superseded — the zigzag and the HH/HL labels were never asked for and are gone)* |
+| `CE10088: Cannot modify global variable "hlOk" in function` ×4 | Pine v6 lets a function mutate a global **array** but not assign to a global **scalar** | run that logic at global scope |
+| **The whole HH/HL model was wrong** — marking things she never asked for, missing her real levels | I added a zigzag, HH/HL/LH/LL labels and a classification filter deciding which fractals were "allowed" to be levels. That filter dropped her levels and invented others | §1 — plain fractals, nearest-first, no classification at all. Both reference setups then reproduce exactly |
 
 ## 9. What is and is not verified
 
@@ -164,8 +154,9 @@ checked by hand and by the Python port; the port covers the structure rule, the
 stack and the ordering — **not** the drawing objects. Line and label geometry is
 inspection-only, which is exactly how `RE10026` reached the chart.
 
-**The current rule has not yet been confirmed against the reference chart
-annotations.** That is the open item.
+**Both reference setups from the annotated chart now reproduce exactly** — see
+the table in §1. Not yet confirmed live on the chart at her swing length; that
+is the open item, and swing length is the dial for it.
 
 Annotation tool. No claim that an Nth break is more or less likely to continue;
 nothing Strategy-Tester validated.
