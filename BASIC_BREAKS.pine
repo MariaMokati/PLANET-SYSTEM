@@ -71,16 +71,30 @@ keepN = input.int(80, "Keep last N break marks", minval = 1, maxval = 500, group
 
 // ===================== ENTRY =================================================
 gEn = "Entry"
-entOn = input.bool(false, "Mark an entry on the Nth break", group = gEn, tooltip = "An arrow on the candle you enter plus an \"E: Long\" / \"E: Short\" label. Fires the moment the candle that makes the Nth break CLOSES.")
+entOn = input.bool(false, "Mark an entry on the Nth break", group = gEn, tooltip = "A marker on the candle you enter plus an \"E: Long\" / \"E: Short\" label. Fires the moment the candle that makes the Nth break CLOSES.")
 entAt = input.int(2, "…on which break", minval = 1, maxval = 20, group = gEn, tooltip = "2 by default: the entry is on the second break.")
-entShift = input.int(1, "Arrow sits N candles after the break candle", minval = 0, maxval = 10, group = gEn, tooltip = "The signal is generated when the break candle closes; the entry is the candle after it. 1 by default, so the arrow points at the candle you actually enter on.")
+entShift = input.int(1, "Marker sits N candles after the break candle", minval = 0, maxval = 10, group = gEn, tooltip = "The signal is generated when the break candle closes; the entry is the candle after it. 1 by default, so the arrow points at the candle you actually enter on.")
 entTxtBuy = input.string("E: Long", "Buy label", inline = "et", group = gEn)
 entTxtSell = input.string("E: Short", "Sell label", inline = "et", group = gEn)
-entSzIn = input.string("Large", "Arrow size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gEn)
+entShape = input.string("Triangle", "Marker", options = ["Triangle", "Circle", "Arrow", "Diamond"], group = gEn, tooltip = "Triangle (default) — a small solid triangle on the candle, pointing the way of the trade.\nCircle — a dot, the least intrusive.\nArrow — a long thin arrow. Reads clearly from far out but takes up a lot of vertical space.\nDiamond — a solid marker that stands out without pointing.")
+entSzIn = input.string("Normal", "Marker size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gEn)
 entTxtSz = input.string("Normal", "Label text size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gEn)
 entBuyC = input.color(#00BF71, "Buy", inline = "ec", group = gEn)
 entSellC = input.color(#FF4F87, "Sell", inline = "ec", group = gEn)
-entPad = input.float(0.35, "Arrow gap from the candle (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gEn)
+entPad = input.float(0.35, "Marker gap from the candle (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gEn)
+
+// ===================== RESULTS ===============================================
+// Not a Strategy. These are indicator-side numbers: no spread, no slippage, no
+// commission, no partial fills, one position at a time. They tell you how the
+// SIGNAL behaved on this timeframe's bars, nothing more.
+gRs = "Results  (dashboard stats)"
+resOn = input.bool(true, "Track wins / losses on this timeframe", group = gRs, tooltip = "Follows the same signal the entry arrows use — the Nth break — whether or not the arrows are switched on. Switching timeframe recalculates from that timeframe's bars.")
+stopMode = input.string("Structure (the turning point behind it)", "Stop", options = ["Structure (the turning point behind it)", "Fixed × ATR"], group = gRs, tooltip = "Structure: the newest turning point still standing behind the entry — the low the move came off for a long, the high for a short. That is where the idea is wrong.
+Fixed: a flat multiple of ATR.")
+stopAtr = input.float(1.0, "…ATR multiple (also the fallback)", minval = 0.1, maxval = 10.0, step = 0.1, group = gRs)
+tgtMode = input.string("Opposite extreme (draw on liquidity)", "Target", options = ["Opposite extreme (draw on liquidity)", "R multiple"], group = gRs, tooltip = "Opposite extreme: the furthest level still standing the other side — the draw on liquidity. Falls back to the R multiple when there is nothing standing there.
+R multiple: a fixed multiple of the risk.")
+tgtR = input.float(2.0, "…R multiple (also the fallback)", minval = 0.1, maxval = 20.0, step = 0.1, group = gRs)
 
 // ===================== DASHBOARD =============================================
 gDb = "Dashboard"
@@ -116,6 +130,15 @@ f_txt(int n, float px) =>
         "1st Break + price" => f_ord(n) + " Break " + str.tostring(math.round_to_mintick(px))
         => str.tostring(n)
 
+f_eshape(string sh, bool up) =>
+    sh == "Circle" ? label.style_circle : sh == "Diamond" ? label.style_diamond : sh == "Arrow" ? (up ? label.style_arrowup : label.style_arrowdown) : (up ? label.style_triangleup : label.style_triangledown)
+
+f_tf() =>
+    timeframe.isseconds ? timeframe.period + "s" : timeframe.isminutes ? timeframe.period + "m" : timeframe.period
+
+f_r(float v) =>
+    (v >= 0 ? "+" : "") + str.tostring(v, "#.##")
+
 f_col(int n) =>
     n == 1 ? cN1 : n == 2 ? cN2 : n == 3 ? cN3 : cNx
 
@@ -149,6 +172,20 @@ var array<label> brkLb = array.new<label>()
 var array<line> stkLn = array.new<line>()
 var array<label> stkLb = array.new<label>()
 var array<label> enLb = array.new<label>()
+
+// ---- results state ---------------------------------------------------------
+var int trTot = 0
+var int trWin = 0
+var int trLoss = 0
+var float rSum = 0.0
+var float rWin = 0.0
+var float rLoss = 0.0
+var bool inTrade = false
+var bool trLong = false
+var float trEntry = na
+var float trStop = na
+var float trTgt = na
+var float trR = na
 
 f_prune(array<line> la, array<label> lb, int k) =>
     while array.size(la) > k
@@ -239,7 +276,7 @@ f_mark(int n, float p, int b, bool isHL) =>
         f_prune(brkLn, brkLb, keepN)
     array.size(brkLn)
 
-// An arrow on the candle you enter, plus its own text. Two separate labels so
+// A marker on the candle you enter, plus its own text. Two separate labels so
 // the text is plain coloured type rather than a chunky filled box. The signal
 // is made when the BREAK candle closes; both sit `entShift` candles later,
 // which is the candle you actually take.
@@ -247,7 +284,7 @@ f_entry(bool isBuy) =>
     float pad = atr14 * entPad
     color c = isBuy ? entBuyC : entSellC
     int x = bar_index + entShift
-    array.push(enLb, label.new(x, isBuy ? low - pad : high + pad, "", xloc = xloc.bar_index, yloc = yloc.price, style = isBuy ? label.style_arrowup : label.style_arrowdown, color = c, textcolor = c, size = f_size(entSzIn)))
+    array.push(enLb, label.new(x, isBuy ? low - pad : high + pad, "", xloc = xloc.bar_index, yloc = yloc.price, style = f_eshape(entShape, isBuy), color = c, textcolor = c, size = f_size(entSzIn)))
     array.push(enLb, label.new(x, isBuy ? low - pad * 2.4 : high + pad * 2.4, isBuy ? entTxtBuy : entTxtSell, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(entTxtSz)))
     while array.size(enLb) > keepN * 2
         label.delete(array.shift(enLb))
@@ -268,9 +305,10 @@ if evalOk and sellOn and hlOk
         lastLvl := p
         lastWasHL := true
         f_mark(nHL, p, b, true)
-        if entOn and nHL == entAt
+        if nHL == entAt
             entSell := true
-            f_entry(false)
+            if entOn
+                f_entry(false)
         gi := f_nextDn()
 
 if evalOk and buyOn and lhOk
@@ -287,10 +325,55 @@ if evalOk and buyOn and lhOk
         lastLvl := p
         lastWasHL := false
         f_mark(nLH, p, b, false)
-        if entOn and nLH == entAt
+        if nLH == entAt
             entBuy := true
-            f_entry(true)
+            if entOn
+                f_entry(true)
         gj := f_nextUp()
+
+// ===================== RESULTS TRACKER =======================================
+// Resolve the OPEN trade first, so the entry bar itself is never used to close
+// the trade it just opened. One position at a time; a signal that arrives while
+// a trade is open is ignored rather than stacked.
+if resOn and evalOk
+    if inTrade
+        bool hitStop = trLong ? low <= trStop : high >= trStop
+        bool hitTgt = trLong ? high >= trTgt : low <= trTgt
+        if hitStop
+            trTot := trTot + 1
+            trLoss := trLoss + 1
+            rSum := rSum - 1.0
+            rLoss := rLoss + 1.0
+            inTrade := false
+        else if hitTgt
+            trTot := trTot + 1
+            trWin := trWin + 1
+            rSum := rSum + trR
+            rWin := rWin + trR
+            inTrade := false
+
+    if not inTrade and (entBuy or entSell)
+        bool isLong = entBuy
+        float e = close
+        float st = stopMode == "Fixed × ATR" ? (isLong ? e - atr14 * stopAtr : e + atr14 * stopAtr) : isLong ? (array.size(hlP) > 0 ? array.get(hlP, array.size(hlP) - 1) : e - atr14 * stopAtr) : (array.size(lhP) > 0 ? array.get(lhP, array.size(lhP) - 1) : e + atr14 * stopAtr)
+        // a stop on the wrong side of entry is no stop at all
+        if isLong and st >= e
+            st := e - atr14 * stopAtr
+        if not isLong and st <= e
+            st := e + atr14 * stopAtr
+        float risk = math.abs(e - st)
+        float tg = na
+        if tgtMode == "Opposite extreme (draw on liquidity)"
+            tg := isLong ? (array.size(lhP) > 0 ? array.max(lhP) : na) : (array.size(hlP) > 0 ? array.min(hlP) : na)
+        if na(tg) or (isLong and tg <= e) or (not isLong and tg >= e)
+            tg := isLong ? e + risk * tgtR : e - risk * tgtR
+        if risk > 0
+            inTrade := true
+            trLong := isLong
+            trEntry := e
+            trStop := st
+            trTgt := tg
+            trR := math.abs(tg - e) / risk
 
 // ---- keep the chart to the price action being looked at --------------------
 if barstate.islast and histBars > 0
@@ -335,18 +418,49 @@ if entBuy or entSell
     alert((entBuy ? "BUY" : "SELL") + " — " + f_ord(entAt) + " break has closed, enter on the next candle", alert.freq_once_per_bar_close)
 
 // ===================== DASHBOARD =============================================
-var table db = table.new(f_tpos(dbPos), 3, 3, border_width = 1)
+var table db = table.new(f_tpos(dbPos), 3, 11, border_width = 1)
 f_cell(int col, int row, string txt, color c) =>
     table.cell(db, col, row, txt, text_color = c, text_size = f_size(dbSzIn), bgcolor = color.new(color.black, 85))
 
 if dbOn and barstate.islast
-    table.clear(db, 0, 0, 2, 2)
-    f_cell(0, 0, "BREAKS", color.new(color.white, 0))
-    f_cell(1, 0, "standing", color.new(color.gray, 0))
-    f_cell(2, 0, "broken", color.new(color.gray, 0))
+    table.clear(db, 0, 0, 2, 10)
+    color gry = color.new(color.gray, 0)
+    f_cell(0, 0, "BREAKS  " + f_tf(), color.new(color.white, 0))
+    f_cell(1, 0, "standing", gry)
+    f_cell(2, 0, "broken", gry)
     f_cell(0, 1, "lows  (sells)", color.new(stackHLC, 0))
     f_cell(1, 1, sellOn ? (hlOk ? str.tostring(array.size(hlP)) : str.tostring(array.size(hlP)) + "!") : "—", color.new(stackHLC, sellOn ? 0 : 60))
     f_cell(2, 1, sellOn and nHL > 0 ? f_ord(nHL) : "·", f_col(nHL == 0 ? 4 : nHL))
     f_cell(0, 2, "highs  (buys)", color.new(stackLHC, 0))
     f_cell(1, 2, buyOn ? (lhOk ? str.tostring(array.size(lhP)) : str.tostring(array.size(lhP)) + "!") : "—", color.new(stackLHC, buyOn ? 0 : 60))
     f_cell(2, 2, buyOn and nLH > 0 ? f_ord(nLH) : "·", f_col(nLH == 0 ? 4 : nLH))
+
+    if resOn
+        float wr = trTot > 0 ? 100.0 * trWin / trTot : na
+        float avgR = trTot > 0 ? rSum / trTot : na
+        float pf = rLoss > 0 ? rWin / rLoss : na
+        color pnlC = rSum > 0 ? entBuyC : rSum < 0 ? entSellC : gry
+        f_cell(0, 3, f_ord(entAt) + "-break results  ·  " + f_tf(), color.new(color.white, 0))
+        f_cell(1, 3, "", gry)
+        f_cell(2, 3, "", gry)
+        f_cell(0, 4, "trades", gry)
+        f_cell(1, 4, str.tostring(trTot), color.new(color.white, 0))
+        f_cell(2, 4, inTrade ? (trLong ? "1 open L" : "1 open S") : "", inTrade ? (trLong ? entBuyC : entSellC) : gry)
+        f_cell(0, 5, "wins", gry)
+        f_cell(1, 5, str.tostring(trWin), entBuyC)
+        f_cell(2, 5, na(wr) ? "—" : str.tostring(wr, "#.#") + "%", entBuyC)
+        f_cell(0, 6, "losses", gry)
+        f_cell(1, 6, str.tostring(trLoss), entSellC)
+        f_cell(2, 6, na(wr) ? "—" : str.tostring(100.0 - wr, "#.#") + "%", entSellC)
+        f_cell(0, 7, "avg R / trade", gry)
+        f_cell(1, 7, na(avgR) ? "—" : f_r(avgR), na(avgR) ? gry : avgR >= 0 ? entBuyC : entSellC)
+        f_cell(2, 7, "", gry)
+        f_cell(0, 8, "total R", gry)
+        f_cell(1, 8, f_r(rSum), pnlC)
+        f_cell(2, 8, "", gry)
+        f_cell(0, 9, "profit factor", gry)
+        f_cell(1, 9, na(pf) ? "—" : str.tostring(pf, "#.##"), na(pf) ? gry : pf >= 1 ? entBuyC : entSellC)
+        f_cell(2, 9, "", gry)
+        f_cell(0, 10, "R:R on the open trade", gry)
+        f_cell(1, 10, inTrade and not na(trR) ? "1 : " + str.tostring(trR, "#.##") : "—", inTrade ? (trLong ? entBuyC : entSellC) : gry)
+        f_cell(2, 10, inTrade ? str.tostring(math.round_to_mintick(trStop)) + " → " + str.tostring(math.round_to_mintick(trTgt)) : "", gry)
