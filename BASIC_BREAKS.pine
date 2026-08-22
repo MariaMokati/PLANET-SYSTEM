@@ -65,6 +65,23 @@ gCf = "Break confirmation"
 confMode = input.string("Close beyond", "What breaks a level", options = ["Wick beyond", "Close beyond", "Full body beyond"], group = gCf, tooltip = "Close beyond (default) — the candle must FINISH past the level. A wick through that closes back inside is a fake-out and breaks nothing.\nFull body beyond — open AND close both clear. Stricter.\nWick beyond — any touch counts, fake-outs included.")
 waitClose = input.bool(true, "Only judge closed bars", group = gCf, tooltip = "On (default): a break is decided at the close of the candle and never redrawn. This is what makes the entry signal fire in real time on that close.")
 
+// ===================== IS THIS ACTUALLY A SETUP? =============================
+// Structure is still read at every turning point, however small — that has not
+// changed and it is not going to. What HAS changed is that not every sequence
+// is a trade. A two-bar wiggle taken back by another two-bar wiggle is a break;
+// it is not a setup, and 786 of them at 37.8% is what that costs.
+//
+// A sequence qualifies at its 1st Break, on the size of the leg it is taking
+// back — the distance from that level down to the low the move came off (up to
+// the high, for sells). Everything below the bar is still counted in structure,
+// it just does not get drawn, does not get an entry, and does not go into the
+// results.
+gQ = "Is this actually a setup?"
+qOn = input.bool(true, "Only trade a sequence if the leg is worth trading", group = gQ, tooltip = "ON by default. Turn it off to go back to numbering and trading every sequence, which is what produced hundreds of trades at a losing profit factor.")
+minLegAtr = input.float(2.5, "…the leg must be at least (× ATR)", minval = 0.0, maxval = 20.0, step = 0.1, group = gQ, tooltip = "THIS IS THE DIAL. Measured at the 1st Break: the distance from the level being broken down to the low the move came off, in ATRs.\n\nRaise it for fewer, bigger, cleaner setups. Lower it for more. Watch the dashboard — trades, win %, profit factor — and stop where the profit factor is best, not where the trade count is highest.")
+qTrend = input.bool(false, "…and structure must already have turned", group = gQ, tooltip = "OFF by default. On, a buy sequence only counts once the last swing low is an HL (the decline has stopped making lower lows) and a sell sequence once the last swing high is an LH.\n\nIt cuts the count hard and takes the entry later. Try it second, after the leg size is set.")
+drawSkipped = input.bool(false, "Draw the sequences that did not qualify", group = gQ, tooltip = "OFF by default — this is what takes the mess off the chart. The skipped sequences are still counted in the structure, they are just not drawn.")
+
 // ===================== STRUCTURE LABELS ======================================
 gZz = "Structure labels  (HH / HL / LH / LL)"
 zzLbl = input.bool(false, "Label every swing HH / HL / LH / LL", group = gZz, tooltip = "OFF by default. Turn it on to read the structure the numbering is built from, then turn it off again — it changes nothing except what is drawn.")
@@ -121,7 +138,7 @@ gRs = "Results  (dashboard stats)"
 resOn = input.bool(true, "Track wins / losses on this timeframe", group = gRs, tooltip = "Follows the same signal the entry arrows use — the Nth break — whether or not the arrows are switched on. Switching timeframe recalculates from that timeframe's bars.")
 stopMode = input.string("Structure (the swing behind it)", "Stop", options = ["Structure (the swing behind it)", "Fixed × ATR"], group = gRs, tooltip = "Structure: the newest unbroken swing behind the entry — the low the move came off for a long, the high for a short. That is where the idea is wrong.\nFixed: a flat multiple of ATR.")
 stopAtr = input.float(1.0, "…ATR multiple (also the fallback)", minval = 0.1, maxval = 10.0, step = 0.1, group = gRs)
-tgtMode = input.string("Opposite extreme (draw on liquidity)", "Target", options = ["Opposite extreme (draw on liquidity)", "R multiple"], group = gRs, tooltip = "Opposite extreme: the furthest unbroken swing the other side — the draw on liquidity. Falls back to the R multiple when there is nothing standing there.\nR multiple: a fixed multiple of the risk.")
+tgtMode = input.string("Nearest opposite level", "Target", options = ["Nearest opposite level", "Opposite extreme (draw on liquidity)", "R multiple"], group = gRs, tooltip = "NEAREST (default) — the first unbroken swing the other side of entry. It is the level price actually has to get through next, and it is reachable.\n\nOpposite extreme — the FURTHEST unbroken swing, the full draw on liquidity. It is the right idea on a big leg and the wrong one on a small one: aiming at it on every sequence is most of why the win rate was 37.8%. A target three times further away than the stop cannot win half the time.\n\nR multiple — a flat multiple of the risk.\n\nAll three fall back to the R multiple when there is nothing standing the other side.")
 tgtR = input.float(2.0, "…R multiple (also the fallback)", minval = 0.1, maxval = 20.0, step = 0.1, group = gRs)
 
 // ===================== DASHBOARD =============================================
@@ -209,6 +226,14 @@ var int nLH = 0
 // itself — a different leg — and the count restarts at 1st.
 var int lastBhl = -1
 var int lastBlh = -1
+// Judged once, at the 1st Break, and it holds for the whole sequence. A
+// sequence that does not qualify still eats its levels — they were broken, and
+// pretending otherwise would leave them standing forever — it just is not drawn,
+// entered, or counted.
+var bool upQual = true
+var bool dnQual = true
+var int qSkipUp = 0
+var int qSkipDn = 0
 
 var array<line> brkLn = array.new<line>()
 var array<label> brkLb = array.new<label>()
@@ -280,6 +305,19 @@ f_newestSw(bool wantHigh) =>
             if k == -1 and array.get(swH, i) == wantHigh and not array.get(swU, i)
                 k := i
     k
+
+// NEAREST unbroken level the other side of `ref` — the next thing in the way
+f_nearLvl(bool wantHigh, float ref) =>
+    float v = na
+    int n = array.size(swP)
+    if n > 0
+        for i = 0 to n - 1
+            if f_isLvl(i, wantHigh)
+                float p = array.get(swP, i)
+                bool beyond = wantHigh ? p > ref : p < ref
+                if beyond
+                    v := na(v) ? p : (wantHigh ? math.min(v, p) : math.max(v, p))
+    v
 
 // furthest unbroken level on a side — the draw on liquidity
 f_farLvl(bool wantHigh) =>
@@ -445,12 +483,26 @@ if evalOk and sellOn and sellReady
             nHL := 0
         nHL := nHL + 1
         lastBhl := b
-        firedAny := true
-        lastNo := nHL
-        lastLvl := p
-        lastWasHL := true
-        f_mark(nHL, p, b, k, true)
-        if nHL == entAt
+        // the 1st Break is where the sequence is judged
+        if nHL == 1
+            bool okLeg = not qOn
+            if qOn
+                int hi = f_newestSw(true)
+                if hi >= 0
+                    okLeg := (array.get(swP, hi) - p) >= minLegAtr * atr14
+                    if okLeg and qTrend
+                        okLeg := array.get(swK, hi) == 3
+            dnQual := okLeg
+            if not okLeg
+                qSkipDn := qSkipDn + 1
+        if dnQual
+            firedAny := true
+            lastNo := nHL
+            lastLvl := p
+            lastWasHL := true
+        if dnQual or drawSkipped
+            f_mark(nHL, p, b, k, true)
+        if nHL == entAt and dnQual
             entSell := true
             if entOn
                 f_entry(false)
@@ -467,12 +519,26 @@ if evalOk and buyOn and buyReady
             nLH := 0
         nLH := nLH + 1
         lastBlh := b
-        firedAny := true
-        lastNo := nLH
-        lastLvl := p
-        lastWasHL := false
-        f_mark(nLH, p, b, k, false)
-        if nLH == entAt
+        // the 1st Break is where the sequence is judged
+        if nLH == 1
+            bool okLeg = not qOn
+            if qOn
+                int li = f_newestSw(false)
+                if li >= 0
+                    okLeg := (p - array.get(swP, li)) >= minLegAtr * atr14
+                    if okLeg and qTrend
+                        okLeg := array.get(swK, li) == 2
+            upQual := okLeg
+            if not okLeg
+                qSkipUp := qSkipUp + 1
+        if upQual
+            firedAny := true
+            lastNo := nLH
+            lastLvl := p
+            lastWasHL := false
+        if upQual or drawSkipped
+            f_mark(nLH, p, b, k, false)
+        if nLH == entAt and upQual
             entBuy := true
             if entOn
                 f_entry(true)
@@ -512,6 +578,8 @@ if resOn and evalOk
             st := e + atr14 * stopAtr
         float risk = math.abs(e - st)
         float tg = na
+        if tgtMode == "Nearest opposite level"
+            tg := f_nearLvl(isLong, e)
         if tgtMode == "Opposite extreme (draw on liquidity)"
             tg := f_farLvl(isLong)
         if na(tg) or (isLong and tg <= e) or (not isLong and tg >= e)
@@ -588,12 +656,12 @@ if entBuy or entSell
     alert((entBuy ? "BUY" : "SELL") + " — " + f_ord(entAt) + " break has closed, enter on the next candle", alert.freq_once_per_bar_close)
 
 // ===================== DASHBOARD =============================================
-var table db = table.new(f_tpos(dbPos), 3, 12, border_width = 1)
+var table db = table.new(f_tpos(dbPos), 3, 13, border_width = 1)
 f_cell(int col, int row, string txt, color c) =>
     table.cell(db, col, row, txt, text_color = c, text_size = f_size(dbSzIn), bgcolor = color.new(color.black, 85))
 
 if dbOn and barstate.islast
-    table.clear(db, 0, 0, 2, 11)
+    table.clear(db, 0, 0, 2, 12)
     color gry = color.new(color.gray, 0)
 
     // the current structure read: the newest swing on each side, whatever it is
@@ -632,33 +700,36 @@ if dbOn and barstate.islast
     f_cell(0, 3, "structure  " + (lhOnly ? "(LH / HL only)" : "(all swings)"), color.new(color.white, 0))
     f_cell(1, 3, txtH, colH)
     f_cell(2, 3, txtL, colL)
+    f_cell(0, 4, qOn ? "sequences skipped  (leg < " + str.tostring(minLegAtr, "#.#") + "× ATR)" : "sequences skipped  (filter off)", gry)
+    f_cell(1, 4, str.tostring(qSkipUp) + " buy", gry)
+    f_cell(2, 4, str.tostring(qSkipDn) + " sell", gry)
 
     if resOn
         float wr = trTot > 0 ? 100.0 * trWin / trTot : na
         float avgR = trTot > 0 ? rSum / trTot : na
         float pf = rLoss > 0 ? rWin / rLoss : na
         color pnlC = rSum > 0 ? entBuyC : rSum < 0 ? entSellC : gry
-        f_cell(0, 4, f_ord(entAt) + "-break results  ·  " + f_tf(), color.new(color.white, 0))
-        f_cell(1, 4, "", gry)
-        f_cell(2, 4, "", gry)
-        f_cell(0, 5, "trades", gry)
-        f_cell(1, 5, str.tostring(trTot), color.new(color.white, 0))
-        f_cell(2, 5, inTrade ? (trLong ? "1 open L" : "1 open S") : "", inTrade ? (trLong ? entBuyC : entSellC) : gry)
-        f_cell(0, 6, "wins", gry)
-        f_cell(1, 6, str.tostring(trWin), entBuyC)
-        f_cell(2, 6, na(wr) ? "—" : str.tostring(wr, "#.#") + "%", entBuyC)
-        f_cell(0, 7, "losses", gry)
-        f_cell(1, 7, str.tostring(trLoss), entSellC)
-        f_cell(2, 7, na(wr) ? "—" : str.tostring(100.0 - wr, "#.#") + "%", entSellC)
-        f_cell(0, 8, "avg R / trade", gry)
-        f_cell(1, 8, na(avgR) ? "—" : f_r(avgR), na(avgR) ? gry : avgR >= 0 ? entBuyC : entSellC)
-        f_cell(2, 8, "", gry)
-        f_cell(0, 9, "total R", gry)
-        f_cell(1, 9, f_r(rSum), pnlC)
+        f_cell(0, 5, f_ord(entAt) + "-break results  ·  " + f_tf(), color.new(color.white, 0))
+        f_cell(1, 5, "", gry)
+        f_cell(2, 5, "", gry)
+        f_cell(0, 6, "trades", gry)
+        f_cell(1, 6, str.tostring(trTot), color.new(color.white, 0))
+        f_cell(2, 6, inTrade ? (trLong ? "1 open L" : "1 open S") : "", inTrade ? (trLong ? entBuyC : entSellC) : gry)
+        f_cell(0, 7, "wins", gry)
+        f_cell(1, 7, str.tostring(trWin), entBuyC)
+        f_cell(2, 7, na(wr) ? "—" : str.tostring(wr, "#.#") + "%", entBuyC)
+        f_cell(0, 8, "losses", gry)
+        f_cell(1, 8, str.tostring(trLoss), entSellC)
+        f_cell(2, 8, na(wr) ? "—" : str.tostring(100.0 - wr, "#.#") + "%", entSellC)
+        f_cell(0, 9, "avg R / trade", gry)
+        f_cell(1, 9, na(avgR) ? "—" : f_r(avgR), na(avgR) ? gry : avgR >= 0 ? entBuyC : entSellC)
         f_cell(2, 9, "", gry)
-        f_cell(0, 10, "profit factor", gry)
-        f_cell(1, 10, na(pf) ? "—" : str.tostring(pf, "#.##"), na(pf) ? gry : pf >= 1 ? entBuyC : entSellC)
+        f_cell(0, 10, "total R", gry)
+        f_cell(1, 10, f_r(rSum), pnlC)
         f_cell(2, 10, "", gry)
-        f_cell(0, 11, "R:R on the open trade", gry)
-        f_cell(1, 11, inTrade and not na(trR) ? "1 : " + str.tostring(trR, "#.##") : "—", inTrade ? (trLong ? entBuyC : entSellC) : gry)
-        f_cell(2, 11, inTrade ? str.tostring(math.round_to_mintick(trStop)) + " → " + str.tostring(math.round_to_mintick(trTgt)) : "", gry)
+        f_cell(0, 11, "profit factor", gry)
+        f_cell(1, 11, na(pf) ? "—" : str.tostring(pf, "#.##"), na(pf) ? gry : pf >= 1 ? entBuyC : entSellC)
+        f_cell(2, 11, "", gry)
+        f_cell(0, 12, "R:R on the open trade", gry)
+        f_cell(1, 12, inTrade and not na(trR) ? "1 : " + str.tostring(trR, "#.##") : "—", inTrade ? (trLong ? entBuyC : entSellC) : gry)
+        f_cell(2, 12, inTrade ? str.tostring(math.round_to_mintick(trStop)) + " → " + str.tostring(math.round_to_mintick(trTgt)) : "", gry)
