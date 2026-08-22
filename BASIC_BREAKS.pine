@@ -50,7 +50,12 @@ bullOn = input.bool(true, "Count breaks of HIGHS (bullish)", group = gDir, toolt
 // ===================== RESET RULES ===========================================
 gRs = "Reset — when does the count go back to 1st"
 rstFlip = input.bool(true, "Reset on direction flip", group = gRs, tooltip = "On (default): an opposite-direction break clears the count. How big that break has to be is set below.")
-rstFlipMode = input.string("Only past the sequence anchor", "…but only when the flip is", options = ["Only past the sequence anchor", "Any opposite break"], group = gRs, tooltip = "Only past the sequence anchor (default) — the count survives small counter-moves inside a leg and only resets when price actually closes back through the level the sequence started from. This is what makes a sell-off count 1st, 2nd, 3rd straight down instead of restarting at 1st every time a minor high is taken.\nAny opposite break — the older, blunter behaviour: ANY break the other way clears the count.")
+rstFlipMode = input.string("Any opposite break", "…and the flip counts as", options = ["Any opposite break", "After N opposite breaks", "Only past the sequence anchor"], group = gRs, tooltip = "Any opposite break (default) — one break the other way ends the sequence. Shortest, cleanest counts.\nAfter N opposite breaks — one counter-break is treated as noise; it takes N in a row to end the sequence. Longer runs.\nOnly past the sequence anchor — the count survives until price closes back through the level the sequence started from. In a trending market that level is rarely reclaimed, so sequences run LONG; the leg timeout and the ceiling below are what keep it sane.")
+rstFlipN = input.int(2, "…how many opposite breaks", minval = 1, maxval = 10, group = gRs, tooltip = "Only used when the flip mode is 'After N opposite breaks'.")
+rstIdle = input.bool(true, "End a sequence that goes quiet", group = gRs, tooltip = "On (default): if that direction has not broken anything for N bars, the leg is over and the next break is a 1st again. This is the bound that matches how a sequence gets read by eye — a sell-off that pauses has ended, whether or not price broke back the other way.")
+rstIdleBars = input.int(30, "…after how many quiet bars", minval = 3, maxval = 500, group = gRs)
+seqMaxOn = input.bool(true, "Hard ceiling on a sequence", group = gRs, tooltip = "On (default): a sequence can never exceed N breaks — it restarts at 1st instead. This is a backstop, not a feature: with the wrong combination of reset settings a count can otherwise run for the whole chart and print things like '778th Break'.")
+seqMaxN = input.int(10, "…never past this number", minval = 2, maxval = 100, group = gRs)
 rstCap = input.bool(false, "Restart at 1st after the Nth break", group = gRs, tooltip = "On: count 1-2-…-N then start again at 1st. Treats every N breaks as a finished sequence. Takes precedence over the numbering cap below.")
 rstCapN = input.int(3, "…after how many", minval = 2, maxval = 20, group = gRs)
 rstSess = input.bool(false, "Reset on a new period", group = gRs, tooltip = "On: both counters clear at the start of each day / week / session, so break numbers are always relative to the current period.")
@@ -272,6 +277,8 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
     var bool liveDemOn = false
     var int nBull = 0
     var int nBear = 0
+    var int lastBullBar = na
+    var int lastBearBar = na
     var float anchBull = na
     var float anchBear = na
     bool firedBull = false
@@ -360,6 +367,16 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
         nBear := 0
         anchBull := na
         anchBear := na
+    // A leg that has stopped breaking anything has ended, whether or not price
+    // broke back the other way. Without this bound a trending market never
+    // satisfies the flip rule and the count runs for the whole chart.
+    if rstIdle
+        if nBear > 0 and not na(lastBearBar) and bar_index - lastBearBar > rstIdleBars
+            nBear := 0
+            anchBear := na
+        if nBull > 0 and not na(lastBullBar) and bar_index - lastBullBar > rstIdleBars
+            nBull := 0
+            anchBull := na
     if rstZone
         if nBear > 0 and not na(anchBear) and close > anchBear
             nBear := 0
@@ -412,11 +429,16 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
         loUsed := true
         firedBear := true
         lvlBear := actLo
-        if rstFlip and nBull > 0 and (rstFlipMode == "Any opposite break" or (not na(anchBull) and close < anchBull))
+        int cand = (rstCap and nBear >= rstCapN) ? 1 : nBear + 1
+        if seqMaxOn and cand > seqMaxN
+            cand := 1
+        nBear := cand
+        lastBearBar := bar_index
+        // the flip is judged AFTER this counter advanced, so "after N opposite
+        // breaks" can see how far this direction has actually got
+        if rstFlip and nBull > 0 and (rstFlipMode == "Any opposite break" or (rstFlipMode == "After N opposite breaks" and nBear >= rstFlipN) or (rstFlipMode == "Only past the sequence anchor" and not na(anchBull) and close < anchBull))
             nBull := 0
             anchBull := na
-        int cand = (rstCap and nBear >= rstCapN) ? 1 : nBear + 1
-        nBear := cand
         if cand == 1
             anchBear := anchMode == "The swing at the 1st break" ? (na(actHi) ? high : actHi) : anchHiN
             if zoneOn
@@ -474,11 +496,14 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
         hiUsed := true
         firedBull := true
         lvlBull := actHi
-        if rstFlip and nBear > 0 and (rstFlipMode == "Any opposite break" or (not na(anchBear) and close > anchBear))
+        int cand = (rstCap and nBull >= rstCapN) ? 1 : nBull + 1
+        if seqMaxOn and cand > seqMaxN
+            cand := 1
+        nBull := cand
+        lastBullBar := bar_index
+        if rstFlip and nBear > 0 and (rstFlipMode == "Any opposite break" or (rstFlipMode == "After N opposite breaks" and nBull >= rstFlipN) or (rstFlipMode == "Only past the sequence anchor" and not na(anchBear) and close > anchBear))
             nBear := 0
             anchBear := na
-        int cand = (rstCap and nBull >= rstCapN) ? 1 : nBull + 1
-        nBull := cand
         if cand == 1
             anchBull := anchMode == "The swing at the 1st break" ? (na(actLo) ? low : actLo) : anchLoN
             if zoneOn
@@ -539,6 +564,8 @@ f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keep
         liveDemOn := false
         nBull := 0
         nBear := 0
+        lastBullBar := na
+        lastBearBar := na
         anchBull := na
         anchBear := na
 

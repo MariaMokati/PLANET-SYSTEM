@@ -64,11 +64,36 @@ break reaches.
 | **Extreme of the last N bars** *(default, N=50)* | the highest high (bearish) or lowest low (bullish) of the leg the break came out of |
 | The swing at the 1st break | the minor pivot standing at the moment of the break |
 
-This matters more than it looks. With the anchor set to the minor swing, a shallow
-pullback inside a sell-off clears it and the next break is numbered "1st" again —
-which is what produced two consecutive *1st Break* labels on a 5m gold chart. With
-the leg extreme as the anchor, the same sequence numbers 1st → 2nd → 3rd straight
-down, which is how it gets marked by hand.
+This matters more than it looks, in both directions. With the anchor set to the
+minor swing, a shallow pullback inside a sell-off clears it and the next break is
+numbered "1st" again — which produced two consecutive *1st Break* labels on a 5m
+gold chart.
+
+But making the leg extreme the anchor **and** tying the reset to it was worse: in a
+trending market that level is essentially never reclaimed, so nothing ever reset
+and the count ran for the entire chart — a live 5m gold chart printed
+**"778th Break"**. The anchor is still the leg extreme, because that is the right
+span for the zone, but the *reset* no longer depends on reclaiming it by default.
+Three bounds now apply instead:
+
+1. **Direction flip** — any opposite break ends the sequence (default).
+2. **Quiet leg** — 30 bars with no break in that direction ends it. This is the
+   bound that matches reading a chart by eye: a sell-off that pauses has ended,
+   whether or not price broke back the other way. It is also the only one of the
+   three that fires in a clean one-way trend.
+3. **Hard ceiling** — 10, a backstop so that no combination of the other settings
+   can ever run away again.
+
+Measured over 8,000 synthetic bars per regime, highest number reached:
+
+| series | anchor-reset (the 778 bug) | flip + quiet leg + ceiling |
+|---|---|---|
+| choppy with drift | 106 | 9 |
+| random walk | 134 | 8 |
+| strong one-way trend | 283 | 10 |
+
+In all three the fixed distribution is dominated by 1st / 2nd / 3rd, which is the
+shape of a hand annotation.
 
 ## 4. Resets — when the count goes back to 1st
 
@@ -76,7 +101,9 @@ All four are switchable and all four stack.
 
 | Rule | Default | Behaviour |
 |---|---|---|
-| Direction flip | **on** | a break of a HIGH clears the bearish count, and vice versa. *Only past the sequence anchor* (default) makes the count survive small counter-moves inside a leg; *Any opposite break* is the blunt version |
+| Direction flip | **on** | a break of a HIGH clears the bearish count, and vice versa. *Any opposite break* (default) · *After N opposite breaks* (one counter-break is noise) · *Only past the sequence anchor* (survives until the origin is reclaimed — **runs long in a trend**) |
+| Quiet leg | **on, 30 bars** | a direction that has not broken anything for N bars has ended; the next break is a 1st again |
+| Hard ceiling | **on, 10** | a sequence can never exceed N — a backstop, not a feature |
 | Restart after the Nth | off | count 1…N then start again at 1st; takes precedence over the numbering cap |
 | New period | off | both counters clear at each new day / week / session |
 | Return through the anchor | off | the anchor is the opposite level standing when the 1st break fired — the high the sell-off started from; closing back beyond it ends the sequence |
