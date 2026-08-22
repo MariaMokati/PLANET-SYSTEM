@@ -12,8 +12,10 @@
 //   1st Break. The next one up is the 2nd. The one above that is the 3rd.
 //   Mirror downward through the fractal lows.
 //
-//   A sequence runs until the move that made it tops out — a new fractal high
-//   confirms, and the upward count restarts at 1st. Same the other way.
+//   A sequence runs until it restarts, and WHEN it restarts is a setting —
+//   when the move that made the levels turns (default), when the other side
+//   breaks, or only once the Nth is reached. That choice decides whether a
+//   level taken hours after the one before it is still the 3rd or a fresh 1st.
 //
 //   A pullback often stops after the 1st or 2nd. That is not the indicator
 //   missing something, it is the market failing to reach the 3rd.
@@ -44,6 +46,7 @@ capOn = input.bool(true, "Stop after the Nth break", group = gSt, tooltip = "On 
 capN = input.int(3, "…the Nth", minval = 1, maxval = 20, group = gSt)
 dropUsed = input.bool(true, "Ignore a level price is already past when it confirms", group = gSt, tooltip = "A fractal is only known `swing length` bars after it printed. If price already closed through it in the meantime it was never standing, so it is not numbered. Turn this off to number it late instead.")
 mergeAtr = input.float(0.25, "Treat levels closer than (× ATR) as one", minval = 0.0, maxval = 3.0, step = 0.05, group = gSt, tooltip = "A flat consolidation prints several fractals a few ticks apart. Without this they each eat a number, so the 1st and the 2nd land on what is visually the same level and the real 3rd never gets counted. Set to 0 to number every fractal separately.")
+resetMode = input.string("When the move that made them turns", "A sequence restarts", options = ["When the move that made them turns", "When the other side breaks", "Only once the Nth is reached"], group = gSt, tooltip = "WHEN DOES 1st START OVER.\n\nWhen the move that made them turns (default) — a new fractal forms in the direction of travel, so the pullback has topped and the next run counts again from 1st. Tightest: a long chop between two breaks restarts the count.\n\nWhen the other side breaks — the count keeps running until price breaks the opposite way. Use this if a level that gets taken hours after the one before it should still be the 3rd rather than a fresh 1st.\n\nOnly once the Nth is reached — loosest. The count runs 1st, 2nd, 3rd and only then starts over, however long it takes.")
 needBeyond = input.int(1, "A sequence only starts where N levels stand beyond it", minval = 0, maxval = 5, group = gSt, tooltip = "An impulse breaking its own last minor high has nothing above it — that is the impulse continuing, not a sequence, and it does not get numbered. A pullback breaking into stacked structure does. Once a sequence has started this no longer applies, so the 3rd still counts even when it is the last level there is. Set to 0 to number every break.")
 
 // ===================== BREAK CONFIRMATION ====================================
@@ -166,10 +169,15 @@ float rawPl = ta.pivotlow(pvLen, pvLen)
 float maxC = ta.highest(close, pvLen)
 float minC = ta.lowest(close, pvLen)
 
-// A new fractal high means the move up topped out — the next run up starts
-// again at 1st. Mirror for a fractal low.
+// A new fractal high means the move up topped out. Under the default reset
+// that ends the sequence and the next run up starts again at 1st.
+bool resetOnTurn = resetMode == "When the move that made them turns"
+bool resetOnOther = resetMode == "When the other side breaks"
+bool resetOnDone = resetMode == "Only once the Nth is reached"
+
 if not na(rawPh)
-    nUp := 0
+    if resetOnTurn
+        nUp := 0
     if not dropUsed or maxC < rawPh
         int k = f_mergeIdx(hiP, rawPh, mergeAtr * atr14)
         if k == -1
@@ -178,7 +186,8 @@ if not na(rawPh)
         else if rawPh > array.get(hiP, k)
             array.set(hiP, k, rawPh)
 if not na(rawPl)
-    nDn := 0
+    if resetOnTurn
+        nDn := 0
     if not dropUsed or minC > rawPl
         int k = f_mergeIdx(loP, rawPl, mergeAtr * atr14)
         if k == -1
@@ -289,6 +298,10 @@ if evalOk and upOn
             f_mark(nUp, p, b, false)
             if entOn and nUp == entAt
                 f_entry(true)
+            if resetOnOther
+                nDn := 0
+            if resetOnDone and capOn and nUp >= capN
+                nUp := 0
         gi := f_nextUp()
 
 if evalOk and dnOn
@@ -310,6 +323,10 @@ if evalOk and dnOn
             f_mark(nDn, p, b, true)
             if entOn and nDn == entAt
                 f_entry(false)
+            if resetOnOther
+                nUp := 0
+            if resetOnDone and capOn and nDn >= capN
+                nDn := 0
         gj := f_nextDn()
 
 // ===================== WHAT IS STILL STANDING ================================

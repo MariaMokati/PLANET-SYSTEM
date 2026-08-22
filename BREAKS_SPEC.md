@@ -34,6 +34,31 @@ From the annotated GC1! 30m chart, both reproduced exactly by the Python port:
 A pullback commonly stops after the 1st or 2nd. That is not a miss — it is the
 market failing to reach the 3rd, and it is information worth seeing.
 
+## 1a. When does 1st start over
+
+This is a real judgement call and it is a setting, not a silent choice —
+*A sequence restarts*:
+
+| option | behaviour |
+|---|---|
+| **When the move that made them turns** *(default)* | a new fractal forms in the direction of travel, so the pullback has topped. Tightest — a long chop between two breaks restarts the count |
+| **When the other side breaks** | the count runs until price breaks the opposite way |
+| **Only once the Nth is reached** | loosest — 1st, 2nd, 3rd, then over, however long it takes |
+
+All three agree on both reference setups in §1. They only diverge when a level
+is taken long after the one before it, with chop in between. On a reconstruction
+of that case (2nd at 4458, a long chop, then 4435):
+
+```
+turn    1st 4467 · 2nd 4457 · [restart] 1st 4451 · 1st 4449 · 2nd 4434 · 3rd 4429
+other   1st 4467 · 2nd 4457 · 3rd 4451
+done    1st 4467 · 2nd 4457 · 3rd 4451 · 1st 4449 · 2nd 4434 · 3rd 4429
+```
+
+The annotated chart numbers that late level **3rd**, which is `other`. Left on
+`turn` as the default until confirmed on the live chart. All three stay capped
+at 3 over 3,000 bars on three regimes.
+
 ## 2. The two things that stop it numbering noise
 
 Neither is a classification. Both fall out of the level list itself.
