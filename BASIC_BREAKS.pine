@@ -1,0 +1,408 @@
+//@version=6
+// =============================================================================
+// BASIC BREAKS  —  1st / 2nd / 3rd break ranking
+// -----------------------------------------------------------------------------
+// Numbers structural breaks in sequence — "1st Break", "2nd Break",
+// "3rd Break" — the way they get annotated by hand on a chart. Every rule
+// below is a switch, not a hard-coded choice.
+//
+//   LEVEL SOURCES  Four independent layers. Each has its own on/off switch,
+//                  its own pivot length, its own colours, its own keep-N and
+//                  its OWN counter, so you can run one or all four at once:
+//                    SWING      confirmed pivots (default length 5)
+//                    FRACTAL    short 2-bar pivots — the responsive layer
+//                    CANDLE     the previous candle's high / low
+//                    PROTECTED  only the swing that protects the trend
+//   CONFIRMATION   Wick beyond / Close beyond / Full body beyond (default).
+//   DIRECTIONS     Breaks of LOWS and breaks of HIGHS run on two SEPARATE
+//                  counters, each independently switchable.
+//   RESETS         Four rules, all switchable and all stackable:
+//                    direction flip · after the Nth break · new day / week /
+//                    session · price back through the sequence anchor
+//   NUMBERING      Counts past the 3rd by default. An optional cap either
+//                  drops the number or stops drawing beyond N.
+//
+// NON-REPAINTING: pivots are CONFIRMED (placed `length` bars back) and, with
+// "Only evaluate closed bars" on (default), a break is judged once at bar
+// close and is never redrawn. The cost is the usual one — a confirmed pivot
+// is only known `length` bars after it printed. That lag is exactly why the
+// FRACTAL and CANDLE layers exist; run them alongside SWING if you want the
+// break marked sooner and accept the extra noise.
+//
+// HONESTY: this is an annotation tool. It marks what already happened. It
+// makes no claim that an Nth break is more or less likely to continue, and
+// nothing here has been Strategy-Tester validated. Compile it, look at it on
+// your own instrument, and judge it yourself.
+// =============================================================================
+indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500)
+
+// ===================== BREAK CONFIRMATION ====================================
+gCf = "Break confirmation"
+confMode = input.string("Full body beyond", "What confirms a break", options = ["Wick beyond", "Close beyond", "Full body beyond"], group = gCf, tooltip = "Wick beyond — any trade through the level counts, even if price closes back inside. Marks the most, failed pokes included.\nClose beyond — the candle must FINISH past the level; a wick-only poke is a sweep, not a break. This is the definition used in Basic CRT.\nFull body beyond (default) — open AND close both clear of the level. Strictest: a candle whose body still straddles the level gets no mark at all.")
+waitClose = input.bool(true, "Only evaluate closed bars", group = gCf, tooltip = "On (default): a break is judged once, at bar close, and never redrawn. Off: a break can be flagged mid-bar and can vanish again before that bar closes.")
+skipStale = input.bool(true, "Ignore levels already broken when they confirm", group = gCf, tooltip = "A pivot only confirms N bars after it printed, so price is sometimes already past it by the time it exists. On (default): such a level is retired silently instead of firing an instant break the moment it appears. Off: it fires immediately.")
+
+// ===================== DIRECTIONS ============================================
+gDir = "Directions"
+bearOn = input.bool(true, "Count breaks of LOWS  (bearish)", group = gDir, tooltip = "Close/body through a prior low. This is the sequence in the reference chart.")
+bullOn = input.bool(true, "Count breaks of HIGHS (bullish)", group = gDir, tooltip = "Close/body through a prior high. Runs on its own counter — a bullish 2nd break has nothing to do with the bearish count.")
+
+// ===================== RESET RULES ===========================================
+gRs = "Reset — when does the count go back to 1st"
+rstFlip = input.bool(true, "Reset on direction flip", group = gRs, tooltip = "On (default): the moment price breaks a HIGH, the bearish count is cleared, and vice versa. Keeps 1-2-3 tied to one leg.")
+rstCap = input.bool(false, "Restart at 1st after the Nth break", group = gRs, tooltip = "On: count 1-2-…-N then start again at 1st. Treats every N breaks as a finished sequence. Takes precedence over the numbering cap below.")
+rstCapN = input.int(3, "…after how many", minval = 2, maxval = 20, group = gRs)
+rstSess = input.bool(false, "Reset on a new period", group = gRs, tooltip = "On: both counters clear at the start of each day / week / session, so break numbers are always relative to the current period.")
+rstSessTf = input.string("Day", "Which period", options = ["Day", "Week", "Session"], group = gRs)
+rstSessStr = input.session("0930-1600", "Session window", group = gRs, tooltip = "Only used when 'Which period' is Session.")
+rstTz = input.string("America/New_York", "Session timezone", group = gRs)
+rstZone = input.bool(false, "Reset when price returns through the anchor", group = gRs, tooltip = "The anchor is the opposite level standing when the 1st break fired — the high the sell-off started from. On: closing back beyond it ends the sequence and the next break is a 1st again.")
+
+// ===================== NUMBERING =============================================
+gNum = "Numbering"
+numCapOn = input.bool(false, "Stop numbering after N breaks", group = gNum, tooltip = "Off (default): the count keeps climbing — 4th, 5th, 6th… On: only the first N get an ordinal, and 'Beyond the cap' decides what happens to the rest.")
+numCapN = input.int(3, "…numbered up to", minval = 1, maxval = 20, group = gNum)
+capMode = input.string("Draw without a number", "Beyond the cap", options = ["Draw without a number", "Draw nothing"], group = gNum, tooltip = "Draw without a number — the line still appears, just unlabelled: the chart stays as clean as a hand annotation. Draw nothing — the sequence is treated as finished until it resets.")
+
+// ===================== LEVEL SOURCE 1 — SWING ================================
+gL1 = "Levels 1 — SWING  (confirmed pivots)"
+t1On = input.bool(true, "Show swing breaks", group = gL1, tooltip = "Breaks of confirmed pivot highs / lows. The main structural layer.")
+t1Len = input.int(5, "Pivot length", minval = 1, group = gL1, tooltip = "Bars either side of the swing. Higher = only major turning points, and a longer wait before the pivot confirms.")
+t1Bull = input.color(color.new(#2962FF, 0), "Bullish", inline = "c1", group = gL1)
+t1Bear = input.color(color.new(#F23645, 0), "Bearish", inline = "c1", group = gL1)
+t1Keep = input.int(20, "Keep last N marks", minval = 1, maxval = 100, group = gL1)
+
+// ===================== LEVEL SOURCE 2 — FRACTAL ==============================
+gL2 = "Levels 2 — FRACTAL  (short pivots)"
+t2On = input.bool(false, "Show fractal breaks", group = gL2, tooltip = "Same logic on a 2-bar fractal. Far more responsive, far more marks — closest to tightly-spaced hand annotation.")
+t2Len = input.int(2, "Pivot length", minval = 1, group = gL2)
+t2Bull = input.color(color.new(#5B9CF6, 0), "Bullish", inline = "c2", group = gL2)
+t2Bear = input.color(color.new(#E091AE, 0), "Bearish", inline = "c2", group = gL2)
+t2Keep = input.int(20, "Keep last N marks", minval = 1, maxval = 100, group = gL2)
+
+// ===================== LEVEL SOURCE 3 — CANDLE ===============================
+gL3 = "Levels 3 — CANDLE  (previous candle's high / low)"
+t3On = input.bool(false, "Show candle breaks", group = gL3, tooltip = "Every candle that clears the PREVIOUS candle's high or low counts. No pivot lag at all, and by far the noisiest layer — expect long runs of consecutive numbers.")
+t3Bull = input.color(color.new(#9C27B0, 0), "Bullish", inline = "c3", group = gL3)
+t3Bear = input.color(color.new(#FF9800, 0), "Bearish", inline = "c3", group = gL3)
+t3Keep = input.int(12, "Keep last N marks", minval = 1, maxval = 100, group = gL3)
+
+// ===================== LEVEL SOURCE 4 — PROTECTED ============================
+gL4 = "Levels 4 — PROTECTED  (structure-protecting swing only)"
+t4On = input.bool(false, "Show protected-structure breaks", group = gL4, tooltip = "Only the swing that protects the current trend: the last pivot low standing when a new pivot high confirmed (and the mirror). One break per structural leg — the fewest, cleanest marks.")
+t4Len = input.int(5, "Pivot length", minval = 1, group = gL4)
+t4Bull = input.color(color.new(#089981, 0), "Bullish", inline = "c4", group = gL4)
+t4Bear = input.color(color.new(#B71C1C, 0), "Bearish", inline = "c4", group = gL4)
+t4Keep = input.int(12, "Keep last N marks", minval = 1, maxval = 100, group = gL4)
+
+// ===================== VISUALS ===============================================
+gVs = "Visuals"
+colourBy = input.string("Break number", "Colour the marks by", options = ["Break number", "Direction", "Level source"], group = gVs, tooltip = "Break number — 1st / 2nd / 3rd / 4th+ each get their own colour (the palette below).\nDirection — one colour for all bullish breaks, one for all bearish.\nLevel source — each layer keeps the colours set in its own section above.")
+cN1 = input.color(color.new(#5B9CF6, 0), "1st", inline = "cn", group = gVs)
+cN2 = input.color(color.new(#2962FF, 0), "2nd", inline = "cn", group = gVs)
+cN3 = input.color(color.new(#089981, 0), "3rd", inline = "cn", group = gVs)
+cNx = input.color(color.new(#787B86, 0), "4th+", inline = "cn", group = gVs)
+dirBull = input.color(color.new(#089981, 0), "All bullish", inline = "cd", group = gVs)
+dirBear = input.color(color.new(#F23645, 0), "All bearish", inline = "cd", group = gVs)
+lineOn = input.bool(true, "Draw the broken level as a line", group = gVs)
+lineEnd = input.string("Breaking candle", "Line runs to", options = ["Breaking candle", "Fixed bars", "Extend right"], group = gVs, tooltip = "Breaking candle — from the swing that was broken across to the candle that broke it, exactly as annotated by hand.")
+extBars = input.int(6, "…fixed bars past the break", minval = 0, maxval = 200, group = gVs)
+lineStyleIn = input.string("Solid", "Line style", options = ["Solid", "Dashed", "Dotted"], group = gVs)
+lineW = input.int(1, "Line width", minval = 1, maxval = 4, group = gVs)
+lblOn = input.bool(true, "Label the break", group = gVs)
+lblFmt = input.string("1st Break", "Label text", options = ["1st Break", "1st", "1st Break + price", "1"], group = gVs)
+lblPos = input.string("Centre", "Label sits", options = ["Left", "Centre", "Right"], group = gVs)
+lblSide = input.string("Outside the level", "Label placed", options = ["Outside the level", "Above the line", "On the line"], group = gVs, tooltip = "Outside the level — below a broken low, above a broken high.")
+lblOff = input.float(0.25, "Label offset (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gVs)
+lblSzIn = input.string("Small", "Label size", options = ["Tiny", "Small", "Normal", "Large"], group = gVs)
+srcTag = input.bool(false, "Tag the label with its level source", group = gVs, tooltip = "On: '1st Break ·SWING'. Useful while more than one layer is running.")
+
+// ===================== DASHBOARD =============================================
+gDb = "Dashboard"
+dbOn = input.bool(true, "Show count dashboard", group = gDb)
+dbPos = input.string("Top right", "Position", options = ["Top right", "Top left", "Bottom right", "Bottom left", "Middle right"], group = gDb)
+dbSzIn = input.string("Tiny", "Text size", options = ["Tiny", "Small", "Normal"], group = gDb)
+
+// ===================== HELPERS ===============================================
+f_size(string s) =>
+    s == "Tiny" ? size.tiny : s == "Small" ? size.small : s == "Normal" ? size.normal : size.large
+
+f_lstyle(string s) =>
+    s == "Dashed" ? line.style_dashed : s == "Dotted" ? line.style_dotted : line.style_solid
+
+f_tpos(string s) =>
+    switch s
+        "Top left" => position.top_left
+        "Bottom right" => position.bottom_right
+        "Bottom left" => position.bottom_left
+        "Middle right" => position.middle_right
+        => position.top_right
+
+// 1st, 2nd, 3rd, 4th … 11th, 12th, 13th, 21st …
+f_ord(int n) =>
+    int r100 = n % 100
+    int r10 = n % 10
+    string sfx = r100 >= 11 and r100 <= 13 ? "th" : r10 == 1 ? "st" : r10 == 2 ? "nd" : r10 == 3 ? "rd" : "th"
+    str.tostring(n) + sfx
+
+f_txt(int n, float px, bool numbered, string src) =>
+    string body = switch lblFmt
+        "1st Break" => numbered ? f_ord(n) + " Break" : "Break"
+        "1st" => numbered ? f_ord(n) : "Break"
+        "1st Break + price" => (numbered ? f_ord(n) + " Break " : "Break ") + str.tostring(math.round_to_mintick(px))
+        => numbered ? str.tostring(n) : "•"
+    srcTag ? body + " ·" + src : body
+
+f_col(int n, bool isBull, color tBull, color tBear) =>
+    switch colourBy
+        "Break number" => n == 1 ? cN1 : n == 2 ? cN2 : n == 3 ? cN3 : cNx
+        "Direction" => isBull ? dirBull : dirBear
+        => isBull ? tBull : tBear
+
+// A level is taken out when the candle clears it by the chosen rule.
+f_brkDn(float lvl) =>
+    na(lvl) ? false : confMode == "Wick beyond" ? low < lvl : confMode == "Close beyond" ? close < lvl : close < lvl and open < lvl
+
+f_brkUp(float lvl) =>
+    na(lvl) ? false : confMode == "Wick beyond" ? high > lvl : confMode == "Close beyond" ? close > lvl : close > lvl and open > lvl
+
+f_prune(array<line> la, array<label> lb, int keepN) =>
+    while array.size(la) > keepN
+        line.delete(array.shift(la))
+    while array.size(lb) > keepN
+        label.delete(array.shift(lb))
+    array.size(la)
+
+atr14 = ta.atr(14)
+
+// period resets — evaluated once, shared by every layer
+inSess = not na(time(timeframe.period, rstSessStr, rstTz))
+sessStart = inSess and not inSess[1]
+newPeriod = rstSess and (rstSessTf == "Day" ? timeframe.change("1D") : rstSessTf == "Week" ? timeframe.change("1W") : sessStart)
+
+// ===================== ONE LEVEL SOURCE ======================================
+// Called once per layer. Every `var` below is per-call-site, so each layer
+// keeps its own levels, its own two counters and its own drawing store — the
+// bullish and bearish counts never touch each other.
+f_layer(bool on, string mode, simple int len, color tBull, color tBear, int keepN, string nm) =>
+    var array<line> lns = array.new<line>()
+    var array<label> lbs = array.new<label>()
+    var float actHi = na
+    var int actHiBar = na
+    var float actLo = na
+    var int actLoBar = na
+    var bool hiUsed = true
+    var bool loUsed = true
+    var float pendHi = na
+    var int pendHiBar = na
+    var float pendLo = na
+    var int pendLoBar = na
+    var int nBull = 0
+    var int nBear = 0
+    var float anchBull = na
+    var float anchBear = na
+    bool firedBull = false
+    bool firedBear = false
+    float lvlBull = na
+    float lvlBear = na
+    bool hiJustSet = false
+    bool loJustSet = false
+
+    // pivots are read unconditionally so their history stays consistent
+    float rawPh = ta.pivothigh(len, len)
+    float rawPl = ta.pivotlow(len, len)
+
+    // ---- keep the active levels up to date --------------------------------
+    if mode == "Candle"
+        actHi := high[1]
+        actHiBar := bar_index - 1
+        actLo := low[1]
+        actLoBar := bar_index - 1
+        hiUsed := false
+        loUsed := false
+    else if mode == "Protected"
+        // the protecting low is the last pivot low standing when a new pivot
+        // high confirms — break it and the leg that made that high is over
+        if not na(rawPh)
+            pendHi := rawPh
+            pendHiBar := bar_index - len
+            if not na(pendLo) and (na(actLoBar) or actLoBar != pendLoBar)
+                actLo := pendLo
+                actLoBar := pendLoBar
+                loUsed := false
+                loJustSet := true
+        if not na(rawPl)
+            pendLo := rawPl
+            pendLoBar := bar_index - len
+            if not na(pendHi) and (na(actHiBar) or actHiBar != pendHiBar)
+                actHi := pendHi
+                actHiBar := pendHiBar
+                hiUsed := false
+                hiJustSet := true
+    else
+        if not na(rawPh)
+            int nbH = bar_index - len
+            if na(actHiBar) or actHiBar != nbH
+                actHi := rawPh
+                actHiBar := nbH
+                hiUsed := false
+                hiJustSet := true
+        if not na(rawPl)
+            int nbL = bar_index - len
+            if na(actLoBar) or actLoBar != nbL
+                actLo := rawPl
+                actLoBar := nbL
+                loUsed := false
+                loJustSet := true
+
+    // A pivot that price had ALREADY passed by the time it confirmed is retired
+    // silently. Only on the bar the level is first assigned — checking it on
+    // every bar would retire each level the instant price reached it and no
+    // break would ever be marked. Candle levels are never stale by definition.
+    if skipStale and mode != "Candle"
+        if hiJustSet and f_brkUp(actHi)
+            hiUsed := true
+        if loJustSet and f_brkDn(actLo)
+            loUsed := true
+
+    // ---- resets that do not depend on a break ------------------------------
+    if newPeriod
+        nBull := 0
+        nBear := 0
+        anchBull := na
+        anchBear := na
+    if rstZone
+        if nBear > 0 and not na(anchBear) and close > anchBear
+            nBear := 0
+            anchBear := na
+        if nBull > 0 and not na(anchBull) and close < anchBull
+            nBull := 0
+            anchBull := na
+
+    bool evalOk = on and (not waitClose or barstate.isconfirmed)
+
+    // ---- bearish: a low gets taken out -------------------------------------
+    if evalOk and bearOn and not loUsed and f_brkDn(actLo)
+        loUsed := true
+        firedBear := true
+        lvlBear := actLo
+        if rstFlip and nBull > 0
+            nBull := 0
+            anchBull := na
+        int cand = (rstCap and nBear >= rstCapN) ? 1 : nBear + 1
+        nBear := cand
+        if cand == 1
+            anchBear := na(actHi) ? high : actHi
+        bool numbered = (not numCapOn) or (cand <= numCapN)
+        if numbered or capMode == "Draw without a number"
+            color c = f_col(cand, false, tBull, tBear)
+            int xEnd = lineEnd == "Fixed bars" ? bar_index + extBars : bar_index
+            string extMode = lineEnd == "Extend right" ? extend.right : extend.none
+            if lineOn
+                array.push(lns, line.new(actLoBar, actLo, xEnd, actLo, xloc = xloc.bar_index, extend = extMode, color = c, style = f_lstyle(lineStyleIn), width = lineW))
+            if lblOn
+                float off = atr14 * lblOff
+                float yL = lblSide == "On the line" ? actLo : lblSide == "Above the line" ? actLo + off : actLo - off
+                int xL = lblPos == "Left" ? actLoBar : lblPos == "Right" ? xEnd : int(math.avg(actLoBar, xEnd))
+                array.push(lbs, label.new(xL, yL, f_txt(cand, actLo, numbered, nm), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(lblSzIn)))
+            f_prune(lns, lbs, keepN)
+
+    // ---- bullish: a high gets taken out ------------------------------------
+    if evalOk and bullOn and not hiUsed and f_brkUp(actHi)
+        hiUsed := true
+        firedBull := true
+        lvlBull := actHi
+        if rstFlip and nBear > 0
+            nBear := 0
+            anchBear := na
+        int cand = (rstCap and nBull >= rstCapN) ? 1 : nBull + 1
+        nBull := cand
+        if cand == 1
+            anchBull := na(actLo) ? low : actLo
+        bool numbered = (not numCapOn) or (cand <= numCapN)
+        if numbered or capMode == "Draw without a number"
+            color c = f_col(cand, true, tBull, tBear)
+            int xEnd = lineEnd == "Fixed bars" ? bar_index + extBars : bar_index
+            string extMode = lineEnd == "Extend right" ? extend.right : extend.none
+            if lineOn
+                array.push(lns, line.new(actHiBar, actHi, xEnd, actHi, xloc = xloc.bar_index, extend = extMode, color = c, style = f_lstyle(lineStyleIn), width = lineW))
+            if lblOn
+                float off = atr14 * lblOff
+                float yL = lblSide == "On the line" ? actHi : actHi + off
+                int xL = lblPos == "Left" ? actHiBar : lblPos == "Right" ? xEnd : int(math.avg(actHiBar, xEnd))
+                array.push(lbs, label.new(xL, yL, f_txt(cand, actHi, numbered, nm), xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = c, size = f_size(lblSzIn)))
+            f_prune(lns, lbs, keepN)
+
+    // ---- a layer switched off clears itself completely ---------------------
+    if not on
+        f_prune(lns, lbs, 0)
+        nBull := 0
+        nBear := 0
+        anchBull := na
+        anchBear := na
+
+    [nBull, nBear, firedBull, firedBear, lvlBull, lvlBear]
+
+// ===================== RUN EVERY LAYER =======================================
+// All four are called unconditionally — their internal state has to advance
+// bar by bar whether or not the layer is currently drawing.
+[n1Bull, n1Bear, f1Bull, f1Bear, l1Bull, l1Bear] = f_layer(t1On, "Pivot", t1Len, t1Bull, t1Bear, t1Keep, "SWING")
+[n2Bull, n2Bear, f2Bull, f2Bear, l2Bull, l2Bear] = f_layer(t2On, "Pivot", t2Len, t2Bull, t2Bear, t2Keep, "FRACTAL")
+[n3Bull, n3Bear, f3Bull, f3Bear, l3Bull, l3Bear] = f_layer(t3On, "Candle", 1, t3Bull, t3Bear, t3Keep, "CANDLE")
+[n4Bull, n4Bear, f4Bull, f4Bear, l4Bull, l4Bear] = f_layer(t4On, "Protected", t4Len, t4Bull, t4Bear, t4Keep, "PROTECTED")
+
+anyBull = f1Bull or f2Bull or f3Bull or f4Bull
+anyBear = f1Bear or f2Bear or f3Bear or f4Bear
+maxBear = math.max(t1On ? n1Bear : 0, t2On ? n2Bear : 0, t3On ? n3Bear : 0, t4On ? n4Bear : 0)
+maxBull = math.max(t1On ? n1Bull : 0, t2On ? n2Bull : 0, t3On ? n3Bull : 0, t4On ? n4Bull : 0)
+
+// ===================== ALERTS ================================================
+// One combined alert() message naming every layer that fired this bar, plus the
+// alertcondition list below for the simple "any break" style alerts.
+f_msg(string nm, bool isBull, int n, float lvl) =>
+    nm + " — " + f_ord(n) + (isBull ? " bullish break @ " : " bearish break @ ") + str.tostring(math.round_to_mintick(lvl))
+
+string amsg = ""
+amsg := amsg + (f1Bear ? f_msg("SWING", false, n1Bear, l1Bear) + "\n" : "")
+amsg := amsg + (f1Bull ? f_msg("SWING", true, n1Bull, l1Bull) + "\n" : "")
+amsg := amsg + (f2Bear ? f_msg("FRACTAL", false, n2Bear, l2Bear) + "\n" : "")
+amsg := amsg + (f2Bull ? f_msg("FRACTAL", true, n2Bull, l2Bull) + "\n" : "")
+amsg := amsg + (f3Bear ? f_msg("CANDLE", false, n3Bear, l3Bear) + "\n" : "")
+amsg := amsg + (f3Bull ? f_msg("CANDLE", true, n3Bull, l3Bull) + "\n" : "")
+amsg := amsg + (f4Bear ? f_msg("PROTECTED", false, n4Bear, l4Bear) + "\n" : "")
+amsg := amsg + (f4Bull ? f_msg("PROTECTED", true, n4Bull, l4Bull) + "\n" : "")
+if str.length(amsg) > 0
+    alert(str.substring(amsg, 0, str.length(amsg) - 1), alert.freq_once_per_bar_close)
+
+alertcondition(anyBear, "Bearish break", "Basic Breaks — a low was broken")
+alertcondition(anyBull, "Bullish break", "Basic Breaks — a high was broken")
+alertcondition(anyBear and maxBear >= 3, "3rd bearish break", "Basic Breaks — 3rd (or later) break of a low")
+alertcondition(anyBull and maxBull >= 3, "3rd bullish break", "Basic Breaks — 3rd (or later) break of a high")
+alertcondition(anyBull or anyBear, "Any break", "Basic Breaks — a level was broken")
+
+// ===================== DASHBOARD =============================================
+// Live count per layer. "—" means that layer is switched off.
+var table db = table.new(f_tpos(dbPos), 3, 5, border_width = 1)
+f_cell(int col, int row, string txt, color c) =>
+    table.cell(db, col, row, txt, text_color = c, text_size = f_size(dbSzIn), bgcolor = color.new(color.black, 85))
+
+f_num(bool on, int n) =>
+    not on ? "—" : n == 0 ? "·" : f_ord(n)
+
+if dbOn and barstate.islast
+    table.clear(db, 0, 0, 2, 4)
+    f_cell(0, 0, "BREAKS", color.new(color.white, 0))
+    f_cell(1, 0, "HIGHS", color.new(dirBull, 0))
+    f_cell(2, 0, "LOWS", color.new(dirBear, 0))
+    f_cell(0, 1, "SWING", color.new(color.gray, 0))
+    f_cell(1, 1, f_num(t1On and bullOn, n1Bull), color.new(dirBull, t1On and bullOn ? 0 : 60))
+    f_cell(2, 1, f_num(t1On and bearOn, n1Bear), color.new(dirBear, t1On and bearOn ? 0 : 60))
+    f_cell(0, 2, "FRACTAL", color.new(color.gray, 0))
+    f_cell(1, 2, f_num(t2On and bullOn, n2Bull), color.new(dirBull, t2On and bullOn ? 0 : 60))
+    f_cell(2, 2, f_num(t2On and bearOn, n2Bear), color.new(dirBear, t2On and bearOn ? 0 : 60))
+    f_cell(0, 3, "CANDLE", color.new(color.gray, 0))
+    f_cell(1, 3, f_num(t3On and bullOn, n3Bull), color.new(dirBull, t3On and bullOn ? 0 : 60))
+    f_cell(2, 3, f_num(t3On and bearOn, n3Bear), color.new(dirBear, t3On and bearOn ? 0 : 60))
+    f_cell(0, 4, "PROTECTED", color.new(color.gray, 0))
+    f_cell(1, 4, f_num(t4On and bullOn, n4Bull), color.new(dirBull, t4On and bullOn ? 0 : 60))
+    f_cell(2, 4, f_num(t4On and bearOn, n4Bear), color.new(dirBear, t4On and bearOn ? 0 : 60))
