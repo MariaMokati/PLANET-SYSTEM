@@ -204,38 +204,45 @@ f_addSwing(float p, int bx, bool isHigh) =>
 // before it was a HIGHER LOW of the impulse — that is the level. A lower low
 // means the high before it was a LOWER HIGH. Because the series alternates,
 // the previous same-side swing is always exactly two back.
-f_classify() =>
-    int n = array.size(swP)
-    if n >= 3
-        bool isHigh = array.get(swH, n - 1)
-        float cur = array.get(swP, n - 1)
-        float prevSame = array.get(swP, n - 3)
-        if isHigh and cur > prevSame
-            float lo = array.get(swP, n - 2)
-            int lob = array.get(swB, n - 2)
-            if array.size(hlP) == 0 or lo > array.get(hlP, array.size(hlP) - 1)
-                array.push(hlP, lo)
-                array.push(hlB, lob)
-                if array.size(hlP) >= minLv
-                    hlOk := true
-            nHL := 0
-        if not isHigh and cur < prevSame
-            float hi = array.get(swP, n - 2)
-            int hib = array.get(swB, n - 2)
-            if array.size(lhP) == 0 or hi < array.get(lhP, array.size(lhP) - 1)
-                array.push(lhP, hi)
-                array.push(lhB, hib)
-                if array.size(lhP) >= minLv
-                    lhOk := true
-            nLH := 0
-    array.size(swP)
-
+//
+// This runs at GLOBAL scope, not in a function: Pine lets a function mutate a
+// global array but NOT assign to a global scalar (CE10088), and this has to set
+// hlOk / lhOk / nHL / nLH.
+int adds = 0
 if not na(rawPh)
     if f_addSwing(rawPh, bar_index - pvLen, true)
-        f_classify()
+        adds += 1
 if not na(rawPl)
     if f_addSwing(rawPl, bar_index - pvLen, false)
-        f_classify()
+        adds += 1
+
+// Both a pivot high and a pivot low can confirm on the same bar (one big
+// outside bar). Classify each new swing in the order it formed.
+if adds > 0
+    for k = 0 to adds - 1
+        int idx = array.size(swP) - adds + k
+        if idx >= 2
+            bool isHi = array.get(swH, idx)
+            float cur = array.get(swP, idx)
+            float prevSame = array.get(swP, idx - 2)
+            if isHi and cur > prevSame
+                float lo = array.get(swP, idx - 1)
+                int lob = array.get(swB, idx - 1)
+                if array.size(hlP) == 0 or lo > array.get(hlP, array.size(hlP) - 1)
+                    array.push(hlP, lo)
+                    array.push(hlB, lob)
+                    if array.size(hlP) >= minLv
+                        hlOk := true
+                nHL := 0
+            if not isHi and cur < prevSame
+                float hi = array.get(swP, idx - 1)
+                int hib = array.get(swB, idx - 1)
+                if array.size(lhP) == 0 or hi < array.get(lhP, array.size(lhP) - 1)
+                    array.push(lhP, hi)
+                    array.push(lhB, hib)
+                    if array.size(lhP) >= minLv
+                        lhOk := true
+                nLH := 0
 
 while array.size(swP) > 60
     array.shift(swP)
