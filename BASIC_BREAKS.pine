@@ -27,12 +27,26 @@
 //   A break is a CLOSE beyond the level. A wick through that closes back inside
 //   is a fake-out and breaks nothing.
 //
+// WHAT COUNTS AS A LEVEL — BODIES, NOT WICKS
+//
+//   A wick on its own is not a high and closing through one is not a break. A
+//   level sits on the CANDLE BODY: the top of a body is max(open, close), the
+//   bottom is min(open, close). A spike whose body never reached up there is not
+//   a level at all. Reading levels off wick extremes is what put a phantom
+//   break on the chart and pushed every real number one slot along.
+//
+//   A turn also needs AT LEAST TWO OPPOSING CANDLES — at a high, a bullish
+//   candle handing over to a bearish one; at a low, a bearish handing over to a
+//   bullish. More than two is fine, two is the minimum, one is never enough.
+//   The level is the body extreme of that pair, and the pair has to top (or
+//   bottom) the bars either side of it.
+//
 //   The sequence is abandoned if price closes back below the low the rally came
 //   off — that setup is done. The levels still in it were never broken, so they
 //   go BACK into the pool for the next attempt.
 //
-// Non-repainting: pivots are CONFIRMED (placed `length` bars back) and a break
-// is judged once, at bar close.
+// Non-repainting: a turn is only CONFIRMED once the bars to its right have
+// closed, and a break is judged once, at bar close.
 //
 // THE ENTRY sits on the Nth break — the 2nd by default. The signal is made the
 // moment that candle CLOSES; the marker is drawn on the NEXT candle, which is
@@ -43,11 +57,11 @@
 // mirror. A zone is RETIRED the moment price closes through the far edge, and
 // only the last N live ones stay on the chart.
 // =============================================================================
-indicator("Basic Breaks", "BREAKS", overlay = true, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
+indicator("Basic Breaks", "BREAKS", overlay = true, max_bars_back = 500, max_lines_count = 500, max_labels_count = 500, max_boxes_count = 100)
 
 // ===================== STRUCTURE =============================================
 gS = "Structure"
-pvLen = input.int(1, "Swing length", minval = 1, group = gS, tooltip = "Bars that must be clear either side of a high or low for it to count as a level.\n\n1 (default) — every turn counts, including one- and two-bar ones. On the worked example the levels at 4431, 4443 and 4459 sit in 1-2 bar zigzags: at swing length 2 they are not pivots at all, never enter the pool, and never get numbered. Only 4420 survives, which is exactly the failure that produced this default.\n\nRaise it only if it is picking up turns you would not count.")
+pvLen = input.int(1, "Bars clear either side of a turn", minval = 1, maxval = 10, group = gS, tooltip = "A turn is two opposing candles — a bullish handing over to a bearish at a high, the mirror at a low. This is how many bars either side of that PAIR have to stay inside it for the turn to count.\n\n1 (default) — the minimum, so a two-candle turn counts. Every turning point matters no matter how small; on the worked example the levels at 4431, 4443 and 4459 sit in two- and three-candle turns and anything higher loses them.\n\nRaise it only if it is picking up turns you would not count."
 buyOn = input.bool(true, "Buy side  —  highs of a decline, broken upward", group = gS)
 sellOn = input.bool(false, "Sell side  —  lows of a rally, broken downward", group = gS, tooltip = "OFF by default. This is the mirror image: the lows a rally leaves behind, taken back downward, for sell setups. Reading buy setups off a decline, it is nothing but clutter running down the leg.")
 minGap = input.float(0.8, "Levels closer than (× ATR) are the same level", minval = 0.0, maxval = 5.0, step = 0.1, group = gS, tooltip = "A small corner inside a leg is a genuine lower high, so no structural rule removes it — but it takes a number that belongs to the real level above it, which is what puts a wrong 4th on the chart.\n\nWhen a new high lands within this distance of the one already on top, the NEWER, lower one supersedes it rather than sitting beside it.\n\n0.8 is a narrow window: on the worked example 0.8 drops the stray corner and keeps all six real levels, while 1.0 starts eating the 4th. Set to 0 to keep every corner.")
@@ -78,7 +92,7 @@ entSz = input.string("Normal", "Marker size", options = ["Tiny", "Small", "Norma
 entTxtSz = input.string("Normal", "Label size", options = ["Tiny", "Small", "Normal", "Large", "Huge"], group = gE)
 entBuyC = input.color(#00BF71, "Buy", inline = "ec", group = gE)
 entSellC = input.color(#FF4F87, "Sell", inline = "ec", group = gE)
-entPad = input.float(0.35, "Gap from the candle (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gE)
+entPad = input.float(0.35, "Gap from the entry level (× ATR)", minval = 0.0, maxval = 3.0, step = 0.05, group = gE)
 
 // ===================== ZONE ==================================================
 gZ = "Demand / supply zone"
@@ -173,8 +187,36 @@ var array<bool> zBuy = array.new<bool>()
 
 float atr14 = ta.atr(14)
 
-float rawPh = ta.pivothigh(pvLen, pvLen)
-float rawPl = ta.pivotlow(pvLen, pvLen)
+// ===================== TURNING POINTS ========================================
+// BODIES, NOT WICKS. The pair sits at offsets [pvLen + 1] (the first candle) and
+// [pvLen] (the second); pvLen bars either side of the pair have to stay inside
+// it. ta.highest / ta.lowest carry those two windows so there is no variable-
+// offset loop: `hiRight` is the highest body top over offsets 0..pvLen-1, and
+// the same series read pvLen+2 bars back is the window on the other side.
+float bodyHi = math.max(open, close)
+float bodyLo = math.min(open, close)
+bool cUp = close > open
+bool cDn = close < open
+
+float hiRight = ta.highest(bodyHi, pvLen)
+float loRight = ta.lowest(bodyLo, pvLen)
+float hiLeft = hiRight[pvLen + 2]
+float loLeft = loRight[pvLen + 2]
+
+// the body extreme of the pair, and the bar of the two that actually holds it
+float pairHi = math.max(bodyHi[pvLen + 1], bodyHi[pvLen])
+float pairLo = math.min(bodyLo[pvLen + 1], bodyLo[pvLen])
+int pairHiB = bodyHi[pvLen + 1] >= bodyHi[pvLen] ? bar_index - pvLen - 1 : bar_index - pvLen
+int pairLoB = bodyLo[pvLen + 1] <= bodyLo[pvLen] ? bar_index - pvLen - 1 : bar_index - pvLen
+
+// bullish handing over to bearish, topping both windows — and the mirror
+bool okHi = cUp[pvLen + 1] and cDn[pvLen] and not na(hiLeft) and not na(hiRight) and pairHi > hiLeft and pairHi > hiRight
+bool okLo = cDn[pvLen + 1] and cUp[pvLen] and not na(loLeft) and not na(loRight) and pairLo < loLeft and pairLo < loRight
+
+float rawPh = okHi ? pairHi : na
+float rawPl = okLo ? pairLo : na
+int rawPhB = pairHiB
+int rawPlB = pairLoB
 
 if na(rLow) or low < rLow
     rLow := low
@@ -197,12 +239,18 @@ f_mark(int n, float p, int b, bool up) =>
 // The break candle has CLOSED — that is the signal. The marker goes on the next
 // candle, the one taken. Two labels so the text is plain coloured type rather
 // than a filled block.
+//
+// It is anchored to the break candle's CLOSE, which is the entry level itself.
+// Hanging it off the candle's low instead is what threw it so far away: on a
+// wide break candle the low can sit a long way under the price you are actually
+// getting in at, and the marker went down there with it.
 f_entry(bool isBuy) =>
     float pad = atr14 * entPad
     color col = isBuy ? entBuyC : entSellC
     int x = bar_index + entShift
-    array.push(eLb, label.new(x, isBuy ? low - pad : high + pad, "", xloc = xloc.bar_index, yloc = yloc.price, style = f_eshape(entShape, isBuy), color = col, textcolor = col, size = f_size(entSz)))
-    array.push(eLb, label.new(x, isBuy ? low - pad * 2.4 : high + pad * 2.4, isBuy ? entTxtBuy : entTxtSell, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = col, size = f_size(entTxtSz)))
+    float y = isBuy ? close - pad : close + pad
+    array.push(eLb, label.new(x, y, "", xloc = xloc.bar_index, yloc = yloc.price, style = f_eshape(entShape, isBuy), color = col, textcolor = col, size = f_size(entSz)))
+    array.push(eLb, label.new(x, isBuy ? y - pad * 1.4 : y + pad * 1.4, isBuy ? entTxtBuy : entTxtSell, xloc = xloc.bar_index, yloc = yloc.price, style = label.style_none, textcolor = col, size = f_size(entTxtSz)))
     while array.size(eLb) > 200
         label.delete(array.shift(eLb))
     array.size(eLb)
@@ -243,10 +291,10 @@ if not na(rawPh)
     int topI = array.size(hiP) - 1
     if topI >= 0 and minGap > 0 and (array.get(hiP, topI) - rawPh) < minGap * atr14
         array.set(hiP, topI, rawPh)
-        array.set(hiB, topI, bar_index - pvLen)
+        array.set(hiB, topI, rawPhB)
     else
         array.push(hiP, rawPh)
-        array.push(hiB, bar_index - pvLen)
+        array.push(hiB, rawPhB)
     rLow := low
     rLowB := bar_index
     while array.size(hiP) > poolMax
@@ -260,10 +308,10 @@ if not na(rawPl)
     int topJ = array.size(loP) - 1
     if topJ >= 0 and minGap > 0 and (rawPl - array.get(loP, topJ)) < minGap * atr14
         array.set(loP, topJ, rawPl)
-        array.set(loB, topJ, bar_index - pvLen)
+        array.set(loB, topJ, rawPlB)
     else
         array.push(loP, rawPl)
-        array.push(loB, bar_index - pvLen)
+        array.push(loB, rawPlB)
     rHigh := high
     rHighB := bar_index
     while array.size(loP) > poolMax

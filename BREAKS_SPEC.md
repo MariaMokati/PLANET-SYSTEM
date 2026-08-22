@@ -132,3 +132,56 @@ live chart.
 
 Annotation tool. No claim that an Nth break is more or less likely to continue;
 nothing Strategy-Tester validated.
+
+---
+
+## Levels are on BODIES, not wicks  (v2.1)
+
+> "two opposing candles, as long as they make a higher high or a higher low, even
+> if it's just two candles, that is an important turning point. If it's multiple,
+> it's perfectly fine as well, but the minimum is two candles and not wicks. Why
+> are we marking the highs and the lows, focusing on just the wicks? A wick on its
+> own is not a high. It's not a break. The only time we're saying something is a
+> break is if we have a body closure outside of that range."
+
+### The rule
+
+* The top of a candle body is `max(open, close)`; the bottom is `min(open, close)`.
+* A **turn is a pair of opposing candles** — at a high, a bullish candle handing
+  over to a bearish one; at a low, a bearish handing over to a bullish. More than
+  two is fine (the hand-over is then between the last of the run and the first of
+  the reply). Two is the minimum. One candle is never a turn, however far it pokes.
+* The **level** is the body extreme of that pair, and the pair must top (or bottom)
+  the `pvLen` bars either side of it.
+* A **break** is a close beyond that body level — unchanged, and now consistent:
+  both ends of the test are body prices.
+
+### What it fixes
+
+* **The phantom 1st Break.** `ta.pivothigh` reads wick extremes, so a lone spike
+  became a level and the close that ran through it became the 1st Break. Every
+  real level then took the next number along — her 1st was labelled 2nd, her 2nd
+  3rd, her 3rd was the top one. Body levels delete the phantom and the numbering
+  falls back into place.
+* **The 3rd sitting "at the top and not at the bottom".** It was anchored to the
+  wick's tip. It is now on the body.
+* **Ties.** In futures the open of one candle equals the close of the last, so a
+  strict pivot on the body series finds nothing at a clean hand-over. Treating the
+  two candles as one pair and taking `max` of their body tops is what makes the
+  plateau resolve. This was verified in `scratchpad/body2.py` against seven
+  hand-made patterns (lone upper wick, lone lower wick, bull→bear, up→down→down,
+  up→up→down, a V bottom, and an all-bullish run that must yield nothing).
+
+### Implementation note
+
+The two windows either side of the pair are carried by `ta.highest(bodyHi, pvLen)`
+— read at offset 0 for the right-hand window and at offset `pvLen + 2` for the
+left — so there is no variable-offset history loop. `max_bars_back = 500` is set
+on `indicator()` because the offsets depend on an input.
+
+### Entry anchor
+
+The entry marker was hung off the break candle's **low**. On a wide break candle
+that is a long way under the price actually being taken, which is why it looked
+"that far". It now sits `entPad × ATR` off the break candle's **close** — the
+entry level itself.
