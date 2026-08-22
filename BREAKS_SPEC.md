@@ -1,205 +1,118 @@
-# Break ranking — spec (v2)
+# Basic Breaks — spec
 
-`BASIC_BREAKS.pine`. Numbers the breaks of the structure a move is retracing
-into — **1st Break**, **2nd Break**, **3rd Break** — the way they get annotated
-by hand.
+Numbers the breaks of the structure a move is retracing into — "1st Break",
+"2nd Break", "3rd Break" — the way they get annotated by hand.
 
-`BASIC_BREAKS_ORIGINAL.pine` is the frozen v1 build, kept untouched as a
-reference. v2 was rebuilt from scratch against a single worked example rather
-than patched further.
+Two Pine files:
 
----
+| file | what it is |
+| --- | --- |
+| `BASIC_BREAKS.pine` | the live build |
+| `BASIC_BREAKS_ORIGINAL.pine` | **frozen.** The v1 build, byte-identical apart from two `\n` escapes that were lost when it was pasted through chat and had to be restored for it to compile. Never edit it. |
 
-## 1. The worked example
+## History of the build, so the dead ends stay dead
 
-GC1! 1h, the decline into 14 Aug 04:00. Marked by hand:
+1. **v1** — every `ta.pivothigh` / `ta.pivotlow` becomes a level; break newest-first.
+   Frozen as `BASIC_BREAKS_ORIGINAL.pine`.
+2. **v2** — rewritten from scratch against one worked example: a strictly
+   descending pool of lower highs, an ATR gap rule, a frozen set, demand zones.
+   Then extended with body-based levels (a wick is not a high; a turn needs two
+   opposing candles). **Rolled back at her request** — v2 is in this branch's
+   history only. Two things worth keeping from it:
+   - a wick on its own is not a high, and a break is a body closure beyond
+   - `hiRight[pvLen + 2]` — indexing a **user-defined** variable by an
+     input-derived offset — is a Pine **runtime** error. The script compiles,
+     the settings show in the status line, and every line, label and box is
+     silently dropped. `max_bars_back` on `indicator()` covers built-in series
+     only and does not help. **Never index a user-defined variable by an input.**
+3. **v3, current** — an accurate alternating swing structure, plus a filter that
+   decides which sequences are actually setups.
 
-| level | numbered |
-|---|---|
-| 4419 | **1st Break** |
-| 4431 | **2nd Break** |
-| 4443 | **3rd Break** |
-| 4458 | 4th |
-| 4487 | 5th |
-| 4498 | 6th |
+## v3 — the structure
 
-Made oldest-first 4498 → 4419, taken back newest-first. Everything below is
-checked against this.
+`ta.pivothigh` and `ta.pivotlow` are two independent series. **They do not
+alternate.** Inside one leg three pivot highs can print with no pivot low
+between them, and v1 put all three on the stack as separate levels where
+structure has one. That is what made a genuine 2nd print as a 3rd.
 
-## 2. What a level is
+The structure now alternates:
 
-A **lower high** left behind by the decline. The pool is a strictly
-**descending** run: a high that a later, higher high supersedes was never a
-lower high in that run and leaves the pool.
+- a swing **high** only follows a swing **low**, and vice versa
+- a more extreme point arriving while the leg is still running **replaces** the
+  swing standing — a higher high inside an up leg is the same swing, moved
+- a swing already broken is spent; a new pivot after it starts a new swing
 
-**Swing length 1** by default. Several of her zigzag legs are one or two bars
-long; at swing length 2 the levels at 4431, 4443 and 4459 are not pivots at all,
-never enter the pool, and can never be numbered — only 4420 survives. That was a
-real failure, and it is why the default is 1.
+Each swing is classified against the previous swing **on its own side**:
 
-### Levels closer than 0.8 × ATR are the same level
+| | above the last one on its side | below it |
+| --- | --- | --- |
+| swing high | `HH` | `LH` |
+| swing low | `HL` | `LL` |
 
-A small corner inside a leg *is* a genuine lower high, so no structural rule
-removes it — but it takes a number belonging to the real level above it. On the
-worked example a corner near 4450, between the 3rd (4443) and the 4th (4459),
-put a wrong 4th on the chart and pushed every real level up one.
+`lhOnly` restricts buys to `LH` and sells to `HL`. **Off by default** — the `HH`
+that topped the decline is normally the *last* number in the sequence (the 6th,
+in the worked example), so dropping it loses the far end of the leg.
 
-When a new high lands within the gap of the one on top, the **newer, lower one
-supersedes it**. Rejecting the new one instead is backwards — the corner arrives
-first and blocks the real level; at 0.8 that dropped 4443 and kept 4450.
+## v3 — the breaks
 
-The window is narrow and was measured, not guessed:
+Unchanged from v1 in spirit:
 
-```
-minGap 0.8   with the corner : 4420 · 4431 · 4443 · 4459 · 4490   ← corner gone, the marked five
-             the clean five  : unchanged
-             the marked six  : unchanged, 4487/4498 survive at 11 pts apart
-minGap 1.0   with the corner : 4420 · 4431 · 4443 · 4490          ← too much, eats the 4th
-```
+- the move takes structure back **newest first** — last swing high = 1st Break
+- a break is a **close beyond** (configurable: wick / close / full body)
+- a level leaves for one reason only: **price broke it**
+- the count **restarts at 1st** when a break takes a swing *newer* than the last
+  one numbered — that is the move eating structure it built itself
+- the count is uncapped; **only the first three are drawn** by default
 
-## 3. Order
+## v3 — which sequences are setups
 
-**Newest-made first.** The scan walks down from the newest for the first level
-this bar's close is beyond.
+Measured on her 5m XAUUSD chart, v3 without a filter produced **786 trades,
+37.8% wins, profit factor 0.9**. Two causes:
 
-## 4. The sequence
+**Every two-bar wiggle was a setup.** A sequence is now judged once, at its 1st
+Break, on the size of the leg it is taking back — the distance from that level to
+the extreme the move came off, in ATRs (`minLegAtr`, default 2.5). Below the bar
+it still eats its levels, because they *were* broken and leaving them standing
+forever would be wrong; it is simply not drawn, not entered and not counted.
+That is also what takes the mess off the chart. `qTrend` is a second, optional
+gate requiring structure to have turned first (`HL` for buys, `LH` for sells).
 
-- A break is a **close beyond** the level. A wick through that closes back
-  inside is a fake-out and breaks nothing.
-- **The set closes on the 1st Break.** The pool is frozen as it stands; highs the
-  rally makes on its own way up belong to the next leg.
-- The count is **uncapped**. Only the first three are **drawn** by default.
-- The sequence is **abandoned** if price closes back below the low the rally came
-  off. The levels still in it were never broken, so they go **back into the
-  pool**, oldest first.
+**The target was the furthest level away.** `tgtMode` defaulted to the full draw
+on liquidity on *every* sequence, including two-bar ones. A target several times
+further away than the stop cannot win half the time. Default is now the
+**nearest** unbroken level the other side — the next thing actually in the way.
+The old behaviour is still selectable.
 
-Destroying them instead is what made the 3rd, 4th, 5th and 6th vanish: a
-premature sequence earlier in the leg froze them, and abandoning it deleted them
-permanently. Only two levels were left for the real rally, giving a 1st and a
-2nd and nothing else.
+Structure detection is untouched by all of this. Every turning point, however
+small, is still read. The filter decides what is *tradable*, not what *exists*.
 
-## 5. Entry
+### Tune on profit factor, not win rate
 
-On the **2nd break** by default. The signal is made the moment that candle
-**closes**; the marker is drawn on the **next** candle — the one actually taken.
-Triangle / Circle / Arrow / Diamond, sized, green with **E: Long** or pink with
-**E: Short**. Separate `BUY entry` and `SELL entry` alertconditions.
+They pull against each other: moving the target closer raises the win rate and
+shrinks each win. Profit factor above 1.0 makes money at any win rate; tuning on
+win rate alone can push it past 50% and still lose. The dashboard shows both,
+plus a skipped-sequences count so the filter's effect is visible.
 
-## 6. Zone
+## Defaults that exist because something broke
 
-Drawn at the **1st Break**, the moment both edges are known.
+| default | why |
+| --- | --- |
+| `pvLen = 1` | every turning point matters no matter how small. At 2 the small legs are not pivots at all and can never be numbered. |
+| drawings capped at 500, not a setting | TradingView cannot draw more than 500 lines or labels. When this *was* a setting, a low value silently deleted marks that had been drawn correctly, which read as the indicator failing to mark them. |
+| `hidePast = true` | 1st / 2nd / 3rd on the chart; 4th+ still counted, alerted and in the dashboard, just not drawn. |
+| structure labels and zigzag **off** | nothing gets drawn that was not asked for. |
+| sell side on, buy side on | both, but `lhOnly` off so neither side is over-filtered by default. |
+| `f_xc()` clamps to `bar_index - 4000` | a drawing coordinate more than ~10,000 bars back is `RE10026`. |
+| constant history offsets only | see the v2 runtime error above. |
 
-- **Demand**: top is the 1st Break level, bottom is the low the rally came off.
-- **Supply**: the mirror.
-- 50% marked through the middle and labelled.
+## Verification limits
 
-A zone is **retired** the moment price closes through its far edge — the same
-value the sequence is abandoned under, so the zone and its invalidation are one
-line by construction. Only the last **2 live** zones stay on the chart.
-
-Fixed forward width rather than an open-ended extend: a box running on
-indefinitely is what produced `RE10026` in v1.
-
-## 7. Sides
-
-Buy side on, **sell side off by default**. Reading buy setups off a decline, the
-mirror marks running down the leg are nothing but clutter.
-
-## 8. Repainting
-
-Pivots are **confirmed** — placed `length` bars back — and a break is judged
-once, at bar close. The cost is the usual one: a confirmed pivot is only known
-`length` bars after it printed.
-
-## 9. What is and is not verified
-
-Prototyped in Python against reconstructions of the worked example before each
-commit. Confirmed: the six-level sequence; the swing-length reproduction; the
-abandoned-levels reproduction; the minGap window in §2.
-
-Two candidate fixes were **rejected by the reproduction before shipping** — a
-minimum-levels gate (needed 4+ and then dragged a wrong level in as the 3rd) and
-restricting the pool to strictly-descending lower highs alone (a no-op on all
-three reconstructions).
-
-**Not verified:** this environment cannot compile or run Pine. The port covers
-the pool, the ordering, the freeze/abandon lifecycle and the gap rule — **not**
-the drawing objects. Line, label and box geometry is inspection-only, which is
-exactly how `RE10026` reached the chart in v1.
-
-**Open item:** the minGap fix for the wrong 4th has not been confirmed on the
-live chart.
+This environment cannot compile or run Pine, and has no price data. Rules are
+prototyped in Python against reconstructions before shipping — that is how the
+swing-length failure, the abandoned-levels failure and two wrong candidate fixes
+were caught. It does **not** cover drawing-object geometry, and it cannot measure
+a win rate: the dashboard on the chart is the only measurement.
 
 Annotation tool. No claim that an Nth break is more or less likely to continue;
-nothing Strategy-Tester validated.
-
----
-
-## Levels are on BODIES, not wicks  (v2.1)
-
-> "two opposing candles, as long as they make a higher high or a higher low, even
-> if it's just two candles, that is an important turning point. If it's multiple,
-> it's perfectly fine as well, but the minimum is two candles and not wicks. Why
-> are we marking the highs and the lows, focusing on just the wicks? A wick on its
-> own is not a high. It's not a break. The only time we're saying something is a
-> break is if we have a body closure outside of that range."
-
-### The rule
-
-* The top of a candle body is `max(open, close)`; the bottom is `min(open, close)`.
-* A **turn is a pair of opposing candles** — at a high, a bullish candle handing
-  over to a bearish one; at a low, a bearish handing over to a bullish. More than
-  two is fine (the hand-over is then between the last of the run and the first of
-  the reply). Two is the minimum. One candle is never a turn, however far it pokes.
-* The **level** is the body extreme of that pair, and the pair must top (or bottom)
-  the `pvLen` bars either side of it.
-* A **break** is a close beyond that body level — unchanged, and now consistent:
-  both ends of the test are body prices.
-
-### What it fixes
-
-* **The phantom 1st Break.** `ta.pivothigh` reads wick extremes, so a lone spike
-  became a level and the close that ran through it became the 1st Break. Every
-  real level then took the next number along — her 1st was labelled 2nd, her 2nd
-  3rd, her 3rd was the top one. Body levels delete the phantom and the numbering
-  falls back into place.
-* **The 3rd sitting "at the top and not at the bottom".** It was anchored to the
-  wick's tip. It is now on the body.
-* **Ties.** In futures the open of one candle equals the close of the last, so a
-  strict pivot on the body series finds nothing at a clean hand-over. Treating the
-  two candles as one pair and taking `max` of their body tops is what makes the
-  plateau resolve. This was verified in `scratchpad/body2.py` against seven
-  hand-made patterns (lone upper wick, lone lower wick, bull→bear, up→down→down,
-  up→up→down, a V bottom, and an all-bullish run that must yield nothing).
-
-### Implementation note
-
-The two windows either side of the pair are carried by `ta.highest(bodyHi, pvLen)`
-— read at offset 0 for the right-hand window and at offset `pvLen + 2` for the
-left — so there is no variable-offset history loop. `max_bars_back = 500` is set
-on `indicator()` because the offsets depend on an input.
-
-### Entry anchor
-
-The entry marker was hung off the break candle's **low**. On a wide break candle
-that is a long way under the price actually being taken, which is why it looked
-"that far". It now sits `entPad × ATR` off the break candle's **close** — the
-entry level itself.
-
-### The blank chart  (v2.2)
-
-v2.1 compiled, loaded, showed its defaults in the status line — and drew nothing
-at all. That is a Pine **runtime** error, not a compile one: the script keeps its
-title and settings and every line, label and box is dropped.
-
-The cause was `hiRight[pvLen + 2]` — a **user-defined** variable indexed by an
-offset derived from an input. Pine cannot determine the referencing length of a
-user variable that way, and `max_bars_back` on `indicator()` only covers built-in
-series, not user variables, so setting it did not help.
-
-Fix: the turn is two candles with one bar clear either side, so every offset is a
-constant — `bodyHi[3] … bodyHi[0]`, pair at `[2]` and `[1]`. The `pvLen` input is
-gone with it (it could only ever have been raised to lose the small turns that
-matter), and so is `max_bars_back`.
-
-Rule of thumb for this file: never index a user-defined variable by an input.
+the results are indicator-side, with no spread, slippage, commission or partial
+fills, one position at a time.
