@@ -85,8 +85,8 @@ waitClose = input.bool(true, "Only judge closed bars", group = gCf, tooltip = "O
 // because a break that happened cannot be un-happened without corrupting every
 // number that comes after it. See the header.
 gTh = "Dead hours  (no setups in this window)"
-thOn = input.bool(true, "Kill every setup inside a time window", group = gTh, tooltip = "ON by default, set to 21:00 → 01:30.\n\nInside the window: no sequence can start, nothing is drawn, no entry fires, no alert fires, nothing reaches the results.\n\nOutside it: unchanged.\n\nStructure and level-consumption keep running either way — that is deliberate, and turning this off restores the old behaviour exactly.")
-thWin = input.session("2100-0130", "The window", group = gTh, tooltip = "HHMM-HHMM. 2100-0130 = 9pm to half past one the following morning; a window that crosses midnight is handled properly.\n\nThe start is inclusive and the end is exclusive: a bar at 01:30 is already outside and can trade.")
+thOn = input.bool(true, "Kill every setup inside a time window", group = gTh, tooltip = "ON by default, set to 21:00 → 01:30.\n\nInside the window: no sequence can start, nothing is drawn, no entry fires, no break alert fires, nothing reaches the results.\n\nOutside it: unchanged.\n\nStructure and level-consumption keep running either way — that is deliberate, and turning this off restores the old behaviour exactly.\n\nThe window judges the candle at its CLOSE, because that is when a break is confirmed and when the entry signal is made. On a chart whose candles are LONGER than the window itself — 6H and above for a 4½-hour window — one candle cannot be called in or out of it, so the filter switches itself off and the dashboard says \"TF too coarse\".")
+thWin = input.session("2100-0130", "The window", group = gTh, tooltip = "HHMM-HHMM. 2100-0130 = 9pm to half past one the following morning; a window that crosses midnight is handled properly.\n\nStart inclusive, end exclusive, judged on the candle's CLOSE: the candle that merely runs up to 21:00 still trades, the 21:00 candle does not, and the first candle that closes after 01:30 trades again.")
 thTz = input.string("Africa/Johannesburg", "Read the window in this timezone", options = ["Africa/Johannesburg", "America/New_York", "Europe/London", "Asia/Tokyo", "UTC", "Exchange"], group = gTh, tooltip = "Africa/Johannesburg = SAST (UTC+2), so you type the hours exactly as you see them on your own clock. Daylight saving in the chosen zone is handled by TradingView, per date — a New York window does not drift in March and November.\n\nExchange = the chart's own timezone.")
 thDays = input.string("1234567", "Days the window applies to", group = gTh, tooltip = "1=Sunday … 7=Saturday. Leave as 1234567 for every day. A window across midnight is stamped by the day it OPENS.")
 thWhat = input.string("Everything in the window", "What the window kills", options = ["Everything in the window", "Only the entry"], group = gTh, tooltip = "Everything (default) — a sequence whose 1st Break lands inside the window is dead for its whole life, and nothing at all is drawn or fired while the window is open. This is the literal reading: no setups between those hours.\n\nOnly the entry — breaks still draw, still number and still fire the break alert inside the window, but no entry is taken and nothing reaches the results. Use this one if you want to SEE what the dead hours are doing without trading them.")
@@ -238,17 +238,59 @@ int keepN = 500
 atr14 = ta.atr(14)
 
 // ---- the dead hours --------------------------------------------------------
-// One reading per bar, taken from the bar's OPEN time in the chosen zone, so the
-// 21:00 candle is the first one inside and the 01:30 candle is the first one out.
-// TradingView resolves the zone's daylight saving per date, which is why a
-// New York window does not drift by an hour twice a year.
+// A break is DECIDED when the candle closes — that is what `waitClose` means, and
+// it is the moment the entry signal is made. So the clock has to judge that
+// instant, not the candle's opening stamp. Reading the open instead is not a
+// rounding error, it is backwards: on a 4H chart the 18:00→22:00 SAST candle
+// opens outside the window and confirms its break at 22:00, squarely inside it.
+//
+// One millisecond before the close is used, so the boundary reads the way a
+// trader reads it: a candle that merely runs UP TO 21:00 is still outside, and
+// the 01:25 candle — whose last tick is 01:29:59 — is still inside.
 tzUse = thTz == "Exchange" ? syminfo.timezone : thTz
-daysUse = thDays == "" ? "1234567" : thDays
-// TradingView's own session picker can write a ":days" suffix into the window box.
-// Appending a second one would make the session string invalid, so the suffix that is
-// already there wins and the days input is only used when there is none.
-winUse = str.contains(thWin, ":") ? thWin : thWin + ":" + daysUse
-inBlk = thOn and not na(time(timeframe.period, winUse, tzUse))
+// The window box may already carry its own ":days" suffix from TradingView's
+// session picker. That one wins; the days input is used when there is none.
+thCore = array.get(str.split(thWin, ":"), 0)
+thTail = array.size(str.split(thWin, ":")) > 1 ? array.get(str.split(thWin, ":"), 1) : ""
+daysUse = str.length(thTail) > 0 ? thTail : (thDays == "" ? "1234567" : thDays)
+
+// Minutes-from-midnight out of the "HHMM" at position `from`, or -1 if it is not
+// readable. Every index is clamped to the string's own length, so a half-typed or
+// mistyped window can never throw at runtime — it just reads as unreadable, and
+// the dashboard says so.
+f_mins(string s, int from) =>
+    int L = str.length(s)
+    int i0 = math.min(from, L)
+    int i1 = math.min(from + 2, L)
+    int i2 = math.min(from + 4, L)
+    float hh = str.tonumber(str.substring(s, i0, i1))
+    float mm = str.tonumber(str.substring(s, i1, i2))
+    na(hh) or na(mm) ? -1 : int(hh) * 60 + int(mm)
+
+thA = f_mins(thCore, 0)
+thB = f_mins(thCore, 5)
+thOk = thA >= 0 and thA < 1440 and thB >= 0 and thB <= 1440
+thLen = not thOk ? 0 : thA < thB ? thB - thA : thA == thB ? 1440 : 1440 - thA + thB
+
+// Is this exact instant inside the window, read in the chosen zone? A window that
+// crosses midnight is stamped by the day it OPENED, so the days mask means what
+// the tooltip says it means.
+f_dead(int t) =>
+    bool hit = false
+    if thOk and not na(t)
+        int md = hour(t, tzUse) * 60 + minute(t, tzUse)
+        bool inW = thA == thB ? true : thA < thB ? (md >= thA and md < thB) : (md >= thA or md < thB)
+        if inW
+            int tDay = thA > thB and md < thB ? t - 86400000 : t
+            hit := str.contains(daysUse, str.tostring(dayofweek(tDay, tzUse)))
+    hit
+
+// A candle longer than the window itself cannot be called in or out of it — one
+// instant cannot stand for four hours of price. Rather than block the wrong
+// candles or, worse, blank the whole chart, the filter switches itself OFF above
+// that size and the dashboard says so out loud.
+thTfOk = thOk and timeframe.isintraday and timeframe.in_seconds() <= thLen * 60
+inBlk = thOn and thTfOk and f_dead(time_close - 1)
 // "Everything in the window" also silences the drawing and the alerts, not just
 // the entry. "Only the entry" leaves the marks on the chart to be looked at.
 blkHush = inBlk and thWhat == "Everything in the window"
@@ -286,6 +328,11 @@ var int qSkipDn = 0
 var int blkSeqUp = 0
 var int blkSeqDn = 0
 var int blkEnt = 0
+// WHY the sequence was killed, not just that it was. Without this, "Draw the
+// sequences that did not qualify" would start drawing a clock-killed sequence the
+// moment the window closed — an orphaned 2nd Break with no 1st Break in front of it.
+var bool dnClock = false
+var bool upClock = false
 
 var array<line> brkLn = array.new<line>()
 var array<label> brkLb = array.new<label>()
@@ -551,6 +598,7 @@ if evalOk and sellOn and sellReady
             bool okHrs = not blkHush
             if okLeg and not okHrs
                 blkSeqDn := blkSeqDn + 1
+            dnClock := not okHrs
             dnQual := okLeg and okHrs
             if not okLeg
                 qSkipDn := qSkipDn + 1
@@ -559,7 +607,7 @@ if evalOk and sellOn and sellReady
             lastNo := nHL
             lastLvl := p
             lastWasHL := true
-        if (dnQual or drawSkipped) and not blkHush
+        if (dnQual or (drawSkipped and not dnClock)) and not blkHush
             f_mark(nHL, p, b, k, true)
         if nHL == entAt and dnQual
             if inBlk
@@ -593,6 +641,7 @@ if evalOk and buyOn and buyReady
             bool okHrs = not blkHush
             if okLeg and not okHrs
                 blkSeqUp := blkSeqUp + 1
+            upClock := not okHrs
             upQual := okLeg and okHrs
             if not okLeg
                 qSkipUp := qSkipUp + 1
@@ -601,7 +650,7 @@ if evalOk and buyOn and buyReady
             lastNo := nLH
             lastLvl := p
             lastWasHL := false
-        if (upQual or drawSkipped) and not blkHush
+        if (upQual or (drawSkipped and not upClock)) and not blkHush
             f_mark(nLH, p, b, k, false)
         if nLH == entAt and upQual
             if inBlk
@@ -781,7 +830,9 @@ if dbOn and barstate.islast
     f_cell(2, 4, str.tostring(qSkipDn) + " sell", gry)
     f_cell(0, 5, thOn ? "dead hours  " + thWin + "  " + (thTz == "Exchange" ? "chart tz" : thTz) : "dead hours  (off)", thOn and inBlk ? entSellC : gry)
     f_cell(1, 5, thOn ? str.tostring(blkSeqUp + blkSeqDn) + " seq · " + str.tostring(blkEnt) + " entries" : "—", gry)
-    f_cell(2, 5, thOn ? (inBlk ? "IN — nothing fires" : "outside") : "—", thOn ? (inBlk ? entSellC : entBuyC) : gry)
+    string thTxt = not thOn ? "—" : not thOk ? "window unreadable — off" : not thTfOk ? "TF too coarse — off" : not inBlk ? "outside" : blkHush ? "IN — nothing fires" : "IN — entries held"
+    color thCol = not thOn or not thTfOk or not thOk ? gry : inBlk ? entSellC : entBuyC
+    f_cell(2, 5, thTxt, thCol)
 
     if resOn
         float wr = trTot > 0 ? 100.0 * trWin / trTot : na
