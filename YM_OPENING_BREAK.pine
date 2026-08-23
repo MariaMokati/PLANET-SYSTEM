@@ -1,0 +1,655 @@
+//@version=6
+// =============================================================================
+// YM 9:30 OPENING BREAK — "The Boring Scalp"
+//
+// YM / MYM, 1-minute chart. Not tested on ES, NQ or US30.
+//
+//   1. YM only, 1-minute time frame.
+//   2. Mark the levels at 9:29 a.m. New York — wicks, not bodies.
+//   3. Buy stop above the high, sell stop below the low.
+//   4. Stop loss: a fixed point count, OR beyond the far side of the 9:29
+//      range so rotation inside the range cannot reach it.
+//   5. Take profit: a fixed point count, or a multiple of the actual risk.
+//   6. Enter ONLY on the 9:30 candle. No break on 9:30 = no trade. Never 9:31.
+//   7. One trade a day, first break only.
+//   8. If BOTH levels break inside the 9:30 candle you are in a trade regardless
+//      — a resting stop order fills the moment price touches it. The only real
+//      unknown is which side filled first, so that is what the tie policy picks.
+//   9. Nothing is scored from an overnight bar. A trade still open at the cash
+//      cutoff is flattened there and reported as "flat", separately from wins
+//      and losses, so no day on which levels were marked can go uncounted.
+//
+// HONESTY: this marks levels and scores the result. It places no orders and
+// makes no profitability claim. Intrabar ordering cannot be recovered from
+// OHLC; every place that matters is flagged at its decision point below and
+// exposed as an input. A resting order that gaps through its level is scored at
+// the 9:30 open, not at the level. Payoff and break-even are a fixed-contract
+// POINTS ledger — printed as "x", never as R.
+// =============================================================================
+
+indicator("YM 9:30 Opening Break", "YM 9:30 Break", overlay = true,
+     max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+const string G_SET = "Setup"
+const string G_RSK = "Risk"
+const string G_VIS = "Visuals"
+const string G_STA = "Stats"
+const string G_CLK = "Clock & alerts"
+
+const string MODE_CANDLE = "9:29 candle high/low"
+const string MODE_PIVOT  = "Swing pivots (frozen at 9:29)"
+const string TIE_NEAR    = "Nearest to the open (default)"
+const string TIE_ADVERSE = "Conservative (adverse side first)"
+const string TIE_DIR     = "Follow candle direction"
+const string TIE_SKIP    = "Skip the day"
+const string EB_CLOSE    = "Close only (recommended)"
+const string EB_RANGE    = "Full bar range"
+const string SL_FIXED    = "Fixed points from entry"
+const string SL_RANGE    = "Beyond the opposite side of the range"
+const string TP_FIXED    = "Fixed points"
+const string TP_R        = "Multiple of the risk (R)"
+
+levelMode  = input.string(MODE_CANDLE, "Level source", options = [MODE_CANDLE, MODE_PIVOT], group = G_SET,
+     tooltip = "Candle: the 9:29 bar's own wick high and wick low. Pivots: the last confirmed " +
+               "swing high/low before 9:29, where a break during the 9:29 candle kills that side. " +
+               "The two pivots confirm independently, so the last swing LOW can sit above the last " +
+               "swing HIGH. That is not a range, and the day is stood down and counted rather than " +
+               "traded off an inverted pair.")
+pivotLen   = input.int(5, "Pivot lookback", minval = 2, maxval = 50, group = G_SET,
+     tooltip = "Bars either side of a swing point. Swing Pivots mode only.")
+tiePolicy  = input.string(TIE_NEAR, "If both levels break on the 9:30 candle", options = [TIE_NEAR, TIE_ADVERSE, TIE_DIR, TIE_SKIP], group = G_SET,
+     tooltip = "You are in a trade either way — a resting stop fills on touch. This only picks " +
+               "WHICH side filled first. Nearest: price starts at the open and must travel, so " +
+               "the closer level is reached first (and a gap open beyond a level breaks it at once). " +
+               "Conservative: the classic O-L-H-C on an up bar, so the side against the candle " +
+               "goes first. Direction: the close says where price ended up. Skip: stand down.")
+tz         = input.string("America/New_York", "Exchange timezone", group = G_SET)
+enforce1m  = input.bool(true, "Only run on a 1-minute chart", group = G_SET)
+
+autoPoint  = input.bool(true, "Take the point size from the symbol", group = G_RSK,
+     tooltip = "YM and MYM move in 1.00 index points, so a tick and a point are the same thing " +
+               "on those two symbols ONLY. Every input below is written in index points, so on any " +
+               "symbol whose tick is not 1.00 this silently rescales all of them — a 20-point stop " +
+               "becomes 5 points on ES (tick 0.25) or 0.2 on a 0.01-tick CFD. The point size in use " +
+               "is shown in the stats table, and a warning appears on the chart when it is not 1.00. " +
+               "Turn this off to set it by hand.")
+manualPoint = input.float(1.0, "Manual point size", minval = 0.01, step = 0.01, group = G_RSK)
+stopMode   = input.string(SL_FIXED, "Stop placement", options = [SL_FIXED, SL_RANGE], group = G_RSK,
+     tooltip = "Fixed: a set number of points from entry. Beyond the range: the stop sits past the " +
+               "FAR side of the 9:29 range — under the low for a long, over the high for a short — " +
+               "so ordinary rotation back through the range cannot reach it. Risk then varies with " +
+               "the width of that candle, which is why the table reports average and worst risk.")
+slPts      = input.int(20, "Stop loss (points)", minval = 1, maxval = 1000, group = G_RSK,
+     tooltip = "Fixed placement only.")
+rangeBuf   = input.int(2, "Stop buffer beyond the range (points)", minval = 0, maxval = 200, group = G_RSK,
+     tooltip = "How far past the opposite extreme the stop sits. Beyond-the-range placement only.")
+maxRiskPts = input.int(0, "Skip if risk exceeds (points)", minval = 0, maxval = 1000, group = G_RSK,
+     tooltip = "0 disables it. A wide 9:29 candle can produce a very wide stop; this stands the day " +
+               "down rather than taking several times your intended risk.")
+
+tgtMode    = input.string(TP_FIXED, "Target", options = [TP_FIXED, TP_R], group = G_RSK,
+     tooltip = "Fixed points keeps the target still while the stop moves, so reward:risk drifts. " +
+               "R multiple keeps the ratio constant by measuring the target from the actual risk.")
+tpPts      = input.int(40, "Take profit (points)", minval = 1, maxval = 1000, group = G_RSK,
+     tooltip = "Fixed target only.")
+tpR        = input.float(2.0, "Take profit (R multiple)", minval = 0.1, maxval = 20, step = 0.1, group = G_RSK,
+     tooltip = "R multiple target only.")
+offPts     = input.int(1, "Order offset (points)", minval = 0, maxval = 100, group = G_RSK,
+     tooltip = "How far ABOVE the high the buy stop rests, and below the low for the sell stop. " +
+               "0 rests exactly on the level, which then fills on a TOUCH of the 9:29 extreme " +
+               "rather than on a break of it.")
+
+entryBarMode = input.string(EB_CLOSE, "Entry-bar stop/target test", options = [EB_CLOSE, EB_RANGE], group = G_RSK,
+     tooltip = "On the bar you entered on, the bar's extreme usually happened BEFORE the break, " +
+               "while price was still travelling to your level. Testing the stop against it marks " +
+               "nearly every trade a loser — that is what Full bar range does, and it is offered " +
+               "only as a worst-case floor. Close only tests the entry bar's close, which price " +
+               "must genuinely have reached after entry.")
+
+flatH      = input.int(15, "Flatten any open trade at (NY hour)",   minval = 10, maxval = 23, group = G_RSK,
+     tooltip = "This is a 9:30 scalp. Without a cutoff a trade entered at 9:30 keeps being tested " +
+               "against every overnight bar, so a stop touched at 21:47 gets marked as this " +
+               "morning's result. At this time any still-open trade is flattened at the bar's close " +
+               "and reported in its own 'flat' bucket — never as a win or a loss. Default 15:59 NY, " +
+               "the last minute of the cash session.")
+flatM      = input.int(59, "Flatten at (NY minute)", minval = 0, maxval = 59, group = G_RSK)
+
+showPre    = input.bool(true, "Show levels before the open", group = G_VIS,
+     tooltip = "On: the level lines appear on the 9:29 candle. Off: they appear on the 9:30 candle, " +
+               "still anchored back at 9:29.")
+keepBars   = input.int(20, "Keep levels drawn for (bars)", minval = 0, maxval = 500, group = G_VIS,
+     tooltip = "How far the level lines carry on past the moment the day is decided.")
+showZones  = input.bool(true, "Shade the stop and target zones", group = G_VIS)
+showMarks  = input.bool(true, "Label each outcome", group = G_VIS)
+cBuy       = input.color(#26A69A, "Buy stop",    group = G_VIS)
+cSell      = input.color(#EF5350, "Sell stop",   group = G_VIS)
+cStop      = input.color(#E53935, "Stop loss",   group = G_VIS)
+cTarget    = input.color(#43A047, "Take profit", group = G_VIS)
+
+showStats  = input.bool(true, "Show the stats table", group = G_STA)
+
+localTz    = input.string("Africa/Johannesburg", "Your local timezone", group = G_CLK,
+     tooltip = "The panel converts the 9:29 New York setup into THIS clock. New York observes " +
+               "daylight saving and most other places either do not or switch on different dates, " +
+               "so the local time of the open moves by an hour twice a year. This tracks it for you.")
+showClock  = input.bool(true, "Show the countdown panel", group = G_CLK,
+     tooltip = "The panel knows about weekends. Pine has no exchange-holiday calendar, so it will " +
+               "still count down on a holiday.")
+prepMins   = input.int(5, "Heads-up alert (minutes before 9:29)", minval = 1, maxval = 240, group = G_CLK,
+     tooltip = "Fires an alert this many minutes before the setup candle so you are at the screen.")
+
+// ─── Clock ───────────────────────────────────────────────────────────────────
+// HH:MM for a given instant in a given timezone
+hhmm(t, z) =>
+    int h = hour(t, z)
+    int m = minute(t, z)
+    (h < 10 ? "0" : "") + str.tostring(h) + ":" + (m < 10 ? "0" : "") + str.tostring(m)
+
+// TradingView resolves the New York wall clock including DST, so the 9:30 open
+// is found correctly in both EST and EDT with no manual offset.
+int etH   = hour(time, tz)
+int etM   = minute(time, tz)
+int etKey = year(time, tz) * 10000 + month(time, tz) * 100 + dayofmonth(time, tz)
+
+// tfOk gates the engine; tfNo929 is what the WARNING keys off, so unticking
+// "only run on a 1-minute chart" can no longer silence the explanation for a
+// chart that has no 9:29 candle to mark.
+bool tfIs1m  = timeframe.isminutes and timeframe.multiplier == 1
+bool tfNo929 = not tfIs1m and not timeframe.isseconds
+bool tfOk    = not enforce1m or tfIs1m
+
+bool newDay       = na(etKey[1]) or etKey != etKey[1]
+bool setupBar     = etH == 9 and etM == 29
+bool triggerBar   = etH == 9 and etM == 30
+bool pastOpen     = etH > 9 or (etH == 9 and etM > 30)
+bool atOrAfterOpen = etH > 9 or (etH == 9 and etM >= 30)
+
+int minOfDay = etH * 60 + etM
+int cutoffAt = flatH * 60 + flatM
+
+float ptSize = autoPoint ? syminfo.mintick : manualPoint
+float off    = offPts * ptSize
+
+// ─── Swing pivots (Swing Pivots mode) ────────────────────────────────────────
+// ta.pivothigh confirms `pivotLen` bars after the fact, which is exactly why
+// this never repaints.
+float ph = ta.pivothigh(high, pivotLen, pivotLen)
+float pl = ta.pivotlow(low, pivotLen, pivotLen)
+
+var float lastPH = na
+var float lastPL = na
+if not na(ph)
+    lastPH := ph
+if not na(pl)
+    lastPL := pl
+
+// ─── State ───────────────────────────────────────────────────────────────────
+// NOTE: `position` is a built-in Pine namespace (position.top_right), so the
+// open side is called tradeSide. Naming it `position` breaks the stats table.
+var float  rangeHi   = na
+var float  rangeLo   = na
+var float  buyStop   = na
+var float  sellStop  = na
+var float  riskPts   = na
+var bool   upperDead = false
+var bool   lowerDead = false
+var bool   armed     = false
+var string tradeSide = ""     // "" | "long" | "short"
+var float  entryPx   = na
+var float  stopPx    = na
+var float  targetPx  = na
+var string outcome   = ""     // "" | "TP" | "SL" | "FLAT"
+var bool   dayDone   = false
+var bool   sawToday  = false  // a 9:29 bar existed on THIS day
+var bool   sawEver   = false  // a 9:29 bar existed anywhere in the loaded data
+
+var int wins     = 0
+var int losses   = 0
+var int flats    = 0
+var int noTrades = 0
+var int skipped  = 0
+var int tooWide  = 0
+var int noSetup  = 0
+
+// realised points, so the stats stay true when the stop width varies
+var float sumWinPts   = 0.0
+var float sumLossPts  = 0.0
+var float sumFlatPts  = 0.0
+var float sumWinR     = 0.0
+var float sumRiskPts  = 0.0
+var float maxRiskSeen = 0.0
+
+var box  slBox    = na
+var box  tpBox    = na
+var line buyLn    = na
+var line sellLn   = na
+var int  freezeAt = na
+var int  entryBar = na
+var int  setupIdx = na
+
+// Bar-scoped events. These replace the old `tradeSide[1]` / `outcome[1]`
+// history comparison: they are set at the exact point the transition happens,
+// so nothing depends on na() being defined for a series string, and a trade
+// that opens and closes on the same 9:30 candle still reports BOTH events.
+bool enteredNow = false
+bool closedNow  = false
+
+if tfOk
+    // ─── new session: wipe yesterday clean ───────────────────────────────────
+    if newDay
+        // Backstop for a session that had no bar at or after the cutoff (a
+        // 13:00 half-day). Score it at the last price of the day it was taken
+        // rather than letting the wipe below delete the trade unrecorded.
+        if tradeSide != "" and outcome == ""
+            float xPx = nz(close[1], entryPx)
+            flats       := flats + 1
+            sumFlatPts  := sumFlatPts + (tradeSide == "long" ? xPx - entryPx : entryPx - xPx) / ptSize
+            sumRiskPts  := sumRiskPts + riskPts
+            maxRiskSeen := math.max(maxRiskSeen, riskPts)
+            if showMarks
+                label.new(bar_index - 1, xPx, "flat", style = label.style_label_left,
+                     color = color.new(color.gray, 20), textcolor = color.white, size = size.small)
+        rangeHi   := na
+        rangeLo   := na
+        buyStop   := na
+        sellStop  := na
+        riskPts   := na
+        upperDead := false
+        lowerDead := false
+        armed     := false
+        tradeSide := ""
+        entryPx   := na
+        stopPx    := na
+        targetPx  := na
+        outcome   := ""
+        dayDone   := false
+        sawToday  := false
+        entryBar  := na
+        setupIdx  := na
+        buyLn     := na
+        sellLn    := na
+        freezeAt  := na
+
+    // ─── STEP 2: mark the levels on the 9:29 candle ─────────────────────────
+    if setupBar
+        sawToday := true
+        sawEver  := true
+        if na(setupIdx)
+            setupIdx := bar_index
+        if levelMode == MODE_CANDLE
+            // max/min rather than plain assignment: on a sub-minute chart the
+            // 9:29 MINUTE spans several bars, and a plain assignment would keep
+            // only the last fragment of the wick instead of the whole thing.
+            rangeHi  := na(rangeHi) ? high : math.max(rangeHi, high)
+            rangeLo  := na(rangeLo) ? low  : math.min(rangeLo, low)
+            buyStop  := rangeHi + off
+            sellStop := rangeLo - off
+            armed    := true
+        // `lastPH > lastPL` because the two pivots confirm independently: the
+        // last swing low can sit ABOVE the last swing high, and that pair is
+        // not a range. Trading it put the stop on the profit side of the entry.
+        else if not armed and not na(lastPH) and not na(lastPL) and lastPH > lastPL
+            rangeHi  := lastPH
+            rangeLo  := lastPL
+            buyStop  := rangeHi + off
+            sellStop := rangeLo - off
+            armed    := true
+        // STEP 6a: a 9:29 break kills that side. Pivots only — a candle cannot
+        // break its own extremes.
+        if armed and levelMode == MODE_PIVOT
+            if high >= buyStop
+                upperDead := true
+            if low <= sellStop
+                lowerDead := true
+
+    // ─── a 9:29 bar that produced no usable range still has to be counted ────
+    if sawToday and not armed and not dayDone and atOrAfterOpen
+        dayDone := true
+        noSetup := noSetup + 1
+
+    // ─── the two level lines ────────────────────────────────────────────────
+    // Drawn on the 9:29 bar when "Show levels before the open" is on, and not
+    // until the 9:30 bar when it is off — anchored back at 9:29 either way.
+    // A side killed during the 9:29 candle is never created at all.
+    if armed and na(freezeAt) and (showPre or not setupBar)
+        if na(buyLn) and not upperDead
+            buyLn  := line.new(setupIdx, buyStop,  bar_index + 1, buyStop,  color = cBuy,  width = 2)
+        if na(sellLn) and not lowerDead
+            sellLn := line.new(setupIdx, sellStop, bar_index + 1, sellStop, color = cSell, width = 2)
+        if not na(buyLn)
+            line.set_y1(buyLn, buyStop)
+            line.set_y2(buyLn, buyStop)
+        if not na(sellLn)
+            line.set_y1(sellLn, sellStop)
+            line.set_y2(sellLn, sellStop)
+        // a sub-minute chart can kill a side after the line already exists
+        if upperDead and not na(buyLn)
+            line.delete(buyLn)
+            buyLn := na
+        if lowerDead and not na(sellLn)
+            line.delete(sellLn)
+            sellLn := na
+
+    // ─── STEPS 3, 6, 7: the 9:30 candle is the only trigger window ──────────
+    if triggerBar and armed and not dayDone and tradeSide == ""
+        bool hitLong  = not upperDead and high >= buyStop
+        bool hitShort = not lowerDead and low <= sellStop
+        string side = ""
+        if hitLong and hitShort
+            // Both stops filled inside one bar. You ARE in a trade — a resting
+            // stop fills on touch — so the only question is which went first.
+            if tiePolicy == TIE_NEAR
+                // price starts at the open and has to travel to reach a level,
+                // so the closer one is touched first. A gap open beyond a level
+                // makes that distance negative, which breaks it immediately.
+                side := (open - sellStop) <= (buyStop - open) ? "short" : "long"
+            else if tiePolicy == TIE_ADVERSE
+                // classic O-L-H-C on an up bar: the extreme against the
+                // candle's direction is reached first
+                side := close >= open ? "short" : "long"
+            else if tiePolicy == TIE_DIR
+                side := close >= open ? "long" : "short"
+            // TIE_SKIP leaves side empty and the day stands down
+        else if hitLong
+            side := "long"
+        else if hitShort
+            side := "short"
+
+        if side != ""
+            bool isLong = side == "long"
+            // A resting stop cannot fill better than the first price that exists
+            // once it is resting, so a 9:30 candle that OPENS beyond the level
+            // fills at the open. Booking it at the level priced a fill that
+            // never traded and made the risk and the target fiction.
+            float eP    = isLong ? math.max(buyStop, open) : math.min(sellStop, open)
+            // fixed sits a set distance from entry; range sits beyond the FAR
+            // extreme, so rotation back through the range cannot reach it
+            float sFix  = isLong ? eP - slPts * ptSize : eP + slPts * ptSize
+            float sRng  = isLong ? rangeLo - rangeBuf * ptSize : rangeHi + rangeBuf * ptSize
+            float sP    = stopMode == SL_RANGE ? sRng : sFix
+            // SIGNED, not math.abs: a stop that has ended up on the profit side
+            // of the entry must stand the day down, and abs() hid exactly that.
+            float rDist = isLong ? eP - sP : sP - eP
+            float rPts  = rDist / ptSize
+            float tFix  = isLong ? eP + tpPts * ptSize : eP - tpPts * ptSize
+            float tMul  = isLong ? eP + tpR * rDist : eP - tpR * rDist
+            float tP    = tgtMode == TP_R ? tMul : tFix
+            if rPts <= 0 or (maxRiskPts > 0 and rPts > maxRiskPts)
+                // wrong-sided, zero-width, or wider than we are willing to wear
+                dayDone := true
+                tooWide := tooWide + 1
+            else
+                tradeSide  := side
+                entryPx    := eP
+                stopPx     := sP
+                targetPx   := tP
+                riskPts    := rPts
+                entryBar   := bar_index
+                enteredNow := true
+
+        // window shut either way — never enter on 9:31
+        if side == "" and (hitLong or hitShort)
+            dayDone := true
+            skipped := skipped + 1
+
+    // ─── no break on the 9:30 candle at all = no trade day ──────────────────
+    if armed and tradeSide == "" and not dayDone and pastOpen
+        dayDone  := true
+        noTrades := noTrades + 1
+
+    // ─── STEPS 4 & 5: resolve, inside the session only ──────────────────────
+    if tradeSide != "" and outcome == ""
+        // On the entry bar the extreme usually predates the break, so testing
+        // against it invents losses. The close is the one price we know was
+        // reached after entry.
+        bool onEntryBar = bar_index == entryBar and entryBarMode == EB_CLOSE
+        float loRef = onEntryBar ? close : low
+        float hiRef = onEntryBar ? close : high
+        // Nothing may be scored from a bar past the cutoff. This is a 9:30
+        // scalp; a level touched on an overnight bar is not its result.
+        bool live      = minOfDay <= cutoffAt
+        bool stopHit   = live and (tradeSide == "long" ? loRef <= stopPx   : hiRef >= stopPx)
+        bool targetHit = live and (tradeSide == "long" ? hiRef >= targetPx : loRef <= targetPx)
+        // A bar spanning both is scored as the stop. Fixed-R systems flatter
+        // themselves when scored the other way, and a backtest that reads
+        // better than the trading did is worse than useless.
+        if stopHit
+            outcome    := "SL"
+            losses     := losses + 1
+            sumLossPts := sumLossPts + riskPts
+        else if targetHit
+            outcome    := "TP"
+            wins       := wins + 1
+            float wPts = math.abs(targetPx - entryPx) / ptSize
+            sumWinPts  := sumWinPts + wPts
+            sumWinR    := sumWinR + wPts / riskPts
+        else if minOfDay >= cutoffAt
+            // still open at the cutoff: flatten here and report it in its own
+            // bucket rather than letting it drift into the overnight session
+            outcome    := "FLAT"
+            flats      := flats + 1
+            sumFlatPts := sumFlatPts + (tradeSide == "long" ? close - entryPx : entryPx - close) / ptSize
+        if outcome != ""
+            // Risk is banked HERE, not at entry, so the numerator of
+            // "Risk avg" ranges over exactly the trades the denominator counts.
+            sumRiskPts  := sumRiskPts + riskPts
+            maxRiskSeen := math.max(maxRiskSeen, riskPts)
+            closedNow   := true
+            dayDone     := true
+
+    // ─── level lines: extend until the day is decided, then a short tail ────
+    if dayDone and na(freezeAt)
+        freezeAt := bar_index + keepBars
+    if na(freezeAt) or bar_index <= freezeAt
+        if not na(buyLn)
+            line.set_x2(buyLn, bar_index + 1)
+        if not na(sellLn)
+            line.set_x2(sellLn, bar_index + 1)
+
+// ─── Drawing ─────────────────────────────────────────────────────────────────
+// tradeVis, not "outcome == ''": the resolve block above sets `outcome` earlier
+// in the SAME bar, so a gate that required an empty outcome switched the trade
+// off on the very candle that decided it — and, whenever entry and exit shared
+// the 9:30 candle, drew no entry, stop or target at all.
+bool tradeVis = tradeSide != "" and (outcome == "" or closedNow)
+// The level values now live exactly as long as the level LINES do, instead of
+// blanking the moment the level is broken while the line carried on.
+bool levelsOn = tfOk and armed and not na(buyStop) and (na(freezeAt) or bar_index <= freezeAt) and (showPre or not setupBar)
+
+plot(levelsOn and not upperDead ? buyStop  : na, "Buy Stop",  color = cBuy,  display = display.data_window)
+plot(levelsOn and not lowerDead ? sellStop : na, "Sell Stop", color = cSell, display = display.data_window)
+plot(tradeVis ? entryPx  : na, "Entry",       color = color.gray, linewidth = 1, style = plot.style_linebr)
+plot(tradeVis ? stopPx   : na, "Stop Loss",   color = cStop,      linewidth = 2, style = plot.style_linebr)
+plot(tradeVis ? targetPx : na, "Take Profit", color = cTarget,    linewidth = 2, style = plot.style_linebr)
+
+if showZones and enteredNow
+    slBox := box.new(bar_index, math.max(entryPx, stopPx), bar_index + 1, math.min(entryPx, stopPx),
+         border_color = color.new(cStop, 40), bgcolor = color.new(cStop, 85))
+    tpBox := box.new(bar_index, math.max(entryPx, targetPx), bar_index + 1, math.min(entryPx, targetPx),
+         border_color = color.new(cTarget, 40), bgcolor = color.new(cTarget, 85))
+
+if tradeVis
+    if not na(slBox)
+        box.set_right(slBox, bar_index + 1)
+    if not na(tpBox)
+        box.set_right(tpBox, bar_index + 1)
+
+if showMarks and closedNow
+    float rlz = outcome == "TP" ? math.abs(targetPx - entryPx) / ptSize
+              : outcome == "SL" ? -riskPts
+              : (tradeSide == "long" ? close - entryPx : entryPx - close) / ptSize
+    color lc  = outcome == "TP" ? cTarget : outcome == "SL" ? cStop : color.gray
+    float markY = outcome == "FLAT" ? close
+              : outcome == "TP"     ? (tradeSide == "long" ? high : low)
+              :                       (tradeSide == "long" ? low  : high)
+    label.new(bar_index, markY,
+         (rlz >= 0 ? "+" : "") + str.tostring(rlz, "#.#") + "pts" + (outcome == "FLAT" ? " flat" : ""),
+         style = rlz >= 0 ? (tradeSide == "long" ? label.style_label_down : label.style_label_up)
+                          : (tradeSide == "long" ? label.style_label_up   : label.style_label_down),
+         color = color.new(lc, 20), textcolor = color.white, size = size.small)
+
+// ─── Countdown panel ─────────────────────────────────────────────────────────
+// Bar time drives the strategy; the panel uses the real clock so it stays live
+// between bars and outside the session.
+int setMin = 9 * 60 + 29
+int nowMin = hour(timenow, tz) * 60 + minute(timenow, tz)
+int setupTs = timestamp(tz, year(timenow, tz), month(timenow, tz), dayofmonth(timenow, tz), 9, 29, 0)
+int trigTs  = setupTs + 60000
+
+int  dowNY     = dayofweek(timenow, tz)
+bool weekendNY = dowNY == dayofweek.saturday or dowNY == dayofweek.sunday
+
+string cdText = ""
+color  cdCol  = color.gray
+if weekendNY
+    // there is no 9:29 candle on a Saturday or a Sunday; counting down to one
+    // told the trader to be at the screen for a session that does not exist
+    cdText := "weekend — no 9:29 session"
+    cdCol  := color.gray
+else if nowMin < setMin
+    float hrs = math.floor((setMin - nowMin) / 60)
+    float mns = (setMin - nowMin) % 60
+    string txt = "in " + str.tostring(mns, "#") + " min"
+    if hrs > 0
+        txt := "in " + str.tostring(hrs, "#") + "h " + str.tostring(mns, "#") + "m"
+    cdText := txt
+    cdCol  := (setMin - nowMin) <= 15 ? color.orange : color.gray
+else if nowMin == setMin
+    cdText := "MARK THE LEVELS NOW"
+    cdCol  := color.orange
+else if nowMin == setMin + 1
+    cdText := "TRIGGER CANDLE — LIVE"
+    cdCol  := cTarget
+else
+    cdText := "shut for today"
+    cdCol  := color.gray
+
+var table clockPanel = table.new(position.bottom_right, 2, 5, border_width = 1,
+     frame_color = color.new(color.gray, 60), frame_width = 1)
+
+if showClock and barstate.islast
+    table.cell(clockPanel, 0, 0, "Mark levels", text_color = color.gray, text_size = size.small)
+    table.cell(clockPanel, 1, 0, hhmm(setupTs, localTz) + "  (9:29 NY)", text_color = color.white, text_size = size.small)
+
+    table.cell(clockPanel, 0, 1, "Orders in by", text_color = color.gray, text_size = size.small)
+    table.cell(clockPanel, 1, 1, hhmm(trigTs, localTz) + "  (9:30 NY)", text_color = color.white, text_size = size.small)
+
+    table.cell(clockPanel, 0, 2, "New York now", text_color = color.gray, text_size = size.small)
+    table.cell(clockPanel, 1, 2, hhmm(timenow, tz), text_color = color.white, text_size = size.small)
+
+    table.cell(clockPanel, 0, 3, "Your clock now", text_color = color.gray, text_size = size.small)
+    table.cell(clockPanel, 1, 3, hhmm(timenow, localTz), text_color = color.white, text_size = size.small)
+
+    table.cell(clockPanel, 0, 4, "Countdown", text_color = color.gray, text_size = size.small)
+    table.cell(clockPanel, 1, 4, cdText, text_color = color.white, bgcolor = color.new(cdCol, 25), text_size = size.small)
+
+// ─── Stats ───────────────────────────────────────────────────────────────────
+var table stats = table.new(position.top_right, 2, 13, border_width = 1,
+     frame_color = color.new(color.gray, 60), frame_width = 1)
+
+// Every armed day now lands in exactly one bucket, so these add up.
+int   scored  = wins + losses
+int   taken   = scored + flats
+float winRate = scored > 0 ? 100.0 * wins / scored : na
+// Everything below comes from REALISED points. When the stop hangs off the
+// range its width changes every day, so the configured numbers would lie.
+float netPts  = sumWinPts - sumLossPts + sumFlatPts
+float avgWin  = wins > 0 ? sumWinPts / wins : na
+float avgLoss = losses > 0 ? sumLossPts / losses : na
+float avgWinR = wins > 0 ? sumWinR / wins : na
+float payoff  = na(avgWin) or na(avgLoss) or avgLoss <= 0 ? na : avgWin / avgLoss
+float bEven   = na(payoff) ? na : 100.0 / (1.0 + payoff)
+float avgRisk = taken > 0 ? sumRiskPts / taken : na
+
+string stopDesc = stopMode == SL_RANGE ? "beyond range +" + str.tostring(rangeBuf) + " pts" : str.tostring(slPts) + " pts fixed"
+string tgtDesc  = tgtMode == TP_R ? str.tostring(tpR, "#.##") + "R" : str.tostring(tpPts) + " pts fixed"
+bool   ptOdd    = math.abs(ptSize - 1.0) > 1e-8
+
+if showStats and barstate.islast
+    table.cell(stats, 0, 0, "YM 9:30 Break", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
+    table.cell(stats, 1, 0, syminfo.ticker + " · " + timeframe.period, text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
+
+    table.cell(stats, 0, 1, "Stop", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 1, stopDesc, text_color = color.white, text_size = size.small)
+
+    table.cell(stats, 0, 2, "Target", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 2, tgtDesc, text_color = color.white, text_size = size.small)
+
+    // shown because every points input above is multiplied by it
+    table.cell(stats, 0, 3, "1 point =", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 3, str.tostring(ptSize, "#.####"), text_color = ptOdd ? color.orange : color.white, text_size = size.small)
+
+    table.cell(stats, 0, 4, "Risk avg / worst", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 4, na(avgRisk) ? "—" : str.tostring(avgRisk, "#.#") + " / " + str.tostring(maxRiskSeen, "#.#") + " pts",
+         text_color = color.white, text_size = size.small)
+
+    // "x", not "R": this is a points payoff on a fixed-contract ledger, and on
+    // a varying stop width that is NOT the same number as the R multiple.
+    table.cell(stats, 0, 5, "Payoff / break-even", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 5, na(payoff) ? "—" : str.tostring(payoff, "#.##") + "x / " + str.tostring(bEven, "#.#") + "%",
+         text_color = color.white, text_size = size.small)
+
+    table.cell(stats, 0, 6, "Avg win (R)", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 6, na(avgWinR) ? "—" : str.tostring(avgWinR, "#.##") + "R", text_color = color.white, text_size = size.small)
+
+    table.cell(stats, 0, 7, "Trades", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 7, str.tostring(taken), text_color = color.white, text_size = size.small)
+
+    table.cell(stats, 0, 8, "Won / lost / flat", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 8, str.tostring(wins) + " / " + str.tostring(losses) + " / " + str.tostring(flats),
+         text_color = color.white, text_size = size.small)
+
+    table.cell(stats, 0, 9, "Win rate", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 9, na(winRate) ? "—" : str.tostring(winRate, "#.#") + "%",
+         text_color = na(winRate) or na(bEven) ? color.gray : (winRate >= bEven ? cTarget : cStop), text_size = size.small)
+
+    table.cell(stats, 0, 10, "Net points", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 10, str.tostring(netPts, "#.#"), text_color = netPts >= 0 ? cTarget : cStop, text_size = size.small)
+
+    table.cell(stats, 0, 11, "No trade / skip / risk-reject", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 11, str.tostring(noTrades) + " / " + str.tostring(skipped) + " / " + str.tostring(tooWide),
+         text_color = tooWide > 0 ? color.orange : color.white, text_size = size.small)
+
+    table.cell(stats, 0, 12, "No 9:29 setup", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 12, str.tostring(noSetup), text_color = noSetup > 0 ? color.orange : color.white, text_size = size.small)
+
+// ─── Why the chart is blank ──────────────────────────────────────────────────
+// The old build had one warning, for the wrong timeframe, and it was gated on
+// the same input as the guard it warned about. A Regular-Trading-Hours chart
+// opens at 9:30 and so has no 9:29 candle at all: nothing armed, nothing was
+// marked, nothing was counted, and nothing said why.
+if barstate.islast
+    string warn = ""
+    if tfNo929
+        warn := "This timeframe has no 9:29 candle.\nSwitch to a 1-minute chart."
+    else if not sawEver
+        warn := "No 9:29 New York bar in the loaded data.\nA Regular Trading Hours session starts at 9:30, so it\nhas no 9:29 candle — switch the chart's session to\ninclude pre-market, or load more history."
+    else if ptOdd
+        warn := "1 tick = " + str.tostring(ptSize, "#.####") + " on this symbol, not 1.00 index point.\nEvery points input is being read in ticks. Untick\n\"Take the point size from the symbol\" and set it by hand."
+    if warn != ""
+        label.new(bar_index, high, warn, style = label.style_label_down,
+             color = color.new(color.orange, 10), textcolor = color.white, size = size.normal)
+
+// ─── Alerts ──────────────────────────────────────────────────────────────────
+// Bar time, so these fire on a definite bar rather than on a moving wall clock.
+int barMin = etH * 60 + etM
+bool headsUp = tfOk and barMin == setMin - prepMins
+
+alertcondition(headsUp, "Heads-up before the setup",
+     "YM 9:30 Break: setup candle coming up. Get to the screen.")
+alertcondition(tfOk and setupBar, "Setup candle is forming",
+     "YM 9:30 Break: 9:29 candle forming. Levels are being marked now.")
+
+// alert() carries the actual prices, unlike alertcondition's fixed text.
+// Requires an alert set to "Any alert() function call".
+if tfOk and setupBar and barstate.isconfirmed and armed
+    alert("YM 9:30 Break — levels set. Buy stop " + str.tostring(buyStop, format.mintick) +
+          " / Sell stop " + str.tostring(sellStop, format.mintick) +
+          ". Orders must be resting before the 9:30 candle.", alert.freq_once_per_bar_close)
+
+alertcondition(enteredNow and tradeSide == "long",  "Long break",  "YM 9:30 long break triggered")
+alertcondition(enteredNow and tradeSide == "short", "Short break", "YM 9:30 short break triggered")
+alertcondition(closedNow  and outcome == "TP",      "Target hit",  "YM 9:30 target hit")
+alertcondition(closedNow  and outcome == "SL",      "Stop hit",    "YM 9:30 stop hit")
+alertcondition(closedNow  and outcome == "FLAT",    "Flat at cutoff", "YM 9:30 flattened at the cutoff, still open")
