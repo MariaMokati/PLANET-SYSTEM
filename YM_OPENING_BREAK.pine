@@ -234,6 +234,9 @@ var int  setupIdx = na
 // that opens and closes on the same 9:30 candle still reports BOTH events.
 bool enteredNow = false
 bool closedNow  = false
+// Set by BOTH flatten paths — the cutoff one and the newDay half-day backstop —
+// so the alert does not fire for only one of two economically identical events.
+bool flatNow    = false
 
 if tfOk
     // ─── new session: wipe yesterday clean ───────────────────────────────────
@@ -242,14 +245,29 @@ if tfOk
         // 13:00 half-day). Score it at the last price of the day it was taken
         // rather than letting the wipe below delete the trade unrecorded.
         if tradeSide != "" and outcome == ""
-            float xPx = nz(close[1], entryPx)
+            float xPx  = nz(close[1], entryPx)
+            // banked once and reused for the label, so the chart can be
+            // reconciled against Net points instead of showing a bare "flat"
+            float fPts = (tradeSide == "long" ? xPx - entryPx : entryPx - xPx) / ptSize
             flats       := flats + 1
-            sumFlatPts  := sumFlatPts + (tradeSide == "long" ? xPx - entryPx : entryPx - xPx) / ptSize
+            sumFlatPts  := sumFlatPts + fPts
             sumRiskPts  := sumRiskPts + riskPts
             maxRiskSeen := math.max(maxRiskSeen, riskPts)
+            flatNow     := true
             if showMarks
-                label.new(bar_index - 1, xPx, "flat", style = label.style_label_left,
+                label.new(bar_index - 1, xPx,
+                     (fPts >= 0 ? "+" : "") + str.tostring(fPts, "#.#") + "pts flat",
+                     style = label.style_label_left,
                      color = color.new(color.gray, 20), textcolor = color.white, size = size.small)
+        // A date that armed but never reached a bucketing bar — a data outage or
+        // a truncated chart session — was wiped uncounted, so "every armed day
+        // lands in exactly one bucket" had a residual hole. dayDone is the
+        // "already bucketed" flag, so these two branches cannot double-count.
+        else if sawToday and not dayDone
+            if armed
+                noTrades := noTrades + 1
+            else
+                noSetup := noSetup + 1
         rangeHi   := na
         rangeLo   := na
         buyStop   := na
@@ -430,6 +448,7 @@ if tfOk
             outcome    := "FLAT"
             flats      := flats + 1
             sumFlatPts := sumFlatPts + (tradeSide == "long" ? close - entryPx : entryPx - close) / ptSize
+            flatNow    := true
         if outcome != ""
             // Risk is banked HERE, not at entry, so the numerator of
             // "Risk avg" ranges over exactly the trades the denominator counts.
@@ -565,6 +584,10 @@ float avgRisk = taken > 0 ? sumRiskPts / taken : na
 string stopDesc = stopMode == SL_RANGE ? "beyond range +" + str.tostring(rangeBuf) + " pts" : str.tostring(slPts) + " pts fixed"
 string tgtDesc  = tgtMode == TP_R ? str.tostring(tpR, "#.##") + "R" : str.tostring(tpPts) + " pts fixed"
 bool   ptOdd    = math.abs(ptSize - 1.0) > 1e-8
+// The table cell is informative on either path, but the WARNING is only true of
+// the auto path: on the manual path the value is the user's own deliberate
+// input, and telling them to untick a box they already unticked is nonsense.
+bool   ptAutoOdd = autoPoint and ptOdd
 
 if showStats and barstate.islast
     table.cell(stats, 0, 0, "YM 9:30 Break", text_color = color.white, bgcolor = color.new(color.gray, 30), text_size = size.small)
@@ -619,17 +642,33 @@ if showStats and barstate.islast
 // the same input as the guard it warned about. A Regular-Trading-Hours chart
 // opens at 9:30 and so has no 9:29 candle at all: nothing armed, nothing was
 // marked, nothing was counted, and nothing said why.
+// One managed label, not one per bar. barstate.islast is true again on every new
+// bar, so an unmanaged label.new here left a trailing wall of stacked warnings.
+var label warnLbl = na
+
 if barstate.islast
     string warn = ""
-    if tfNo929
+    // First rung is the engine gate itself. Without it a SECONDS chart with the
+    // 1-minute lock on fell through to the "no 9:29 bar" text and sent the
+    // trader off to fix their session when the cause was the tick-box.
+    if not tfOk
+        warn := "The engine is off: \"Only run on a 1-minute chart\" is ticked\nand this chart is " + timeframe.period + ".\nSwitch to a 1-minute chart, or untick that input."
+    else if tfNo929
         warn := "This timeframe has no 9:29 candle.\nSwitch to a 1-minute chart."
     else if not sawEver
         warn := "No 9:29 New York bar in the loaded data.\nA Regular Trading Hours session starts at 9:30, so it\nhas no 9:29 candle — switch the chart's session to\ninclude pre-market, or load more history."
-    else if ptOdd
+    else if ptAutoOdd
         warn := "1 tick = " + str.tostring(ptSize, "#.####") + " on this symbol, not 1.00 index point.\nEvery points input is being read in ticks. Untick\n\"Take the point size from the symbol\" and set it by hand."
-    if warn != ""
-        label.new(bar_index, high, warn, style = label.style_label_down,
+    if warn == ""
+        if not na(warnLbl)
+            label.delete(warnLbl)
+            warnLbl := na
+    else if na(warnLbl)
+        warnLbl := label.new(bar_index, high, warn, style = label.style_label_down,
              color = color.new(color.orange, 10), textcolor = color.white, size = size.normal)
+    else
+        label.set_xy(warnLbl, bar_index, high)
+        label.set_text(warnLbl, warn)
 
 // ─── Alerts ──────────────────────────────────────────────────────────────────
 // Bar time, so these fire on a definite bar rather than on a moving wall clock.
@@ -652,4 +691,4 @@ alertcondition(enteredNow and tradeSide == "long",  "Long break",  "YM 9:30 long
 alertcondition(enteredNow and tradeSide == "short", "Short break", "YM 9:30 short break triggered")
 alertcondition(closedNow  and outcome == "TP",      "Target hit",  "YM 9:30 target hit")
 alertcondition(closedNow  and outcome == "SL",      "Stop hit",    "YM 9:30 stop hit")
-alertcondition(closedNow  and outcome == "FLAT",    "Flat at cutoff", "YM 9:30 flattened at the cutoff, still open")
+alertcondition(flatNow, "Flat at cutoff", "YM 9:30 flattened while still open")
