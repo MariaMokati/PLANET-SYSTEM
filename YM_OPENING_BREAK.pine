@@ -648,13 +648,17 @@ var label warnLbl = na
 
 if barstate.islast
     string warn = ""
-    // First rung is the engine gate itself. Without it a SECONDS chart with the
-    // 1-minute lock on fell through to the "no 9:29 bar" text and sent the
-    // trader off to fix their session when the cause was the tick-box.
-    if not tfOk
-        warn := "The engine is off: \"Only run on a 1-minute chart\" is ticked\nand this chart is " + timeframe.period + ".\nSwitch to a 1-minute chart, or untick that input."
-    else if tfNo929
+    // Order matters, and it is NOT "engine gate first". On a 5-minute chart with
+    // the 1-minute lock ticked BOTH are true, and offering "untick that input"
+    // there is a false remedy: unticking runs the engine on a timeframe that
+    // still has no 9:29 candle. The timeframe fact outranks the tick-box, so it
+    // is tested first and "untick" is only ever offered where it actually works.
+    if tfNo929
         warn := "This timeframe has no 9:29 candle.\nSwitch to a 1-minute chart."
+    else if not tfOk
+        // the only way to reach here: a sub-minute chart with the lock ticked,
+        // which DOES have 9:29 bars, so unticking is a real fix
+        warn := "The engine is off: \"Only run on a 1-minute chart\" is ticked\nand this is a " + timeframe.period + " chart.\nUntick that input, or switch to a 1-minute chart."
     else if not sawEver
         warn := "No 9:29 New York bar in the loaded data.\nA Regular Trading Hours session starts at 9:30, so it\nhas no 9:29 candle — switch the chart's session to\ninclude pre-market, or load more history."
     else if ptAutoOdd
