@@ -5,12 +5,128 @@ One change per build. Each build names the counter that confirms it.
 | Build | File | Change | Confirm by reading | Result |
 |---|---|---|---|---|
 | b0 | Synthetics | baseline, the file as received | | 2 % win rate reported, undiagnosed |
-| **b1** | **Synthetics** | **Reward floor in `Raise()` compared with a 1e-9 tolerance** | **`Refused reward` falls sharply, `Drift rider` n roughly doubles, win rate barely moves** | **not yet measured** |
-| b2 | Synthetics | `SpikeFade` to build direction, stop and target from the m1 spike, not the chart bar | `Spike fade` win rate | queued |
+| **b1** | **Synthetics** | **Reward floor in `Raise()` compared with a 1e-9 tolerance** | **`Refused reward` falls sharply, `Drift rider` n roughly doubles, win rate barely moves** | **pasted and confirmed by the b1 header. NOT TESTABLE on either chart run: Drift rider fired 0 times on both. See b1 result below** |
+| b2 | Synthetics | `SpikeFade` to build direction, stop and target from the m1 spike, not the chart bar | `Spike fade` win rate | **promoted. Boom 600 m15 measured 3.2 % over 93 trades, which is inverted, not merely losing** |
 | b3 | Synthetics | m1 history to cover the analysis window | `SPIKES seen`, and Drift rider n falling as the overdue block starts working | queued |
 | b4 | Alpha | `PanelRows` 50 to 90 | the diagnostics block renders to the last row | queued |
 | b5 | Alpha | `net += r.R` moved inside the outcome branches | `Total R` reconciles with `Won / Lost / BE` | queued |
 | b6 | Alpha | out of sample, `Window Offset Days = 180` | two screenshots, offset 0 and offset 180 | queued |
+| b7 | Synthetics | `Refused` counters split per engine | the counter named as a build's confirmation can actually name the engine | queued, raised by the b1 reading |
+
+**Process rule, added after b1.** Name the instrument and the timeframe the
+build will be measured on *before* writing it, and check from the previous
+panel that the engine being changed is firing on that chart. b1 was spent on an
+engine that turned out to fire zero times on both charts that got tested.
+
+---
+
+## b1 result, measured 2026-09-05
+
+Two panels, both reading `b1` in the header, so the paste landed.
+
+### Volatility 10 Index, m5
+
+```
+History        54413 bars    189d loaded    180d asked
+Window         09 Mar 26     05 Sept 26     180d
+RESULTS                                     559 closed
+Signals per day                             3,11
+Won / Lost / BE     132         427          0
+Win rate                        23,6 %
+Average trade                               -0,31 R
+Total                                       -175,6 R
+Expired / open        0                      0
+Refused         reward 1027   cap 3050      max 3/day
+ENGINES               n         win%        net R
+Sigma reversion     559         23,6        -175,6
+```
+
+### Boom 600 Index, m15
+
+```
+History        30972 bars    323d loaded    180d asked
+SPIKES                                      500 seen
+Mean interval                               13,5 min
+TIMEFRAME TOO HIGH                          use m3
+Mean size                                   6,717
+Since last            0 bars                0% of mean
+Clock                                       waiting
+RESULTS                                     93 closed
+Signals per day                             0,52
+Won / Lost / BE       3          90          0
+Win rate                        3,2 %
+Average trade                               -1,02 R
+Total                                       -94,55 R
+Expired / open        0                      0
+Refused         reward 1362    cap 70       max 3/day
+ENGINES               n         win%        net R
+Spike fade           93          3,2        -94,55
+```
+
+### What the reading actually says
+
+**b1 is untestable on both charts. Drift rider fired zero times on each.** The
+engine tables carry one row apiece and neither is Drift rider. The prediction
+written into the b1 row and into PR #7 ("Drift rider n should roughly double")
+had no population to act on. The fix is still correct in isolation, proven by
+`check_reward_floor.py`, and it remains unverified on live data. Recording it
+as unverified rather than as a win.
+
+The process miss: the chart the build would be measured on was never agreed
+before the build was spent. Fix for the rest of the queue is in the last
+section of this file.
+
+**Boom 600 m15 is the wrong timeframe and the panel says so in red.** Mean
+spike interval is 13.5 min against 15 min bars, so roughly one spike sits
+inside every bar. `_tfTooHigh` is therefore true, which disables Spike clock by
+design (`SpikeOverdue` returns false), and `Since last 0 bars` shows
+`_lastSpikeBar` tracking the current bar almost continuously. Every figure
+under that red row was measured on a chart the file itself is refusing.
+
+**Spike fade at 3.2 % over 93 trades is inverted, not unlucky.** At the ~2.6R
+geometry the engine trades, a directionless entry would land near 25 wins in
+93. It produced 3. That is far outside variance and matches the audit's B4
+fault exactly: `SpikeFade` takes `sDir`, `sRange` and `_stopPx` from
+`Bars[_lastSpikeBar]`, the chart candle, while the spike itself was detected on
+m1. On Boom a candle can hold an up spike and still close down, and the engine
+then buys a down-drifting instrument. b2 is promoted on this evidence.
+
+**Volatility 10 sigma reversion is a premise error, not a tuning error.** The
+shipped geometry is entry at 3.0 sigma, stop at 4.2, target at 0.4 from the
+mean, which is 2.6 / 1.2 = 2.17R and a breakeven of 31.5 %. Measured 23.6 %.
+A Volatility index is a driftless random walk by construction: no news, no
+gaps, no trend. Mean reversion on a driftless random walk has an expectancy of
+exactly zero before costs and negative after. `SuperQuantX_Synthetics_Notes.md`
+calls reversion "the only edge" on that family. That premise is wrong, and no
+parameter change repairs it.
+
+**The daily cap is doing the selecting on Volatility.** `Refused cap 3050`
+against 559 taken means sigma generates roughly 26 signals a day and
+`MaxPerDay = 3` keeps the first three by clock order, not by quality.
+
+**One thing the reading does confirm.** `Expired / open` is `0 / 0` on both
+panels, so the audit's expired-R contamination (Part B, `net += r.R` outside
+the outcome branches) has no effect on either total. The -175.6 R and the
+-94.55 R are clean figures.
+
+**One thing the panel cannot answer.** `Refused` is a single pair of counters
+for the whole file, so the 1362 reward refusals on Boom 600 cannot be
+attributed to an engine. Making `Refused` per-engine is now queued as b7,
+because without it the counter named as b1's confirmation cannot confirm
+anything.
+
+### Next test, no paste required
+
+Isolate the only engine that ever measured positive, on the timeframe where it
+measured: Boom 600, h1, Drift rider alone. On h1 every bar swallows several
+spikes, so `SpikeFade` cannot fire (`i != _lastSpikeBar + 1` is never true) and
+Spike clock stays disabled, which means the engine runs clean without any code
+change. Turn off Spike Clock Signals, Spike Fade Signals, Sigma Reversion
+Signals and Range Break Signals, leave Drift Rider on, screenshot.
+
+Reference to beat: 43.2 % over 1195 trades, which at 2R is +0.296 R per trade.
+If it does not reproduce, this file has nothing and the honest call is to say
+so rather than ship b2.
 
 ---
 
