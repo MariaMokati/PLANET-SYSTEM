@@ -6,12 +6,12 @@ One change per build. Each build names the counter that confirms it.
 |---|---|---|---|---|
 | b0 | Synthetics | baseline, the file as received | | 2 % win rate reported, undiagnosed |
 | **b1** | **Synthetics** | **Reward floor in `Raise()` compared with a 1e-9 tolerance** | **`Refused reward` falls sharply, `Drift rider` n roughly doubles, win rate barely moves** | **pasted and confirmed by the b1 header. NOT TESTABLE on either chart run: Drift rider fired 0 times on both. See b1 result below** |
-| b2 | Synthetics | `SpikeFade` to build direction, stop and target from the m1 spike, not the chart bar | `Spike fade` win rate | **promoted. Boom 600 m15 measured 3.2 % over 93 trades, which is inverted, not merely losing** |
-| b3 | Synthetics | m1 history to cover the analysis window | `SPIKES seen`, and Drift rider n falling as the overdue block starts working | queued |
+| **b2** | **Synthetics** | **Repair build. SpikeFade built from the spike not the chart candle; drift pullback measured as a retracement; timeframe guard blocks instead of labelling; m1 history covers the window; per-engine refused counters; expired R out of the totals; sigma off by default** | **Drift rider takes a row with n above zero; Spike fade win rate; `WHY REFUSED` and `ENGINE GATES` blocks** | **shipped, not yet measured** |
+| ~~b3~~ | Synthetics | m1 history to cover the analysis window | | **folded into b2** |
 | b4 | Alpha | `PanelRows` 50 to 90 | the diagnostics block renders to the last row | queued |
 | b5 | Alpha | `net += r.R` moved inside the outcome branches | `Total R` reconciles with `Won / Lost / BE` | queued |
 | b6 | Alpha | out of sample, `Window Offset Days = 180` | two screenshots, offset 0 and offset 180 | queued |
-| b7 | Synthetics | `Refused` counters split per engine | the counter named as a build's confirmation can actually name the engine | queued, raised by the b1 reading |
+| ~~b7~~ | Synthetics | `Refused` counters split per engine | | **folded into b2** |
 
 **Process rule, added after b1.** Name the instrument and the timeframe the
 build will be measured on *before* writing it, and check from the previous
@@ -202,3 +202,66 @@ Neither touches a number.
 Same class of comparison, but `move` is `FadeTargetShare * sRange`, which is not
 built from `risk`, so fade signals do not systematically sit on the boundary.
 Left alone to keep b1 to one mechanism.
+
+---
+
+## b2, the repair build
+
+b1 was one change on an engine that turned out never to fire. b2 is the
+opposite: it fixes everything the b1 panels actually proved was broken, in one
+file, because leaving her pasting one-line fixes into a system where three of
+five engines cannot work was the wrong call.
+
+### What each change is, and what confirms it
+
+| # | Change | Kind | Confirmed by |
+|---|---|---|---|
+| 1 | `SpikeFade` builds direction, stop and target from the **spike**, not the chart candle that contained it | **Confirmed fault.** Audit B4, and the measured 3.2 % over 93 trades | `Spike fade` win rate. Anything near 25 % is neutral, 3 % was inverted |
+| 2 | Drift pullback measured as an ATR **retracement** from the drift extreme, not N consecutive counter closes | **Reasoned, but the failure is reproduced.** See sweep below | `Drift rider` n above zero, and the `Drift no pullback / no turn` gate row |
+| 3 | Timeframe guard **blocks** both spike engines instead of printing red and trading anyway | Confirmed fault | `Blocked by timeframe guard` count, and the spike engines showing n = 0 on a wrong timeframe |
+| 4 | m1 history loads what the window needs, was a flat 60000 bars = 41.7 days | Confirmed fault. Audit B6 | `m1 history  Nd covered` row, red when short |
+| 5 | `Refused` counters split per engine | Confirmed gap. Raised by the b1 reading | The `WHY REFUSED` block |
+| 6 | Expired trades no longer counted in `Total R` or `Average trade` | Confirmed fault. Audit B2 | `Expired (excluded)` row now carries its own R |
+| 7 | `Since last` reports minutes against a minutes mean, was bars divided by minutes | Confirmed fault. Audit B5 | The `% of mean` row now agrees with `ARMED` |
+| 8 | `_tfTooHigh` computed always, not only inside `RecordSpike` | Confirmed fault. Audit B9 | The red row appears with zero spikes found |
+| 9 | Sigma reversion ships **off**, property renamed so the default reaches a saved chart | **Reasoned from the instrument's construction.** Measured 23.6 % against a 31.5 % breakeven over 559 trades | Turn it back on and it will reproduce the 23.6 % |
+| 10 | Every enabled engine takes a panel row even at n = 0 | Usability. This is why b1's zero was invisible | Drift rider visible at zero rather than absent |
+| 11 | Drift rider runs first on Boom and Crash | Reasoned. Under a 3/day cap the first engine takes the slots | `Refused cap` per engine |
+
+### Why the old drift rule read zero
+
+Reproduced in `check_drift_rule.py`. Boom drifts down in small uniform steps,
+so the grind dominates the noise. The old rule needed three consecutive
+counter-drift closes, and that probability collapses as the grind becomes more
+uniform. 180 days of m15, one seed:
+
+| drift / noise | up bars | old rule | b2 retracement |
+|---|---|---|---|
+| 0.3 | 39.8 % | 679 | 9875 |
+| 0.6 | 29.1 % | 313 | 11909 |
+| 1.0 | 17.7 % | 81 | 14009 |
+| 1.5 | 8.4 % | 4 | 15673 |
+| 2.5 | 2.4 % | **0** | 16775 |
+| 4.0 | 1.8 % | **0** | 16937 |
+
+The zero is not a coincidence and it is not timeframe-specific bad luck. The
+old rule is a probability that goes to zero on exactly the instrument property
+Boom is built around, which is why it produced 1195 trades on h1 and none on
+m15.
+
+### Honest caveat
+
+Change 2 is a rule change, not a parameter tweak, and the win rate of the new
+population is **unknown**. The old rule's 43.2 % was measured on h1 on a
+different selection. b2 makes the engine fire; it does not promise the
+survivors win at the same rate. `Drift Pullback Mode` is switchable back to
+`ConsecutiveCloses` so the two can be compared on one chart.
+
+### Checker
+
+```
+CHECK  SuperQuantX_Synthetics.cs  1568 lines    0 fail, 0 warn
+```
+
+Panel budget: `Rows = 64` against a worst case of about 39, so nothing is
+silently truncated the way `PanelRows = 50` truncates Alpha.
